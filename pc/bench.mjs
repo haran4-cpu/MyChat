@@ -73,7 +73,8 @@ export function pickModels(gw, { perProvider = 4, openrouterMax = 3, pool = 10 }
 export function pinsFrom(results, minAcc = 0.66) {
   const pins = {};
   for (const task of TASKS) {
-    pins[task] = results.filter((r) => r.acc[task] >= minAcc)
+    const solid = (r) => (r.acc.chat + r.acc.code + r.acc.reason) / 3 >= 0.6;   // one lucky task is not enough
+    pins[task] = results.filter((r) => r.acc[task] >= minAcc && solid(r))
       .sort((a, b) => b.acc[task] - a.acc[task] || a.ms[task] - b.ms[task]).slice(0, 4).map((r) => r.provider + ":" + r.model);
   }
   pins.fast = results.filter((r) => r.acc.chat >= 0.99).sort((a, b) => a.ms.chat - b.ms.chat).slice(0, 4).map((r) => r.provider + ":" + r.model);

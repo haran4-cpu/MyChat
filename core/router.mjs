@@ -85,7 +85,11 @@ class Stats {
 }
 
 /** OpenAI-style request -> Gemini native generateContent body. */
-const BILLING_RX = /insufficient.{0,12}(balance|credit|funds)|purchase pre-?paid credits|payment required|billing|out of credits|exceeded your monthly included credits/i;
+// Account has no money: park the provider. NOT plain "billing" (Gemini's ordinary quota message says "check your plan and billing").
+const BILLING_RX = /insufficient.{0,12}(balance|credit|funds)|purchase pre-?paid credits|payment required|out of credits|exceeded your monthly included credits/i;
+// A free daily allowance is used up: park until it resets (OpenRouter free models reset at 00:00 UTC).
+const DAILY_RX = /free-models-per-day|per.?day.{0,30}(limit|exceeded)|daily (limit|quota)/i;
+const nextUtcMidnight = () => { const d = new Date(); d.setUTCHours(24, 0, 30, 0); return d.getTime(); };
 
 export function toGemini(req) {
   const contents = [], sys = [];
@@ -317,6 +321,9 @@ export class Gateway {
         // the account itself has no credit: park the whole provider instead of trying its models one by one
         this.parked[c.provider] = { until: Date.now() + 6 * 3600e3, reason: "no credit or balance on this account" };
         this.stats.failure(c.provider, c.model, txt, 6 * 3600e3);
+      } else if (res.status === 429 && DAILY_RX.test(txt)) {
+        this.parked[c.provider] = { until: nextUtcMidnight(), reason: "free daily limit reached (resets 00:00 UTC)" };
+        this.stats.failure(c.provider, c.model, txt, 3600e3);
       } else if (res.status === 429 && /limit:\s*0\b|free.?tier.{0,40}not|not available on the free/i.test(txt)) {
         this.stats.failure(c.provider, c.model, "not on this plan: " + txt, 24 * 3600e3);   // e.g. Pro models on a free Gemini key
       } else if (res.status === 429) this.stats.failure(c.provider, c.model, "429 " + txt, Math.max(ra * 1000, 60000));

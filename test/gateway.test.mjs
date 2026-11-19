@@ -203,3 +203,21 @@ test("an account without credit is parked as a whole; a model not on the plan is
     assert.ok(!w.calls.some((c) => c.prov === "a" && c.model === "m2"));
   } finally { w.srv.closeAllConnections(); w.srv.close(); }
 });
+
+test("Gemini's ordinary quota message (mentions billing) does not park the account; a free daily limit parks it until reset", async () => {
+  const gemini429 = '{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. limit: 0"}}';
+  const w = await mockWorld({ g: { "gemini-pro": { status: 429 }, "gemini-flash": { text: "flash ok" } } });
+  const gw = gwFor(w, ["g"]);
+  const realFetch = gw.fetch;
+  gw.fetch = async (url, o) => (String(url).endsWith("/chat/completions") && JSON.parse(o.body).model === "gemini-pro")
+    ? new Response(gemini429, { status: 429 }) : realFetch(url, o);
+  try {
+    await gw.refreshModels(true);
+    const r = await gw.chat({ messages: [{ role: "user", content: "hi" }] }, { onDelta: () => {} });
+    assert.equal(r.content, "flash ok");
+    assert.equal(gw.status().providers.g.disabled, "");
+    gw.fetch = async () => new Response('{"error":{"message":"Rate limit exceeded: free-models-per-day"}}', { status: 429 });
+    await assert.rejects(gw.chat({ messages: [{ role: "user", content: "again" }] }, { onDelta: () => {} }));
+    assert.match(gw.status().providers.g.disabled, /free daily limit/);
+  } finally { w.srv.closeAllConnections(); w.srv.close(); }
+});
