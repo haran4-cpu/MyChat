@@ -4,7 +4,7 @@
 import { spawn } from "node:child_process";
 import { priorFor } from "../core/providers.mjs";
 import { run } from "../core/reason.mjs";
-import { SET, HEDGE } from "../core/truthset.mjs";
+import { SET, SET_HARD, HEDGE, normAnswer } from "../core/truthset.mjs";
 
 export const PROBES = [
   { task: "reason", q: "What is 17.5% of 2,480? Answer with the number only.", ok: /\b434\b/ },
@@ -84,16 +84,17 @@ export function pinsFrom(results, minAcc = 0.66) {
 export class Bench {
   constructor(gw) { this.gw = gw; this.state = { running: false }; }
 
-  async start({ truth = true, truthLimit = SET.length, onPins = null } = {}) {
+  async start({ truth = true, truthLimit = 999, truthSet = "hard", models = true, onPins = null } = {}) {
+    const QS = (truthSet === "basic" ? SET : truthSet === "all" ? [...SET, ...SET_HARD] : SET_HARD).slice(0, truthLimit);
     if (this.state.running) return this.state;
     const st = this.state = { running: true, startedAt: Date.now(), phase: "models", done: 0, total: 0, models: [], truth: null, log: [] };
     const gw = this.gw;
     (async () => {
       try {
         await gw.refreshModels(true);
-        const picks = pickModels(gw);
+        const picks = models ? pickModels(gw) : [];
         st.total = Object.values(picks.reduce((a, c) => ((a[c.provider] = c.keep), a), {})).reduce((a, k) => a + k, 0) * PROBES.length
-                   + (truth ? truthLimit * 2 : 0);
+                   + (truth ? QS.length * 2 : 0);
         const byProvider = {};
         for (const c of picks) (byProvider[c.provider] ||= []).push(c);
         // providers in parallel (separate rate limits), models of one provider one after another
@@ -109,7 +110,7 @@ export class Bench {
               try {
                 const r = await gw._call(c, { messages: [{ role: "user", content: pr.q }], temperature: 0, max_tokens: pr.task === "code" ? 2000 : 600 }, {}, () => {});
                 text = r.content;
-                ok = pr.test ? await runCodeTest(extractCode(text), pr.test) : pr.ok.test(text);
+                ok = pr.test ? await runCodeTest(extractCode(text), pr.test) : pr.ok.test(normAnswer(text));
               } catch (e) { row.errors++; text = "ERROR " + String(e.message).slice(0, 120); }
               const ms = Date.now() - t0;
               (per[pr.task] ||= []).push({ ok, ms });
@@ -129,18 +130,17 @@ export class Bench {
             st.log.push(`${c.provider}:${c.model} chat ${row.acc.chat} code ${row.acc.code} reason ${row.acc.reason}`);
           }
         }));
-        st.pins = pinsFrom(st.models);
-        if (onPins) onPins(st.pins);
+        if (models) { st.pins = pinsFrom(st.models); if (onPins) onPins(st.pins); }
         if (truth) {
           st.phase = "truth";
           const rows = [];
-          for (const [q, rx, kind] of SET.slice(0, truthLimit)) {
+          for (const [q, rx, kind] of QS) {
             for (const mode of ["fast", "verified"]) {
               const t0 = Date.now();
               let text = "";
               try { text = (await run(gw, { messages: [{ role: "user", content: q }] }, { mode })).content; }
               catch (e) { text = "ERROR " + e.message; }
-              const body = text.split("\n---\n")[0];
+              const body = normAnswer(text.split("\n---\n")[0]);
               const ok = rx.test(body);
               rows.push({ q, kind, mode, ok, confidentWrong: !ok && !HEDGE.test(body), ms: Date.now() - t0, answer: body.slice(0, 200) });
               st.done++;

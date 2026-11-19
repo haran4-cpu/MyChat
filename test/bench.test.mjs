@@ -21,3 +21,12 @@ test("pins: most accurate first, then fastest; fast = fastest among fully correc
   assert.deepEqual(p.reason, ["c:m3", "a:m1"]);
   assert.deepEqual(p.fast, ["b:m2", "a:m1"]);
 });
+
+test("scoring survives typographic spaces, LaTeX grouping and trailing zeros (all seen in real answers)", async () => {
+  const { SET, normAnswer } = await import("../core/truthset.mjs");
+  const rx = (q) => SET.find((s) => s[0].startsWith(q))[1];
+  assert.match(normAnswer("\\(2^{20} = 1{,}048{,}576\\)."), rx("What is 2 to the power"));
+  assert.match(normAnswer("by **Gabriel García Márquez**".normalize("NFD")), rx("Who wrote the novel"));
+  assert.match(normAnswer("painted by Vincent van Gogh"), rx("Who painted"));
+  assert.match(normAnswer("**Final price: \\$78.20**"), rx("If a price of 80"));
+});

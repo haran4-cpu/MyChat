@@ -10,7 +10,7 @@ const HOME = process.env.MYCHAT_HOME || path.join(process.env.APPDATA || path.jo
 const URL_ = process.env.MYCHAT_URL || "http://127.0.0.1:11500";
 const token = fs.readFileSync(path.join(HOME, "token"), "utf8").trim();
 
-import { SET, HEDGE } from "../core/truthset.mjs";
+import { SET, HEDGE, normAnswer } from "../core/truthset.mjs";
 export { SET };
 
 async function ask(model, q) {
@@ -30,7 +30,7 @@ async function main() {
   for (const [q, rx, kind] of SET.slice(0, limit)) {
     for (const m of modes) {
       const a = await ask("mychat/" + m, q).catch((e) => ({ text: "ERROR " + e.message, ms: 0, trace: [] }));
-      const body = a.text.split("\n---\n")[0];                      // ignore the Truth Engine footer when scoring
+      const body = normAnswer(a.text.split("\n---\n")[0]);                      // ignore the Truth Engine footer when scoring
       const ok = rx.test(body);
       rows.push({ q, kind, mode: m, ok, confidentWrong: !ok && !HEDGE.test(body), ms: a.ms, calls: a.trace.length, answer: body.slice(0, 300) });
       console.log(`${ok ? "✓" : "✗"} [${m}] ${q.slice(0, 60)} (${(a.ms / 1000).toFixed(1)}s)`);

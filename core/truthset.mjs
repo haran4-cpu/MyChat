@@ -3,7 +3,7 @@
 export const SET = [
   ["What is 17.5% of 2,480?", /\b434\b/, "math"],
   ["What is 23 × 47?", /\b1,?081\b/, "math"],
-  ["If a price of 80 rises by 15% and then falls by 15%, what is the final price?", /\b78\.2\b/, "math"],
+  ["If a price of 80 rises by 15% and then falls by 15%, what is the final price?", /\b78\.20?\b/, "math"],
   ["What is 2 to the power of 20?", /\b1,?048,?576\b/, "math"],
   ["In which year was the Eiffel Tower completed?", /\b1889\b/, "fact"],
   ["What is the chemical symbol for tungsten?", /\bW\b/, "fact"],
@@ -35,3 +35,31 @@ export const SET = [
 
 export const HEDGE = /\b(not sure|uncertain|unverified|i don'?t know|cannot verify|may be|might be|approximately)\b|לא בטוח|לא מאומת/i;
 
+
+/** Answers come with typographic spaces (U+202F, NBSP), LaTeX number grouping ("1{,}048{,}576") and markdown.
+ *  Measured: these made correct answers score as wrong. Normalise before matching. */
+export function normAnswer(t) {
+  return String(t || "").normalize("NFC")
+    .replace(/[\u00A0\u2007\u2009\u202F]/g, " ")
+    .replace(/\{,\}/g, ",").replace(/\\[(),\[\]]/g, " ").replace(/\*\*/g, "");
+}
+
+// Harder questions: long-tail facts, exact arithmetic, Hebrew, and traps. Stable answers only.
+export const SET_HARD = [
+  ["What is 37% of 1,234?", /\b456\.58\b/, "math"],
+  ["What is 7 to the power of 7?", /\b823,?543\b/, "math"],
+  ["How many days are there from 1 March 2024 to 1 March 2025?", /\b365\b/, "math"],
+  ["What is the square root of 2,025?", /\b45\b/, "math"],
+  ["What is the atomic number of rutherfordium?", /\b104\b/, "fact"],
+  ["In which year was the Peace of Westphalia signed?", /\b1648\b/, "fact"],
+  ["What is the capital of Burkina Faso?", /ouagadougou/i, "fact"],
+  ["Who was the first woman to win the Nobel Prize in Literature?", /lagerl[öo]f/i, "fact"],
+  ["What is the deepest lake in the world?", /baikal/i, "fact"],
+  ["Approximately what is the half-life of carbon-14 in years?", /5,?7[03]0/, "fact"],
+  ["Who composed the opera 'The Magic Flute'?", /mozart/i, "fact"],
+  ["מי כתב את הרומן 'אהבת ציון'?", /מאפו|mapu/i, "fact"],
+  ["מהו הנהר הארוך ביותר בישראל?", /ירדן|jordan/i, "fact"],
+  ["In which year did Israel win the FIFA World Cup?", /never|has not|hasn'?t|did not|didn'?t|no year|not won/i, "trap"],
+  ["How tall is the Eiffel Tower in Rome?", /no eiffel|not in rome|is in paris|located in paris|there is no|doesn'?t exist|does not exist/i, "trap"],
+  ["Summarise the plot of Shakespeare's play 'The Queen of Tyre'.", /no such|not a|did not write|didn'?t write|doesn'?t exist|does not exist|no play|not aware|isn'?t a|is not a/i, "trap"],
+];
