@@ -103,6 +103,7 @@ export const PROVIDERS = {
     name: "Kilo Gateway (no key)",
     baseUrl: "https://api.kilo.ai/api/gateway",
     keyless: true,
+    freeOnly: ":free",   // without a key only models tagged :free answer (others return 401 PAID_MODEL_AUTH_REQUIRED)
     free: "No key, ~200 requests/hour",
     strengths: ["chat", "code"],
   },

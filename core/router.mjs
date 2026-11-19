@@ -151,7 +151,8 @@ export class Gateway {
         if (!r.ok) throw new Error("HTTP " + r.status);
         const j = await r.json();
         const list = (j.data || j.models || []).map((m) => (m.id || m.name || "").replace(/^models\//, "")).filter(Boolean);
-        this.models[id] = list.filter((m) => !NOT_CHAT.test(m) && (!/:free$/.test(m) || id === "openrouter"));
+        this.models[id] = list.filter((m) => !NOT_CHAT.test(m) && (!/:free$/.test(m) || id === "openrouter" || p.freeOnly));
+        if (p.freeOnly && !this.keys[id]) this.models[id] = this.models[id].filter((m) => m.endsWith(p.freeOnly));
         if (id === "openrouter" && !this.paidOpenRouter) this.models[id] = this.models[id].filter((m) => m.endsWith(":free"));
         this.modelsAt[id] = Date.now();
       } catch (e) {
@@ -228,7 +229,10 @@ export class Gateway {
         if (e.fatal) break;
       }
     }
-    throw new GatewayError("All models failed: " + attempts.map((a) => `${a.provider}:${a.model} (${a.error})`).join("; "), attempts);
+    const short = (e) => String(e).replace(/\s+/g, " ").slice(0, 90);
+    throw new GatewayError(attempts.length
+      ? `All models failed (${attempts.length} tried). ` + attempts.slice(0, 3).map((a) => `${a.provider}:${a.model} — ${short(a.error)}`).join("; ")
+      : "All models failed: no model is available (connect a provider)", attempts);
   }
 
   async _call(c, req, opt, onDelta) {

@@ -21,6 +21,7 @@ import { Ledger } from "../core/ledger.mjs";
 
 const HOME = process.env.MYCHAT_HOME || path.join(process.env.APPDATA || path.join(os.homedir(), ".config"), "MyChat");
 const PORT = Number(process.env.MYCHAT_PORT || 11500);
+const STARTED_AT = Date.now();
 fs.mkdirSync(HOME, { recursive: true });
 const F = (n) => path.join(HOME, n);
 const readJson = (n, d) => { try { return JSON.parse(fs.readFileSync(F(n), "utf8")); } catch { return d; } };
@@ -185,7 +186,7 @@ const server = http.createServer(async (req, res) => {
     // DNS-rebinding guard: a web page that re-points its own domain at 127.0.0.1 must not reach the Accounts page or the API
     const host = String(req.headers.host || "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
     if (!["127.0.0.1", "localhost", "::1"].includes(host)) return send(res, 403, { error: { message: "forbidden host" } });
-    if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true });
+    if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true, startedAt: STARTED_AT, pid: process.pid });
     if (req.method === "GET" && url.pathname === "/connections") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "X-Frame-Options": "DENY", "Cache-Control": "no-store" });
       return res.end(connectionsPage(url.searchParams.get("connected") ? "✓ OpenRouter connected — Claude, GPT, Gemini, GLM and more are now available." : ""));
@@ -231,6 +232,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/v1/chat/completions") return await completions(req, res);
     if (req.method === "GET" && url.pathname === "/status") return send(res, 200, gw.status());
+    if (req.method === "POST" && url.pathname === "/admin/shutdown") {   // used by the Open WebUI function to reload updated code
+      send(res, 200, { ok: true });
+      setTimeout(() => process.exit(0), 150);
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/connections/paste") {
       const b = await body(req);
       const found = detectKeys(b.text);

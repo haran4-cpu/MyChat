@@ -1,7 +1,7 @@
 """
 title: MyChat
 author: MyChat (multi-model gateway)
-version: 1.0.0
+version: 1.1.0
 required_open_webui_version: 0.6.0
 description: MyChat inside Open WebUI. Cloud and local models combined per task (Auto, Max, Consensus, Verified/Truth Engine, Fast, Private). Starts the MyChat gateway on this PC by itself; accounts and keys are managed from the "MyChat · Accounts" model without leaving Open WebUI.
 """
@@ -72,15 +72,66 @@ class Pipe:
                 return c
         return ""
 
-    async def _healthy(self, client: httpx.AsyncClient) -> bool:
+    async def _health(self, client: httpx.AsyncClient) -> Optional[dict]:
         try:
             r = await client.get(self.valves.MYCHAT_URL.rstrip("/") + "/health", timeout=1.5)
-            return r.status_code == 200
+            return r.json() if r.status_code == 200 else None
+        except Exception:
+            return None
+
+    async def _healthy(self, client: httpx.AsyncClient) -> bool:
+        return (await self._health(client)) is not None
+
+    def _code_mtime(self) -> float:
+        d = Path(self.valves.MYCHAT_DIR)
+        files = list((d / "core").glob("*.mjs")) + [d / "pc" / "server.mjs"]
+        return max((f.stat().st_mtime for f in files if f.exists()), default=0)
+
+    @staticmethod
+    def _kill_port_owner(port: int) -> bool:
+        """Old gateways have no shutdown endpoint: stop the node.exe that listens on our port (and nothing else)."""
+        if os.name != "nt":
+            return False
+        try:
+            out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=10).stdout
+            pids = {l.split()[-1] for l in out.splitlines() if f"127.0.0.1:{port} " in l and "LISTENING" in l}
+            done = False
+            for pid in pids:
+                img = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=10).stdout
+                if img.lower().startswith('"node.exe"'):
+                    subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True, timeout=10)
+                    done = True
+            return done
         except Exception:
             return False
 
+    async def _reload_if_updated(self, client, h: dict, emitter) -> None:
+        """When the MyChat files on disk are newer than the running gateway, restart it so updates apply by themselves."""
+        started = (h.get("startedAt") or 0) / 1000
+        if started and self._code_mtime() <= started + 1:
+            return
+        await self._status(emitter, "MyChat was updated — reloading the gateway…")
+        token = self._token()
+        try:
+            await client.post(self.valves.MYCHAT_URL.rstrip("/") + "/admin/shutdown", headers={"Authorization": "Bearer " + token}, timeout=5)
+        except Exception:
+            pass
+        for _ in range(12):
+            await asyncio.sleep(0.25)
+            if not await self._healthy(client):
+                return
+        port = urllib.parse.urlparse(self.valves.MYCHAT_URL).port or 11500
+        await asyncio.to_thread(self._kill_port_owner, port)
+        for _ in range(12):
+            await asyncio.sleep(0.25)
+            if not await self._healthy(client):
+                return
+
     async def _ensure(self, client: httpx.AsyncClient, emitter=None) -> str:
         """Returns "" when the gateway is up, otherwise a message for the person."""
+        h = await self._health(client)
+        if h is not None:
+            await self._reload_if_updated(client, h, emitter)
         if await self._healthy(client):
             return ""
         if not self.valves.AUTO_START:

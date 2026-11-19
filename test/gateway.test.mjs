@@ -140,3 +140,12 @@ test("a rejected key disables that provider instead of retrying it forever", asy
   assert.ok(!g.enabledProviders().includes("a"));
   w.srv.closeAllConnections(); w.srv.close();
 });
+
+test("a keyless gateway that only serves :free models without a key lists only those", async () => {
+  const w = await mockWorld({ k: { "google/gemini-4-neon": { text: "paid" }, "z-ai/glm-5:free": { text: "hi from glm" } } });
+  const gw = new Gateway({ keys: {}, allowKeyless: true, extraProviders: { k: { name: "k", baseUrl: `${w.url}/k`, keyless: true, freeOnly: ":free" } } });
+  for (const id of Object.keys(gw.providers)) if (id !== "k") gw.disabled[id] = "off in this test";
+  await gw.refreshModels(true);
+  assert.deepEqual(gw.models.k, ["z-ai/glm-5:free"]);
+  w.srv.close();
+});
