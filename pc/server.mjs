@@ -183,6 +183,8 @@ ${flash ? `<div class=flash>${flash}</div>` : ""}
 <div class=card style="margin:12px 0"><div class=h><b>Measure my models</b><span class=off id=bst></span></div>
 <div class=s>Asks every connected account short questions with known answers (facts, Hebrew, exact math, code that is actually run) and routes each kind of task to the models that really got it right. Also compares the Truth Engine with a single model. Uses a little of each free quota; takes 10–30 minutes.</div>
 <div class=a><button class=btn onclick="bstart()">Start</button></div><pre id=bout style="white-space:pre-wrap;font-size:12px;color:#bbb"></pre></div>
+<div class=card style="margin:12px 0"><div class=h><b>Connection check</b></div><div class=s>Tests every evidence source the Truth Engine uses (Wikipedia, search keys).</div>
+<div class=a><button class="btn ghost" onclick="diag()">Run check</button></div><pre id=dout style="white-space:pre-wrap;font-size:12px;color:#bbb"></pre></div>
 <h2>Models</h2><div class=grid>${order.filter((id) => PROVIDERS[id]).map(card).join("")}</div>
 <h2>Web evidence for the Truth Engine</h2><div class=s>Wikipedia is always on (no key). Each search key below adds broader, fresher evidence.</div>
 <div class=grid>${Object.entries(SEARCH_PROVIDERS).map(([id, p]) => `<div class=card><div class=h><b>${p.name}</b>${keys[id] ? "<span class=ok>✓ connected</span>" : "<span class=off>not connected</span>"}</div><div class=s>${p.note}</div><div class=a><a class="btn ghost" href="${p.keyUrl}" target=_blank rel=noopener>${keys[id] ? "Manage key" : "Get key"}</a>${keys[id] ? ` <button class=x onclick="rm('${id}')">Remove</button>` : ""}</div></div>`).join("")}</div>
@@ -192,6 +194,8 @@ async function paste(text){if(!text||!text.trim())return;out.textContent='Checki
 out.textContent=j.results.map(x=>(x.ok?'✓ ':'✗ ')+x.name+(x.ok?' — '+x.models+' models':' — '+x.error)).join('\\n')||'No key recognised';if(j.results.some(x=>x.ok))setTimeout(()=>location.reload(),1200)}
 document.addEventListener('paste',e=>{if(e.target===t)return;const s=(e.clipboardData||window.clipboardData).getData('text');if(s){t.value=s;paste(s)}});
 async function rm(id){await fetch('/connections/remove',{method:'POST',headers:H,body:JSON.stringify({provider:id})});location.reload()}
+async function diag(){dout.textContent='checking…';const j=await (await fetch('/diag',{headers:H})).json();
+dout.textContent=j.checks.map(c=>(c.ok?'✓ ':'✗ ')+c.name+'  '+c.ms+' ms'+(c.error?'  '+c.error:'')).join('\\n')+(j.recentErrors.length?'\\n\\nRecent errors:\\n'+j.recentErrors.map(e=>e.where+': '+e.error).join('\\n'):'')}
 async function bstart(){await fetch('/bench/start',{method:'POST',headers:H,body:'{}'});bpoll()}
 async function bpoll(){const j=await (await fetch('/bench',{headers:H})).json();if(!j.startedAt)return;
 bst.textContent=j.running?('running · '+j.phase+' · '+j.done+'/'+j.total):(j.error?'✗ '+j.error:'✓ done');
@@ -263,6 +267,7 @@ const server = http.createServer(async (req, res) => {
         onPins: (pins) => { if (b.apply !== false) { settings.pins = pins; writeJson("settings.json", settings); gw.pins = pins; } } });
       return send(res, 200, { running: st.running, total: st.total });
     }
+    if (req.method === "GET" && url.pathname === "/diag") return send(res, 200, await search.diagnose());
     if (req.method === "GET" && url.pathname === "/bench") return send(res, 200, bench ? bench.state : { running: false });
     if (req.method === "POST" && url.pathname === "/admin/shutdown") {   // used by the Open WebUI function to reload updated code
       send(res, 200, { ok: true });

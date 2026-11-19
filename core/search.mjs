@@ -40,6 +40,10 @@ export function quoteFound(quote, text) {
   return false;
 }
 
+// Wikimedia requires scripts to identify themselves; browsers can't set User-Agent, so Api-User-Agent is sent as well.
+const WIKI_UA = "MyChat/0.3 (https://github.com/haran4-cpu/MyChat)";
+const WIKI_HEADERS = typeof window === "undefined" ? { "User-Agent": WIKI_UA, "Api-User-Agent": WIKI_UA } : { "Api-User-Agent": WIKI_UA };
+
 export class Search {
   constructor({ keys = {}, fetch: f, enabled } = {}) {
     this.keys = keys;
@@ -50,19 +54,51 @@ export class Search {
 
   async _json(url, init = {}) {
     const r = await this.fetch(url, { ...init, signal: AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status} from ${new URL(url).host}`);
     return r.json();
   }
 
+  _err(where, e) {   // failures used to be swallowed silently; keep the last few for the connection check
+    (this.errors ||= []).push({ at: Date.now(), where, error: String(e?.message || e).slice(0, 160) });
+    if (this.errors.length > 20) this.errors.shift();
+  }
+
+  /** Wikipedia, identified as Wikimedia asks (unidentified scripts get blocked). Hebrew questions search he + en,
+   *  and a long sentence that finds nothing is retried with its quoted title or key words. */
   async wikipedia(q, n = 3) {
-    const lang = isHebrew(q) ? "he" : "en";
-    const base = `https://${lang}.wikipedia.org/w/api.php?format=json&origin=*`;
-    const s = await this._json(`${base}&action=query&list=search&srlimit=${n}&srsearch=${encodeURIComponent(q)}`);
-    const titles = (s.query?.search || []).map((x) => x.title);
-    if (!titles.length) return [];
-    const e = await this._json(`${base}&action=query&prop=extracts&explaintext=1&exlimit=${n}&titles=${encodeURIComponent(titles.join("|"))}`);
-    return Object.values(e.query?.pages || {}).map((p) => ({ title: p.title, url: `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(p.title.replace(/ /g, "_"))}`,
-      snippet: (p.extract || "").slice(0, 400), text: (p.extract || "").slice(0, 60000), source: "wikipedia" }));
+    const langs = isHebrew(q) ? ["he", "en"] : ["en"];
+    const quoted = /['"“”«»‘’`״]([^'"“”«»‘’`״]{2,60})['"“”«»‘’`״]/.exec(q)?.[1];
+    const short = q.replace(/[?!.,:;()]/g, " ").split(/\s+/).filter((w) => w.length > 2).slice(0, 6).join(" ");
+    const tries = [...new Set([q, quoted, short].filter(Boolean))];
+    const out = [];
+    for (const lang of langs) {
+      const base = `https://${lang}.wikipedia.org/w/api.php?format=json&origin=*`;
+      let titles = [];
+      for (const t of tries) {
+        try {
+          const s = await this._json(`${base}&action=query&list=search&srlimit=${n}&srsearch=${encodeURIComponent(t)}`, { headers: WIKI_HEADERS });
+          titles = (s.query?.search || []).map((x) => x.title);
+        } catch (e) { this._err("wikipedia-" + lang, e); break; }
+        if (titles.length) break;
+      }
+      if (!titles.length) continue;
+      try {
+        const e = await this._json(`${base}&action=query&prop=extracts&explaintext=1&exlimit=${n}&titles=${encodeURIComponent(titles.join("|"))}`, { headers: WIKI_HEADERS });
+        out.push(...Object.values(e.query?.pages || {}).map((p) => ({ title: p.title, url: `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(p.title.replace(/ /g, "_"))}`,
+          snippet: (p.extract || "").slice(0, 400), text: (p.extract || "").slice(0, 60000), source: "wikipedia" })));
+      } catch (e) { this._err("wikipedia-" + lang, e); }
+      if (out.length >= n) break;
+    }
+    return out;
+  }
+
+  /** Quick health check of every evidence source (shown on the Accounts page). */
+  async diagnose() {
+    const t = async (name, fn) => { const t0 = Date.now(); try { const r = await fn(); return { name, ok: r.length > 0, results: r.length, ms: Date.now() - t0 }; }
+      catch (e) { return { name, ok: false, error: String(e.message).slice(0, 160), ms: Date.now() - t0 }; } };
+    const checks = [t("Wikipedia (Hebrew)", () => this.wikipedia("אהבת ציון אברהם מאפו", 1)), t("Wikipedia (English)", () => this.wikipedia("Eiffel Tower", 1)),
+      ...this.enabled.map((p) => t(SEARCH_PROVIDERS[p]?.name || p, () => this.provider(p, "Eiffel Tower height", 2)))];
+    return { checks: await Promise.all(checks), recentErrors: (this.errors || []).slice(-8) };
   }
 
   async provider(p, q, n) {
@@ -114,7 +150,8 @@ export class Search {
   async evidence(q, { n = 4, fetchPages = 3 } = {}) {
     const key = "e:" + q;
     if (this.cache.has(key)) return this.cache.get(key);
-    const runs = [this.wikipedia(q, 2).catch(() => []), ...this.enabled.slice(0, 2).map((p) => this.provider(p, q, n).catch(() => []))];
+    const runs = [this.wikipedia(q, 2).catch((e) => (this._err("wikipedia", e), [])),
+      ...this.enabled.slice(0, 2).map((p) => this.provider(p, q, n).catch((e) => (this._err(p, e), [])))];
     const all = (await Promise.all(runs)).flat();
     const seen = new Set(), out = [];
     for (const r of all) { if (!r.url || seen.has(r.url)) continue; seen.add(r.url); out.push(r); }

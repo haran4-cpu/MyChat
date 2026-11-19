@@ -149,3 +149,25 @@ test("auto mode hands factual questions to the Truth Engine and leaves chit-chat
   assert.notEqual(r2.mode, "verified");
   assert.equal(calls.length - before, 1);
 });
+
+test("Wikipedia: identified request, Hebrew falls back to the quoted title and to English, failures are recorded", async () => {
+  const { Search } = await import("../core/search.mjs");
+  const seen = [];
+  const fake = async (url, init) => {
+    const u = new URL(url); seen.push({ host: u.host, q: u.searchParams.get("srsearch"), ua: init?.headers?.["User-Agent"] || init?.headers?.["Api-User-Agent"] });
+    const j = (o) => new Response(JSON.stringify(o), { status: 200 });
+    if (u.searchParams.get("list") === "search") {
+      if (u.host.startsWith("he.") && u.searchParams.get("srsearch") === "אהבת ציון") return j({ query: { search: [{ title: "אהבת ציון" }] } });
+      return j({ query: { search: [] } });
+    }
+    return j({ query: { pages: { 1: { title: "אהבת ציון", extract: "אהבת ציון הוא רומן מאת אברהם מאפו" } } } });
+  };
+  const s = new Search({ fetch: fake });
+  const r = await s.wikipedia("מי כתב את הרומן 'אהבת ציון'?", 1);
+  assert.equal(r[0].title, "אהבת ציון");
+  assert.ok(seen.every((x) => /MyChat/.test(x.ua)));
+  assert.ok(seen.some((x) => x.q === "אהבת ציון"));
+  const bad = new Search({ fetch: async () => new Response("blocked", { status: 403 }) });
+  assert.deepEqual(await bad.evidence("Eiffel Tower height"), []);
+  assert.match(bad.errors[0].error, /403/);
+});
