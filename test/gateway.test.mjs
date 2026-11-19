@@ -221,3 +221,17 @@ test("Gemini's ordinary quota message (mentions billing) does not park the accou
     assert.match(gw.status().providers.g.disabled, /free daily limit/);
   } finally { w.srv.closeAllConnections(); w.srv.close(); }
 });
+
+test("offline: when every cloud model fails, the local model still answers (it is always the last resort)", async () => {
+  const cloud = {};
+  for (let i = 0; i < 12; i++) cloud["m" + i] = { status: 503 };
+  const w = await mockWorld({ c: cloud, loc: { "qwen-local": { text: "local answer" } } });
+  const gw = new Gateway({ keys: { c: "k" }, allowKeyless: false, allowLocal: true,
+    extraProviders: { c: { name: "c", baseUrl: `${w.url}/c` }, loc: { name: "loc", baseUrl: `${w.url}/loc`, local: true, keyless: true } } });
+  for (const id of Object.keys(gw.providers)) if (!["c", "loc"].includes(id)) gw.disabled[id] = "off";
+  try {
+    await gw.refreshModels(true);
+    const r = await gw.chat({ messages: [{ role: "user", content: "hi" }] }, { onDelta: () => {} });
+    assert.equal(r.content, "local answer");
+  } finally { w.srv.closeAllConnections(); w.srv.close(); }
+});

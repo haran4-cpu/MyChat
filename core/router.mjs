@@ -269,6 +269,13 @@ export class Gateway {
       const [pp, ...mm] = opt.prefer.split(":"), pm = mm.join(":");
       list = [{ provider: pp, model: pm, score: 99, family: family(pm) }, ...list.filter((c) => !(c.provider === pp && c.model === pm))];
     }
+    // Offline safety net: a local model is always the last resort, even when 8 cloud candidates rank above it
+    // (without internet they all fail fast and the local one answers).
+    if (!list.some((c) => this.providers[c.provider]?.local)) {
+      const local = this.candidates(task, { needTools: !!req.tools?.length, needVision: hasImages(req.messages), privateData: opt.privateData,
+                                            exclude: opt.exclude, limit: 200 }).find((c) => this.providers[c.provider]?.local);
+      if (local) list.push(local);
+    }
     if (!list.length) throw new GatewayError("No model available: add a key in Connections, or allow the free no-key channels.", []);
     const attempts = [];
     let partial = "";
