@@ -39,3 +39,10 @@ node pc/server.mjs        # then open http://127.0.0.1:11500/connections to add 
 npm test
 ```
 State (keys, token, stats) lives in `%APPDATA%\MyChat`.
+
+## Inside Open WebUI (recommended on the PC)
+
+`openwebui/mychat_function.py` is an Open WebUI function. Once installed (Admin Panel → Functions), the MyChat models appear
+in Open WebUI's model list, the gateway is started automatically on first use, and **MyChat · Accounts & keys** shows
+every provider, a "Sign in with Google → OpenRouter" link that returns to the chat, and a dialog for pasting keys.
+A message that is only an API key is connected, never sent to a model.

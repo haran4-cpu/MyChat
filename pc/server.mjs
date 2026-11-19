@@ -194,7 +194,10 @@ const server = http.createServer(async (req, res) => {
       if (url.searchParams.get("t") !== token) return send(res, 401, { error: { message: "open this from the Accounts page" } });
       const { verifier, challenge } = await pkcePair();
       const nonce = crypto.randomBytes(12).toString("hex");
-      pendingOAuth.set(nonce, { verifier, at: Date.now() });
+      // where to return after sign-in: only a page on this PC (e.g. Open WebUI at 127.0.0.1:8080), never an outside site
+      let back = "";
+      try { const b = new URL(url.searchParams.get("back") || ""); if (["127.0.0.1", "localhost"].includes(b.hostname) && /^https?:$/.test(b.protocol)) back = b.href; } catch { /* none */ }
+      pendingOAuth.set(nonce, { verifier, at: Date.now(), back });
       const cb = `http://localhost:${PORT}/oauth/openrouter/callback/${nonce}`;
       res.writeHead(302, { Location: openRouterAuthUrl(cb, challenge) });
       return res.end();
@@ -207,6 +210,12 @@ const server = http.createServer(async (req, res) => {
         saveKey("openrouter", await openRouterExchange(url.searchParams.get("code") || "", p.verifier));
         build();
         await gw.refreshModels(true);
+        if (p.back) {
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+          return res.end(`<!doctype html><meta charset=utf-8><body style="font:16px system-ui;background:#111216;color:#e8e8ea;text-align:center;padding-top:80px">
+<h2>✓ OpenRouter connected</h2><p>Claude, GPT, Gemini, GLM and more are now available in MyChat.</p>
+<p><a style="color:#7aa7ff" href="${p.back.replace(/"/g, "&quot;")}">Back to the chat</a></p><script>setTimeout(()=>{try{window.close()}catch(e){};location.href=${JSON.stringify(p.back)}},1500)</script>`);
+        }
         res.writeHead(302, { Location: "/connections?connected=openrouter" });
         return res.end();
       } catch (e) {
