@@ -1,7 +1,7 @@
 """
 title: MyChat
 author: MyChat (multi-model gateway)
-version: 1.1.0
+version: 1.2.0
 required_open_webui_version: 0.6.0
 description: MyChat inside Open WebUI. Cloud and local models combined per task (Auto, Max, Consensus, Verified/Truth Engine, Fast, Private). Starts the MyChat gateway on this PC by itself; accounts and keys are managed from the "MyChat · Accounts" model without leaving Open WebUI.
 """
@@ -179,7 +179,7 @@ class Pipe:
                 lines.append(f"✗ **{x.get('name')}** — {x.get('error', 'the key was rejected')}")
         return "\n".join(lines)
 
-    async def _accounts(self, client, token: str, __event_call__) -> str:
+    async def _accounts_table(self, client, token: str) -> str:
         base = self.valves.MYCHAT_URL.rstrip("/")
         st = (await client.get(base + "/status", headers={"Authorization": "Bearer " + token}, timeout=20)).json()
         prov = st.get("providers") or {}
@@ -202,21 +202,12 @@ class Pipe:
                 state = "—"
             link = f"[get key]({p['keyUrl']})" if p.get("keyUrl") else ""
             out.append(f"| {p.get('name', pid)} | {state} | {p.get('models') or ''} | {(p.get('free') or '')[:90]} {link} |")
-        out += ["", "To add a key: answer the dialog that opens now, or paste the key as a message in this chat. "
-                "Keys are checked live and stored only on this PC."]
-        msg = "\n".join(out)
-        if __event_call__:
-            try:
-                val = await __event_call__({"type": "input", "data": {
-                    "title": "Add API keys to MyChat",
-                    "message": "Paste one or more keys (Gemini, NVIDIA, Groq, OpenRouter, Anthropic, Hugging Face, Mistral, Brave, Tavily…). "
-                               "The provider is detected automatically. Cancel to skip.",
-                    "placeholder": "AIza… · nvapi-… · gsk_… · sk-or-… · sk-ant-… · hf_…"}})
-                if isinstance(val, str) and val.strip():
-                    msg += "\n\n" + await self._paste(client, token, val)
-            except Exception:
-                pass
-        return msg
+        free = [p.get("name", k) for k, p in prov.items() if p.get("keyless") and p.get("models")]
+        if free:
+            out += ["", "Working now without any key: " + ", ".join(free) + "."]
+        out += ["", "**To add a key, paste it as a message in this chat** (several at once is fine). It is checked live, stored only "
+                "on this PC, and never sent to a model."]
+        return "\n".join(out)
 
     # ---------------------------------------------------------------- chat
     async def pipe(self, body: dict, __user__: Optional[dict] = None, __event_emitter__=None,
@@ -241,7 +232,7 @@ class Pipe:
                 yield await self._paste(client, token, last)
                 return
             if model == "accounts" or last.strip().lower() in ("/keys", "/accounts", "/connect"):
-                yield await self._accounts(client, token, __event_call__)
+                yield await self._accounts_table(client, token)
                 return
 
             req = {"model": "mychat/" + model, "messages": msgs, "stream": True}
