@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { Gateway } from "../core/router.mjs";
 import { run, MODES } from "../core/reason.mjs";
 import { PROVIDERS } from "../core/providers.mjs";
+import { pkcePair, openRouterAuthUrl, openRouterExchange, detectKeys, validateKey, identifyPlainKey, CONNECT } from "../core/accounts.mjs";
 
 const HOME = process.env.MYCHAT_HOME || path.join(process.env.APPDATA || path.join(os.homedir(), ".config"), "MyChat");
 const PORT = Number(process.env.MYCHAT_PORT || 11500);
@@ -121,25 +122,50 @@ async function gwLocalOnly(oreq, stream, res, id, created, model) {
   res.end();
 }
 
-function connectionsPage() {
+const pendingOAuth = new Map(); // nonce -> { verifier, at }
+
+function saveKey(provider, key) {
   const keys = readJson("keys.json", {});
-  const rows = Object.entries(PROVIDERS).filter(([, p]) => !p.keyless).map(([id, p]) => {
-    const has = !!keys[id];
-    return `<tr><td><b>${p.name}</b><div class=s>${p.free || ""}</div></td>
-      <td>${p.keyUrl ? `<a href="${p.keyUrl}" target=_blank rel=noopener>Get a key</a><div class=s>${p.signIn || ""}</div>` : ""}</td>
-      <td><input id="k_${id}" type=password placeholder="${has ? "saved ✓ (paste to replace)" : "paste key"}"></td></tr>`;
-  }).join("");
-  return `<!doctype html><meta charset=utf-8><title>MyChat · Connections</title>
-<style>body{font:15px system-ui;max-width:980px;margin:30px auto;color:#e8e8ea;background:#141418}td{padding:10px;border-bottom:1px solid #2a2a33;vertical-align:top}
-a{color:#7cc4ff}.s{font-size:12px;color:#9a9aa5;margin-top:4px}input{width:100%;padding:8px;background:#1d1d24;border:1px solid #333;color:#fff;border-radius:6px}
-button{padding:10px 18px;border:0;border-radius:8px;background:#3d7bfd;color:#fff;font-weight:600;cursor:pointer}#out{margin-top:14px;white-space:pre-wrap}</style>
-<h1>MyChat · Connections</h1><p>Sign up on each site (most accept your Google account), create a key, paste it here. Keys stay on this PC
-(<code>${HOME.replace(/\\/g, "\\\\")}</code>) and are only ever sent to the provider they belong to.</p>
-<table>${rows}</table><p><label><input type=checkbox id=kl ${settings.allowKeyless ? "checked" : ""} style="width:auto"> Use the free no-key public channels as a last resort (never for private chats)</label></p>
-<button onclick=save()>Save and test</button><div id=out></div>
-<script>const T=${JSON.stringify(token)};async function save(){const k={};document.querySelectorAll('input[id^=k_]').forEach(e=>{if(e.value.trim())k[e.id.slice(2)]=e.value.trim()});
-out.textContent='Saving and testing…';const r=await fetch('/connections',{method:'POST',headers:{'Content-Type':'application/json','X-MyChat-Token':T},body:JSON.stringify({keys:k,allowKeyless:kl.checked})});
-const j=await r.json();out.textContent=Object.entries(j.providers).filter(([i,p])=>p.hasKey||p.keyless).map(([i,p])=>(p.enabled&&p.models?'✓ ':'✗ ')+p.name+': '+(p.disabled||p.models+' models')).join('\\n')}</script>`;
+  keys[provider] = key;
+  writeJson("keys.json", keys);
+}
+
+function connectionsPage(flash = "") {
+  const keys = readJson("keys.json", {});
+  const st = gw.status().providers;
+  const order = ["openrouter", "gemini", "nvidia", "groq", "anthropic", "mistral", "huggingface", "zai", "cerebras", "sambanova", "github"];
+  const card = (id) => {
+    const p = PROVIDERS[id], c = CONNECT[id] || { how: "guided", note: p.free || "" }, s = st[id] || {};
+    const on = !!keys[id], bad = s.disabled;
+    const state = bad ? `<span class=bad>✗ ${bad}</span>` : on ? `<span class=ok>✓ connected · ${s.models || 0} models</span>` : `<span class=off>not connected</span>`;
+    const action = c.how === "one-tap"
+      ? `<a class=btn href="/oauth/openrouter/start?t=${encodeURIComponent(token)}">${on ? "Reconnect" : "Connect"} · sign in with Google</a>`
+      : `<a class="btn ghost" href="${p.keyUrl}" target=_blank rel=noopener>${on ? "Manage key" : "Get key"}</a>`;
+    return `<div class=card><div class=h><b>${p.name}</b>${state}</div><div class=s>${c.note || ""}</div><div class=a>${action}${on ? ` <button class=x onclick="rm('${id}')">Remove</button>` : ""}</div></div>`;
+  };
+  return `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>MyChat · Accounts</title>
+<style>body{font:15px system-ui;max-width:1000px;margin:24px auto;padding:0 16px;color:#e8e8ea;background:#111216}
+h1{font-size:22px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.card{background:#1a1b21;border:1px solid #2a2b33;border-radius:12px;padding:14px}.h{display:flex;justify-content:space-between;gap:8px}
+.s{font-size:12.5px;color:#9a9aa5;margin:6px 0 10px}.ok{color:#5fd38d;font-size:13px}.bad{color:#ff7b7b;font-size:13px}.off{color:#777;font-size:13px}
+.btn{display:inline-block;padding:8px 14px;border-radius:8px;background:#3d7bfd;color:#fff;text-decoration:none;font-weight:600;font-size:14px}
+.ghost{background:#2a2b33}.x{background:none;border:0;color:#999;cursor:pointer}
+.paste{background:#1a1b21;border:1px dashed #3d7bfd;border-radius:12px;padding:16px;margin:16px 0}
+textarea{width:100%;min-height:60px;background:#111216;color:#fff;border:1px solid #333;border-radius:8px;padding:8px;font:13px monospace}
+#out{white-space:pre-wrap;margin-top:8px}.flash{background:#183a26;border-radius:8px;padding:10px;margin:10px 0}</style>
+<h1>MyChat · Accounts</h1>
+${flash ? `<div class=flash>${flash}</div>` : ""}
+<div class=paste><b>Paste any key here — or press Ctrl+V anywhere on this page.</b>
+<div class=s>The provider is recognised automatically, the key is checked live, and stored only on this PC. Several keys at once are fine.</div>
+<textarea id=t placeholder="AIza… · nvapi-… · gsk_… · sk-or-… · sk-ant-… · hf_…"></textarea><button class=btn onclick="paste(t.value)">Add</button><div id=out></div></div>
+<div class=grid>${order.filter((id) => PROVIDERS[id]).map(card).join("")}</div>
+<p class=s><label><input type=checkbox id=kl ${settings.allowKeyless ? "checked" : ""} onchange="opt()"> Use free no-key public channels as a last resort (never for private chats)</label></p>
+<script>const T=${JSON.stringify(token)};const H={'Content-Type':'application/json','X-MyChat-Token':T};
+async function paste(text){if(!text||!text.trim())return;out.textContent='Checking…';const r=await fetch('/connections/paste',{method:'POST',headers:H,body:JSON.stringify({text})});const j=await r.json();
+out.textContent=j.results.map(x=>(x.ok?'✓ ':'✗ ')+x.name+(x.ok?' — '+x.models+' models':' — '+x.error)).join('\\n')||'No key recognised';if(j.results.some(x=>x.ok))setTimeout(()=>location.reload(),1200)}
+document.addEventListener('paste',e=>{if(e.target===t)return;const s=(e.clipboardData||window.clipboardData).getData('text');if(s){t.value=s;paste(s)}});
+async function rm(id){await fetch('/connections/remove',{method:'POST',headers:H,body:JSON.stringify({provider:id})});location.reload()}
+async function opt(){await fetch('/connections',{method:'POST',headers:H,body:JSON.stringify({allowKeyless:kl.checked})})}</script>`;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -147,8 +173,32 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://x");
     if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true });
     if (req.method === "GET" && url.pathname === "/connections") {
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "X-Frame-Options": "DENY" });
-      return res.end(connectionsPage());
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "X-Frame-Options": "DENY", "Cache-Control": "no-store" });
+      return res.end(connectionsPage(url.searchParams.get("connected") ? "✓ OpenRouter connected — Claude, GPT, Gemini, GLM and more are now available." : ""));
+    }
+    if (req.method === "GET" && url.pathname === "/oauth/openrouter/start") {
+      if (url.searchParams.get("t") !== token) return send(res, 401, { error: { message: "open this from the Accounts page" } });
+      const { verifier, challenge } = await pkcePair();
+      const nonce = crypto.randomBytes(12).toString("hex");
+      pendingOAuth.set(nonce, { verifier, at: Date.now() });
+      const cb = `http://localhost:${PORT}/oauth/openrouter/callback/${nonce}`;
+      res.writeHead(302, { Location: openRouterAuthUrl(cb, challenge) });
+      return res.end();
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/oauth/openrouter/callback/")) {
+      const nonce = url.pathname.split("/").pop(), p = pendingOAuth.get(nonce);
+      pendingOAuth.delete(nonce);
+      if (!p || Date.now() - p.at > 15 * 60e3) return send(res, 400, { error: { message: "this sign-in link expired; start again from the Accounts page" } });
+      try {
+        saveKey("openrouter", await openRouterExchange(url.searchParams.get("code") || "", p.verifier));
+        build();
+        await gw.refreshModels(true);
+        res.writeHead(302, { Location: "/connections?connected=openrouter" });
+        return res.end();
+      } catch (e) {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        return res.end(connectionsPage("✗ OpenRouter connection failed: " + e.message));
+      }
     }
     if (!authed(req)) return send(res, 401, { error: { message: "MyChat token required (file 'token' in " + HOME + ")" } });
     if (req.method === "GET" && url.pathname === "/v1/models") {
@@ -158,6 +208,30 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/v1/chat/completions") return await completions(req, res);
     if (req.method === "GET" && url.pathname === "/status") return send(res, 200, gw.status());
+    if (req.method === "POST" && url.pathname === "/connections/paste") {
+      const b = await body(req);
+      const found = detectKeys(b.text);
+      const plain = String(b.text || "").trim();
+      if (!found.length && /^[A-Za-z0-9._-]{24,80}$/.test(plain)) {   // a key without a recognisable prefix (Mistral, Z.ai…)
+        const id = await identifyPlainKey(plain, gw.providers);
+        if (id) found.push({ provider: id.provider, key: plain });
+      }
+      const results = [];
+      for (const f of found) {
+        const v = await validateKey(f.provider, f.key, gw.providers);
+        if (v.ok) saveKey(f.provider, f.key);
+        results.push({ provider: f.provider, name: gw.providers[f.provider]?.name || f.provider, ...v });
+      }
+      if (results.some((r) => r.ok)) { build(); await gw.refreshModels(true); }
+      return send(res, 200, { results });
+    }
+    if (req.method === "POST" && url.pathname === "/connections/remove") {
+      const b = await body(req), keys = readJson("keys.json", {});
+      delete keys[b.provider];
+      writeJson("keys.json", keys);
+      build();
+      return send(res, 200, { ok: true });
+    }
     if (req.method === "POST" && url.pathname === "/connections") {
       const b = await body(req);
       const keys = { ...readJson("keys.json", {}), ...(b.keys || {}) };

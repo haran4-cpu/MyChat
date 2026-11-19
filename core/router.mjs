@@ -134,7 +134,7 @@ export class Gateway {
   headers(id) {
     const p = this.providers[id], h = { "Content-Type": "application/json", ...(p.headers || {}) };
     const k = this.keyFor(id);
-    if (k) h.Authorization = "Bearer " + k;
+    if (k) { if (p.keyHeader) h[p.keyHeader] = k; else h.Authorization = "Bearer " + k; }
     return h;
   }
 
