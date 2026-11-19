@@ -12,7 +12,7 @@
 import { classify, family, lastUserText } from "./router.mjs";
 import { evaluate, approxEqual } from "./exact.mjs";
 import { lint, claimsPreserved } from "./slop.mjs";
-import { quoteFound } from "./search.mjs";
+import { quoteFound, norm } from "./search.mjs";
 
 const CURRENT_RX = /\b(today|now|current(ly)?|latest|recent(ly)?|this (year|month|week)|news|price|cost|rate|ceo|president|prime minister|version|release[sd]?|20[2-9]\d)\b|(היום|עכשיו|נוכחי|אחרון|השנה|החודש|מחיר|עלות|מנכ"ל|נשיא|ראש הממשלה|גרסה|חדשות)/i;
 const FACT_RX = /\b(who|what|when|where|which|how (many|much|long|far|old|big)|is it true|did|does|was|were|population|capital|founded|invented|born|died|distance|height|largest|smallest|first)\b|(מי |מה |מתי|איפה|היכן|כמה|האם נכון|האם זה נכון|אוכלוסי|בירה|נוסד|הומצא|נולד|נפטר|מרחק|גובה|הגדול|הראשון)/i;
@@ -97,13 +97,32 @@ export async function verifiedAnswer(gw, req, o = {}) {
   if (!Object.keys(gw.models).length) await gw.refreshModels();
   const call = (r, extra = {}) => gw.chat(r, { signal: o.signal, privateData: o.privateData, ...extra });
 
+  // 0. premise check: a named work/title that no encyclopedia knows is probably invented by the question (a trap).
+  //    Measured: drafts described a non-existent Shakespeare play in detail and the claim checks could not refute it.
+  let draftReq = req;
+  const title = /(?:^|[^\p{L}])['"“”«»‘’`״]([^'"“”«»‘’`״]{3,60})['"“”«»‘’`״](?!\p{L})/u.exec(q)?.[1];
+  if (title && o.search && !o.privateData) {
+    try {
+      const hits = await o.search.wikipedia(title, 3);
+      // the title as a phrase, together with the other names in the question (e.g. "Shakespeare"), on the same page
+      const phrase = norm(title);
+      const names = (q.replace(title, " ").match(/\b[A-Z][a-z]{2,}/g) || []).map((n) => norm(n).replace(/s$/, "")).filter((n) => !/^(what|who|when|where|which|how|the|summarise|summarize|tell|explain|describe|write)$/.test(n));
+      const known = hits.some((h) => { const t = norm(h.title + " " + (h.text || "")); return t.includes(phrase) && names.every((n) => t.includes(n)); });
+      if (!known) {
+        trace.push({ step: "premise check", title, found: false });
+        draftReq = { ...req, messages: [{ role: "system", content: `Premise check: no encyclopedia entry mentions "${title}". It may not exist, or may be misattributed. ` +
+          "If you do not know it for certain, say plainly that you cannot find such a work and do not describe its content." }, ...req.messages] };
+      }
+    } catch { /* no evidence available: draft normally */ }
+  }
+
   // 1. independent drafts from different families
   status("Independent drafts from different model families…");
   const pool = gw.candidates(classify(req.messages) === "fast" ? "chat" : classify(req.messages), { privateData: o.privateData, limit: 30 });
   const picks = [];
   for (const c of pool) if (!picks.some((p) => p.family === c.family)) { picks.push(c); if (picks.length === (o.drafts || 2)) break; }
   const drafts = (await Promise.allSettled((picks.length ? picks : [null]).map((c) =>
-    call(req, c ? { prefer: `${c.provider}:${c.model}`, families: [c.family] } : {}))))
+    call(draftReq, c ? { prefer: `${c.provider}:${c.model}`, families: [c.family] } : {}))))
     .filter((r) => r.status === "fulfilled").map((r) => r.value);
   if (!drafts.length) throw new Error("no model could draft an answer");
   drafts.forEach((d, i) => trace.push({ step: `draft ${i + 1}`, by: `${d.provider}:${d.model}` }));

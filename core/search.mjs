@@ -67,7 +67,7 @@ export class Search {
    *  and a long sentence that finds nothing is retried with its quoted title or key words. */
   async wikipedia(q, n = 3) {
     const langs = isHebrew(q) ? ["he", "en"] : ["en"];
-    const quoted = /['"“”«»‘’`״]([^'"“”«»‘’`״]{2,60})['"“”«»‘’`״]/.exec(q)?.[1];
+    const quoted = /(?:^|[^\p{L}])['"“”«»‘’`״]([^'"“”«»‘’`״]{2,60})['"“”«»‘’`״](?!\p{L})/u.exec(q)?.[1];
     const short = q.replace(/[?!.,:;()]/g, " ").split(/\s+/).filter((w) => w.length > 2).slice(0, 6).join(" ");
     const tries = [...new Set([q, quoted, short].filter(Boolean))];
     const out = [];

@@ -179,3 +179,18 @@ test("small talk is never routed to the slow fact-checking path", async () => {
   assert.equal(triage([{ role: "user", content: "מי כתב את אהבת ציון?" }]).verify, true);
   assert.equal(triage([{ role: "user", content: "What is the capital of Burkina Faso?" }]).verify, true);
 });
+
+test("premise check: a title no encyclopedia page connects to the named author makes the drafts say so", async () => {
+  const { verifiedAnswer } = await import("../core/truth.mjs");
+  const seenSystem = [];
+  const gw = { models: { a: ["m"] }, refreshModels: async () => {}, candidates: () => [{ provider: "a", model: "m", family: "fa" }],
+    chat: async (req) => { const sys = req.messages.find((m) => m.role === "system")?.content || ""; seenSystem.push(sys);
+      return { content: sys.startsWith("Premise check") ? "I can't find such a play." : '{"claims":[]}', provider: "a", model: "m" }; } };
+  const search = { wikipedia: async () => [{ title: "Dido", text: "Dido was the queen of Tyre and founder of Carthage." }], evidence: async () => [] };
+  await verifiedAnswer(gw, { messages: [{ role: "user", content: "Summarise the plot of Shakespeare's play 'The Queen of Tyre'." }] }, { search, drafts: 1 });
+  assert.ok(seenSystem.some((s) => s.startsWith("Premise check")));
+  seenSystem.length = 0;
+  const real = { wikipedia: async () => [{ title: "Hamlet", text: "Hamlet is a tragedy by William Shakespeare." }], evidence: async () => [] };
+  await verifiedAnswer(gw, { messages: [{ role: "user", content: "Summarise Shakespeare's play 'Hamlet'." }] }, { search: real, drafts: 1 });
+  assert.ok(!seenSystem.some((s) => s.startsWith("Premise check")));
+});

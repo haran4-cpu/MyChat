@@ -12,8 +12,10 @@ export const PROBES = [
   { task: "reason", q: "A price of 80 rises by 15% and then falls by 15%. What is the final price? Number only.", ok: /\b78\.2\b/ },
   { task: "chat", q: "What is the capital of Australia? One word.", ok: /canberra/i },
   { task: "chat", q: "Which element has atomic number 26? One word.", ok: /\biron\b|\bFe\b/i },
-  { task: "chat", q: "מהי בירת אוסטרליה? ענה במילה אחת בעברית.", ok: /קנברה/ },
-  { task: "chat", q: "כמה צלעות יש למשושה? ענה במספר בלבד.", ok: /\b6\b|שש/ },
+  { task: "chat", he: true, q: "מהי בירת אוסטרליה? ענה במילה אחת בעברית.", ok: /קנברה/ },
+  { task: "chat", he: true, q: "כמה צלעות יש למשושה? ענה במספר בלבד.", ok: /\b6\b|שש/ },
+  { task: "chat", he: true, q: "מי כתב את הרומן 'אהבת ציון'? ענה בשם בלבד, בעברית.", ok: /מאפו/ },
+  { task: "chat", he: true, q: "תרגם לעברית מילה אחת: water", ok: /^\W*מים\W*$/ },
   { task: "code", q: "Write a JavaScript function named solve(arr) that returns the second largest DISTINCT number in an array of numbers, or null if there is none. Reply with only the code.",
     test: "solve([3,1,4,4,5])===4 && solve([7,7])===null && solve([-1,-2])===-2 && solve([])===null" },
   { task: "code", q: "Write a JavaScript function named solve(s) that returns true if s is a palindrome when case, spaces and punctuation are ignored. Reply with only the code.",
@@ -79,6 +81,9 @@ export function pinsFrom(results, minAcc = 0.66) {
   }
   pins.fast = results.filter((r) => r.acc.chat >= 0.99).sort((a, b) => a.ms.chat - b.ms.chat).slice(0, 4).map((r) => r.provider + ":" + r.model);
   pins.long = pins.reason;
+  // Hebrew: models that got every Hebrew probe right go first; models that failed half or more are avoided for Hebrew
+  pins.he = results.filter((r) => r.he >= 0.99).sort((a, b) => b.acc.chat - a.acc.chat || a.ms.chat - b.ms.chat).slice(0, 4).map((r) => r.provider + ":" + r.model);
+  pins.heBad = results.filter((r) => r.he !== undefined && r.he <= 0.5).map((r) => r.provider + ":" + r.model);
   return pins;
 }
 
@@ -115,10 +120,13 @@ export class Bench {
               } catch (e) { row.errors++; text = "ERROR " + String(e.message).slice(0, 120); }
               const ms = Date.now() - t0;
               (per[pr.task] ||= []).push({ ok, ms });
+              if (pr.he) (per.he ||= []).push({ ok, ms, script: /[\u0600-\u06FF]/.test(text) && !/[\u0590-\u05FF]/.test(text) });
               row.answers.push({ task: pr.task, ok, ms, text: text.slice(0, 160) });
               st.done++;
               if (row.errors >= 3 && row.answers.every((a) => !a.ok)) break;  // dead or rate-limited: stop spending quota on it
             }
+            const he = per.he || [];
+            row.he = he.length ? +(he.filter((x) => x.ok).length / he.length).toFixed(2) : 0;
             for (const t of TASKS) {
               const xs = per[t] || [];
               row.acc[t] = xs.length ? +(xs.filter((x) => x.ok).length / PROBES.filter((p) => p.task === t).length).toFixed(2) : 0;

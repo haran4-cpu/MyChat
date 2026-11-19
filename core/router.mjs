@@ -216,7 +216,7 @@ export class Gateway {
   }
 
   /** Rank (provider, model) pairs for a task. */
-  candidates(task, { needTools = false, needVision = false, privateData = false, exclude = [], families = null, limit = 8 } = {}) {
+  candidates(task, { needTools = false, needVision = false, privateData = false, exclude = [], families = null, limit = 8, lang = "" } = {}) {
     const now = Date.now(), out = [];
     for (const id of this.enabledProviders()) {
       const p = this.providers[id];
@@ -240,6 +240,11 @@ export class Gateway {
         if (/:free$/.test(model)) score *= 0.95;
         const pin = (this.pins[task] || []).indexOf(id + ":" + model);
         if (pin >= 0) score += 1 - pin * 0.05;            // measured winners first
+        if (lang === "he" && this.pins.he) {               // measured: some fast models answer Hebrew with gibberish or in Arabic
+          const hp = this.pins.he.indexOf(id + ":" + model);
+          if (hp >= 0) score += 1.2 - hp * 0.05;
+          else if ((this.pins.heBad || []).includes(id + ":" + model)) score *= 0.1;
+        }
         out.push({ provider: id, model, score, family: family(model) });
       }
     }
@@ -258,7 +263,8 @@ export class Gateway {
     if (!Object.keys(this.models).length) await this.refreshModels();
     const task = opt.task || classify(req.messages);
     let list = this.candidates(task, { needTools: !!req.tools?.length, needVision: hasImages(req.messages),
-                                       privateData: opt.privateData, exclude: opt.exclude, families: opt.families });
+                                       privateData: opt.privateData, exclude: opt.exclude, families: opt.families,
+                                       lang: /[\u0590-\u05FF]/.test(lastUserText(req.messages)) ? "he" : "" });
     if (opt.prefer) {
       const [pp, ...mm] = opt.prefer.split(":"), pm = mm.join(":");
       list = [{ provider: pp, model: pm, score: 99, family: family(pm) }, ...list.filter((c) => !(c.provider === pp && c.model === pm))];

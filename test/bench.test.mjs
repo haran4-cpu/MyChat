@@ -30,3 +30,16 @@ test("scoring survives typographic spaces, LaTeX grouping and trailing zeros (al
   assert.match(normAnswer("painted by Vincent van Gogh"), rx("Who painted"));
   assert.match(normAnswer("**Final price: \\$78.20**"), rx("If a price of 80"));
 });
+
+test("Hebrew questions go to models measured good at Hebrew, away from ones that answered gibberish", async () => {
+  const { Gateway } = await import("../core/router.mjs");
+  const gw = new Gateway({ keys: { x: "k" }, allowKeyless: false, extraProviders: { x: { name: "x", baseUrl: "http://127.0.0.1:9/v1" } },
+    pins: { fast: ["x:fastbad"], he: ["x:hebrewgood"], heBad: ["x:fastbad"] } });
+  for (const id of Object.keys(gw.providers)) if (id !== "x") gw.disabled[id] = "off";
+  gw.models.x = ["fastbad", "hebrewgood"];
+  assert.equal(gw.candidates("fast", { lang: "he" })[0].model, "hebrewgood");
+  assert.equal(gw.candidates("fast", {})[0].model, "fastbad");
+  const p = pinsFrom([{ provider: "x", model: "a", acc: { chat: 1, code: 1, reason: 1 }, ms: { chat: 1, code: 1, reason: 1 }, he: 1 },
+                      { provider: "x", model: "b", acc: { chat: 0.7, code: 1, reason: 1 }, ms: { chat: 1, code: 1, reason: 1 }, he: 0.25 }]);
+  assert.deepEqual(p.he, ["x:a"]); assert.deepEqual(p.heBad, ["x:b"]);
+});

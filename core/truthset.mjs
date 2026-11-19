@@ -47,7 +47,7 @@ export function normAnswer(t) {
 // Harder questions: long-tail facts, exact arithmetic, Hebrew, and traps. Stable answers only.
 export const SET_HARD = [
   ["What is 37% of 1,234?", /\b456\.58\b/, "math"],
-  ["What is 7 to the power of 7?", /\b823,?543\b/, "math"],
+  ["What is 7 to the power of 7?", /\b823[ ,]?543\b/, "math"],
   ["How many days are there from 1 March 2024 to 1 March 2025?", /\b365\b/, "math"],
   ["What is the square root of 2,025?", /\b45\b/, "math"],
   ["What is the atomic number of rutherfordium?", /\b104\b/, "fact"],
