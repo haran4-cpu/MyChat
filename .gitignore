@@ -1,0 +1,9 @@
+node_modules/
+*.log
+keys.json
+token
+stats.json
+settings.json
+*.keystore
+*.jks
+.env*

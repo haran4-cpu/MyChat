@@ -1,0 +1,12 @@
+{
+  "name": "mychat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MyChat: one model gateway and reasoning layer for the PC (Open WebUI + Kestrel) and the Android app",
+  "scripts": {
+    "test": "node --test --test-timeout=30000 test/*.test.mjs",
+    "gateway": "node pc/server.mjs"
+  },
+  "engines": { "node": ">=18" }
+}
