@@ -84,6 +84,49 @@ class Stats {
   load(obj) { for (const [k, v] of Object.entries(obj || {})) this.m.set(k, v); }
 }
 
+/** OpenAI-style request -> Gemini native generateContent body. */
+export function toGemini(req) {
+  const contents = [], sys = [];
+  const parts = (c) => {
+    if (typeof c === "string") return [{ text: c }];
+    return (c || []).map((x) => {
+      if (x.type === "text") return { text: x.text };
+      const url = x.image_url?.url || "";
+      const m = /^data:([^;]+);base64,(.*)$/s.exec(url);
+      return m ? { inlineData: { mimeType: m[1], data: m[2] } } : { text: url };
+    });
+  };
+  for (const m of req.messages || []) {
+    if (m.role === "system") { sys.push(...parts(m.content).filter((p) => p.text)); continue; }
+    const role = m.role === "assistant" ? "model" : "user";
+    const ps = m.role === "tool" ? [{ text: "Tool result: " + (typeof m.content === "string" ? m.content : JSON.stringify(m.content)) }] : parts(m.content);
+    if (!ps.length) continue;
+    const last = contents[contents.length - 1];
+    if (last && last.role === role) last.parts.push(...ps); else contents.push({ role, parts: ps });
+  }
+  const gc = {};
+  if (req.temperature !== undefined) gc.temperature = req.temperature;
+  if (req.top_p !== undefined) gc.topP = req.top_p;
+  if (req.max_tokens !== undefined) gc.maxOutputTokens = req.max_tokens;
+  if (req.stop) gc.stopSequences = [].concat(req.stop);
+  if (req.response_format?.type === "json_object" || req.response_format?.type === "json_schema") gc.responseMimeType = "application/json";
+  const out = { contents };
+  if (sys.length) out.systemInstruction = { parts: sys };
+  if (Object.keys(gc).length) out.generationConfig = gc;
+  return out;
+}
+
+/** Gemini native response chunk -> OpenAI-style chunk (thought parts are dropped). */
+export function fromGemini(j, whole = false) {
+  const cand = j.candidates?.[0] || {};
+  const text = (cand.content?.parts || []).filter((p) => p.text && !p.thought).map((p) => p.text).join("");
+  const fr = cand.finishReason && cand.finishReason !== "FINISH_REASON_UNSPECIFIED" ? (cand.finishReason === "MAX_TOKENS" ? "length" : "stop") : null;
+  const usage = j.usageMetadata ? { prompt_tokens: j.usageMetadata.promptTokenCount, completion_tokens: j.usageMetadata.candidatesTokenCount } : undefined;
+  if (j.promptFeedback?.blockReason && !text) throw new Error("blocked by Gemini: " + j.promptFeedback.blockReason);
+  return whole ? { choices: [{ message: { content: text }, finish_reason: fr }], usage }
+               : { choices: [{ delta: { content: text }, finish_reason: fr }], usage };
+}
+
 export class GatewayError extends Error {
   constructor(msg, attempts) { super(msg); this.attempts = attempts; }
 }
@@ -146,11 +189,12 @@ export class Gateway {
       if (p.noModelList) { this.models[id] = p.models || []; return; }
       if (!force && this.modelsAt[id] && Date.now() - this.modelsAt[id] < 6 * 3600e3) return;
       try {
-        const r = await this.fetch(p.baseUrl.replace(/\/$/, "") + "/models", { headers: this.headers(id) });
+        const r = await this.fetch(p.baseUrl.replace(/\/$/, "") + "/models" + (p.native === "gemini" ? "?pageSize=1000" : ""), { headers: this.headers(id) });
         if (r.status === 401 || r.status === 403) { this.disabled[id] = `key rejected (${r.status})`; return; }
         if (!r.ok) throw new Error("HTTP " + r.status);
         const j = await r.json();
-        const list = (j.data || j.models || []).map((m) => (m.id || m.name || "").replace(/^models\//, "")).filter(Boolean);
+        const list = (j.data || j.models || []).filter((m) => !m.supportedGenerationMethods || m.supportedGenerationMethods.includes("generateContent"))
+          .map((m) => (m.id || m.name || "").replace(/^models\//, "")).filter(Boolean);
         this.models[id] = list.filter((m) => !NOT_CHAT.test(m) && (!/:free$/.test(m) || id === "openrouter" || p.freeOnly));
         if (p.freeOnly && !this.keys[id]) this.models[id] = this.models[id].filter((m) => m.endsWith(p.freeOnly));
         if (id === "openrouter" && !this.paidOpenRouter) this.models[id] = this.models[id].filter((m) => m.endsWith(":free"));
@@ -177,6 +221,7 @@ export class Gateway {
         const prior = priorFor(model);
         let q = prior[task] ?? prior.chat;
         if (needVision && !(prior.vision > 0)) continue;
+        if (needTools && p.noTools) continue;
         if (needTools && p.keyless && !p.local) q *= 0.5;
         const rel = this.stats.reliability(id, model);
         let speed = 1;
@@ -249,8 +294,11 @@ export class Gateway {
     this.stats.count(c.provider, c.model);
     let res;
     try {
-      res = await this.fetch(p.baseUrl.replace(/\/$/, "") + "/chat/completions",
-        { method: "POST", headers: this.headers(c.provider), body: JSON.stringify(body), signal: ctl.signal });
+      const url = p.native === "gemini"
+        ? `${p.baseUrl.replace(/\/$/, "")}/models/${encodeURIComponent(c.model)}:streamGenerateContent?alt=sse`
+        : p.baseUrl.replace(/\/$/, "") + "/chat/completions";
+      res = await this.fetch(url, { method: "POST", headers: this.headers(c.provider),
+        body: JSON.stringify(p.native === "gemini" ? toGemini(req) : body), signal: ctl.signal });
     } catch (e) {
       clearTimeout(firstTimer);
       this.stats.failure(c.provider, c.model, e, 30000);
@@ -271,7 +319,8 @@ export class Gateway {
     const ct = res.headers.get?.("content-type") || "";
     try {
       if (!ct.includes("text/event-stream") && !res.body?.getReader) {
-        const j = await res.json();
+        let j = await res.json();
+        if (p.native === "gemini") j = fromGemini(Array.isArray(j) ? j[0] || {} : j, true);
         clearTimeout(firstTimer);
         ttft = Date.now() - t0;
         const m = j.choices?.[0]?.message || {};
@@ -297,6 +346,7 @@ export class Gateway {
             let j;
             try { j = JSON.parse(data); } catch { continue; }
             if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
+            if (p.native === "gemini") j = fromGemini(j);
             const ch = j.choices?.[0];
             if (j.usage) usage = j.usage;
             if (!ch) continue;

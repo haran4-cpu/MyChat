@@ -43,6 +43,17 @@ function build() {
   gw.stats.load(readJson("stats.json", {}));
   gw.refreshModels().catch(() => {});
 }
+// A key saved under the wrong provider by an older version (e.g. a new "AQ." Gemini key filed as SambaNova) moves to its
+// real provider, recognised by its shape. Runs on start; the key never leaves this PC.
+(function fixMisfiledKeys() {
+  const keys = readJson("keys.json", {});
+  let moved = false;
+  for (const [prov, key] of Object.entries(keys)) {
+    const real = detectKeys(String(key)).find((d) => d.key === key)?.provider;
+    if (real && real !== prov && !SEARCH_KEYS.has(prov) && !keys[real]) { keys[real] = key; delete keys[prov]; moved = true; }
+  }
+  if (moved) writeJson("keys.json", keys);
+})();
 build();
 setInterval(() => { try { writeJson("stats.json", gw.stats.toJSON()); } catch { /* ignore */ } }, 30000).unref();
 

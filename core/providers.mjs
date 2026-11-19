@@ -9,7 +9,11 @@
 export const PROVIDERS = {
   gemini: {
     name: "Google Gemini (AI Studio key)",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    // Native API: the new "AQ." auth keys are rejected by Google's OpenAI-compatible endpoint, the native one takes both formats
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    native: "gemini",
+    keyHeader: "x-goog-api-key",
+    noTools: true,
     keyUrl: "https://aistudio.google.com/apikey",
     signIn: "Google account",
     free: "Free tier on Flash models; limits shown in AI Studio",

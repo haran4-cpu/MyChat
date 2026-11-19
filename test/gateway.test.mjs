@@ -149,3 +149,41 @@ test("a keyless gateway that only serves :free models without a key lists only t
   assert.deepEqual(gw.models.k, ["z-ai/glm-5:free"]);
   w.srv.close();
 });
+
+test("Gemini native: request and streamed answer are translated both ways", async () => {
+  const { toGemini, fromGemini } = await import("../core/router.mjs");
+  const g = toGemini({ messages: [{ role: "system", content: "be brief" }, { role: "user", content: "hi" }, { role: "assistant", content: "hello" },
+    { role: "user", content: [{ type: "text", text: "what is this" }, { type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } }] }],
+    temperature: 0.2, max_tokens: 50 });
+  assert.deepEqual(g.systemInstruction, { parts: [{ text: "be brief" }] });
+  assert.deepEqual(g.contents.map((c) => c.role), ["user", "model", "user"]);
+  assert.deepEqual(g.contents[2].parts[1], { inlineData: { mimeType: "image/png", data: "QUJD" } });
+  assert.deepEqual(g.generationConfig, { temperature: 0.2, maxOutputTokens: 50 });
+  const c = fromGemini({ candidates: [{ content: { parts: [{ text: "thinking…", thought: true }, { text: "Hi!" }] }, finishReason: "STOP" }] });
+  assert.equal(c.choices[0].delta.content, "Hi!");
+  assert.equal(c.choices[0].finish_reason, "stop");
+});
+
+test("Gemini native endpoint end to end through the gateway", async () => {
+  const srv = http.createServer((req, res) => {
+    if (req.headers["x-goog-api-key"] !== "AQ.k") { res.writeHead(401); return res.end("{}"); }
+    if (req.url.startsWith("/v1beta/models?")) { res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ models: [{ name: "models/gemini-3.6-flash", supportedGenerationMethods: ["generateContent"] }, { name: "models/text-embedding-5", supportedGenerationMethods: ["embedContent"] }] })); }
+    assert.match(req.url, /\/models\/gemini-3\.6-flash:streamGenerateContent\?alt=sse$/);
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write("data: " + JSON.stringify({ candidates: [{ content: { parts: [{ text: "Hel" }] } }] }) + "\r\n\r\n");
+    res.end("data: " + JSON.stringify({ candidates: [{ content: { parts: [{ text: "lo" }] }, finishReason: "STOP" }] }) + "\r\n\r\n");
+  });
+  await new Promise((ok) => srv.listen(0, "127.0.0.1", ok));
+  const { PROVIDERS } = await import("../core/providers.mjs");
+  const gw = new Gateway({ keys: { gemini: "AQ.k" }, allowKeyless: false,
+    extraProviders: { gemini: { ...PROVIDERS.gemini, baseUrl: `http://127.0.0.1:${srv.address().port}/v1beta` } } });
+  for (const id of Object.keys(gw.providers)) if (id !== "gemini") gw.disabled[id] = "off";
+  await gw.refreshModels(true);
+  assert.deepEqual(gw.models.gemini, ["gemini-3.6-flash"]);
+  let out = "";
+  const r = await gw.chat({ messages: [{ role: "user", content: "hi" }] }, { onDelta: (t) => (out += t) });
+  assert.equal(out, "Hello");
+  assert.equal(r.content, "Hello");
+  srv.closeAllConnections(); srv.close();
+});

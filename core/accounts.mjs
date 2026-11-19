@@ -46,6 +46,7 @@ export const KEY_SHAPES = [
   ["groq", /\bgsk_[A-Za-z0-9]{40,}\b/],
   ["google", /\bAIza[0-9A-Za-z_-]{35}\|[A-Za-z0-9:_-]{8,}/],   // Google Programmable Search: API_KEY|ENGINE_ID
   ["gemini", /\bAIza[0-9A-Za-z_-]{35}\b(?!\|)/],
+  ["gemini", /\bAQ\.[A-Za-z0-9_-][A-Za-z0-9_.-]{30,}/],          // Google's new Auth key format (AI Studio, 2026)
   ["huggingface", /\bhf_[A-Za-z0-9]{30,}\b/],
   ["github", /\b(github_pat_[A-Za-z0-9_]{60,}|gh[pousr]_[A-Za-z0-9]{36,})\b/],
   ["cerebras", /\bcsk-[A-Za-z0-9]{40,}\b/],
@@ -72,16 +73,30 @@ export function detectKeys(text) {
  * Check a key against its provider without spending tokens (model list). Returns { ok, models, error }.
  * For keys whose shape is ambiguous (Mistral, Z.ai: plain 32-char strings), call with `candidates` to try each.
  */
+const AUTH_ERR = /api[ _-]?key|unauthori[sz]ed|authenticat|invalid.{0,20}(key|token)|permission|forbidden/i;
+
 export async function validateKey(provider, key, providers, fetchImpl = fetch) {
   const p = providers[provider];
   if (!p) return { ok: false, error: "unknown provider" };
+  const base = p.baseUrl.replace(/\/$/, "");
+  const hdr = (k) => ({ ...(p.headers || {}), ...(p.keyHeader ? { [p.keyHeader]: k } : { Authorization: "Bearer " + k }) });
   try {
-    const auth = p.keyHeader ? { [p.keyHeader]: key } : { Authorization: "Bearer " + key };
-    const r = await fetchImpl(p.baseUrl.replace(/\/$/, "") + "/models", { headers: { ...auth, ...(p.headers || {}) } });
+    const r = await fetchImpl(base + "/models" + (p.native === "gemini" ? "?pageSize=1000" : ""), { headers: hdr(key) });
     if (r.status === 401 || r.status === 403) return { ok: false, error: "key rejected" };
     if (!r.ok) return { ok: false, error: "HTTP " + r.status };
     const j = await r.json();
-    return { ok: true, models: (j.data || j.models || []).length };
+    const models = (j.data || j.models || []).map((m) => (m.id || m.name || "").replace(/^models\//, "")).filter(Boolean);
+    // Some providers list their models without any key: a 200 there proves nothing. Measured: SambaNova accepted a Gemini key.
+    const bogus = await fetchImpl(base + "/models", { headers: hdr("mychat-invalid-key-probe") }).catch(() => null);
+    if (bogus && bogus.ok && p.native !== "gemini") {
+      const model = models.find((m) => !/embed|whisper|tts|guard|rerank/i.test(m)) || models[0];
+      if (!model) return { ok: false, error: "could not check the key (no models)" };
+      const c = await fetchImpl(base + "/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", ...hdr(key) },
+        body: JSON.stringify({ model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }) });
+      const txt = c.ok ? "" : await c.text().catch(() => "");
+      if (c.status === 401 || c.status === 403 || (!c.ok && c.status !== 429 && AUTH_ERR.test(txt))) return { ok: false, error: "key rejected" };
+    }
+    return { ok: true, models: models.length };
   } catch (e) {
     return { ok: false, error: e.message };
   }

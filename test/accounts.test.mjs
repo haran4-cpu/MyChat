@@ -5,7 +5,7 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { detectKeys, pkcePair, openRouterAuthUrl, openRouterExchange } from "../core/accounts.mjs";
+import { detectKeys, pkcePair, openRouterAuthUrl, openRouterExchange, validateKey, identifyPlainKey } from "../core/accounts.mjs";
 import { PROVIDERS } from "../core/providers.mjs";
 
 const fake = {
@@ -43,7 +43,7 @@ test("OpenRouter code exchange sends code + verifier and returns the key", async
 
 test("Accounts page: pasting text with a key validates it live and stores it", async () => {
   const mock = http.createServer((req, res) => {
-    const ok = req.headers.authorization === "Bearer " + fake.gemini;
+    const ok = req.headers["x-goog-api-key"] === fake.gemini;   // Gemini uses Google's native API and header
     res.writeHead(ok ? 200 : 401, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ data: ok ? [{ id: "gemini-3.1-pro" }, { id: "gemini-3.6-flash" }] : [] }));
   });
@@ -68,4 +68,25 @@ test("Accounts page: pasting text with a key validates it live and stores it", a
   assert.match(start.headers.get("location"), /^https:\/\/openrouter\.ai\/auth\?callback_url=http%3A%2F%2Flocalhost/);
   assert.equal((await fetch(u + "/oauth/openrouter/start", { redirect: "manual" })).status, 401);
   server.closeAllConnections(); server.close(); mock.closeAllConnections(); mock.close();
+});
+
+test("new Gemini 'AQ.' keys are recognised as Gemini", () => {
+  const k = "AQ.Ab8RN6" + "x".repeat(40);
+  assert.deepEqual(detectKeys("my key " + k).map((d) => d.provider), ["gemini"]);
+});
+
+test("a provider whose model list is public does not accept any key: a real call decides", async () => {
+  const good = "good-key-123456789012345678901234";
+  const mock = http.createServer((req, res) => {
+    if (req.url.endsWith("/models")) { res.writeHead(200, { "Content-Type": "application/json" }); return res.end(JSON.stringify({ data: [{ id: "Meta-Llama-4" }] })); }
+    const ok = req.headers.authorization === "Bearer " + good;
+    res.writeHead(ok ? 200 : 401, { "Content-Type": "application/json" });
+    res.end(ok ? JSON.stringify({ choices: [{ message: { content: "h" } }] }) : '{"error":"Invalid API key"}');
+  });
+  await new Promise((ok) => mock.listen(0, "127.0.0.1", ok));
+  const provs = { samba: { name: "samba", baseUrl: `http://127.0.0.1:${mock.address().port}/v1` } };
+  assert.equal((await validateKey("samba", "AQ.someone-elses-key-xxxxxxxxxxxx", provs)).ok, false);
+  assert.equal((await validateKey("samba", good, provs)).ok, true);
+  assert.equal(await identifyPlainKey("AQ.someone-elses-key-xxxxxxxxxxxx", provs, ["samba"]), null);
+  mock.closeAllConnections(); mock.close();
 });
