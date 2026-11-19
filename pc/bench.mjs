@@ -1,0 +1,158 @@
+// Built-in benchmark: measures YOUR connected models on known-answer probes (facts, Hebrew, exact math, code that is
+// actually executed) and turns the results into routing pins per task. Optionally compares the Truth Engine (verified)
+// with a single fast model on the known-answer set. Runs inside the gateway; progress at GET /bench.
+import { spawn } from "node:child_process";
+import { priorFor } from "../core/providers.mjs";
+import { run } from "../core/reason.mjs";
+import { SET, HEDGE } from "../core/truthset.mjs";
+
+export const PROBES = [
+  { task: "reason", q: "What is 17.5% of 2,480? Answer with the number only.", ok: /\b434\b/ },
+  { task: "reason", q: "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How many cents does the ball cost? Number only.", ok: /(^|\D)5(\D|$)/ },
+  { task: "reason", q: "A price of 80 rises by 15% and then falls by 15%. What is the final price? Number only.", ok: /\b78\.2\b/ },
+  { task: "chat", q: "What is the capital of Australia? One word.", ok: /canberra/i },
+  { task: "chat", q: "Which element has atomic number 26? One word.", ok: /\biron\b|\bFe\b/i },
+  { task: "chat", q: "מהי בירת אוסטרליה? ענה במילה אחת בעברית.", ok: /קנברה/ },
+  { task: "chat", q: "כמה צלעות יש למשושה? ענה במספר בלבד.", ok: /\b6\b|שש/ },
+  { task: "code", q: "Write a JavaScript function named solve(arr) that returns the second largest DISTINCT number in an array of numbers, or null if there is none. Reply with only the code.",
+    test: "solve([3,1,4,4,5])===4 && solve([7,7])===null && solve([-1,-2])===-2 && solve([])===null" },
+  { task: "code", q: "Write a JavaScript function named solve(s) that returns true if s is a palindrome when case, spaces and punctuation are ignored. Reply with only the code.",
+    test: "solve('A man, a plan, a canal: Panama')===true && solve('race a car')===false && solve('')===true" },
+  { task: "code", q: "Write a JavaScript function named solve(n) that returns the n-th Fibonacci number as a BigInt, with solve(0)===0n and solve(1)===1n. It must be fast for n=500. Reply with only the code.",
+    test: "solve(0)===0n && solve(1)===1n && solve(10)===55n && solve(500)===139423224561697880139724382870407283950070256587697307264108962948325571622863290691557658876222521294125n" },
+];
+
+const TASKS = ["chat", "code", "reason"];
+
+export function extractCode(text) {
+  const blocks = [...String(text).matchAll(/```[\w-]*\s*\n([\s\S]*?)```/g)].map((m) => m[1]);
+  return (blocks.sort((a, b) => b.length - a.length)[0] ?? String(text)).trim();
+}
+
+/** Run model-written code in a separate Node process with the permission model on (no file writes, no child processes)
+ *  and a hard time limit. Returns true only if the test expression is true. */
+export function runCodeTest(code, test, timeoutMs = 4000) {
+  const src = `${code}\n;process.stdout.write(String(Boolean(${test})));`;
+  const attempt = (flag) => new Promise((ok) => {
+    const args = [...(flag ? [flag] : []), "--input-type=module", "-e", src];
+    const p = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    let out = "", err = "";
+    const t = setTimeout(() => { p.kill("SIGKILL"); ok({ out: "timeout", err }); }, timeoutMs);
+    p.stdout.on("data", (d) => (out += d));
+    p.stderr.on("data", (d) => (err += d));
+    p.on("close", () => { clearTimeout(t); ok({ out, err }); });
+    p.on("error", (e) => { clearTimeout(t); ok({ out: "", err: e.message }); });
+  });
+  return (async () => {
+    let r = await attempt("--permission");
+    if (/bad option|unknown option/i.test(r.err)) r = await attempt("--experimental-permission");
+    return r.out.trim() === "true";
+  })();
+}
+
+export function pickModels(gw, { perProvider = 4, openrouterMax = 3 } = {}) {
+  const out = [];
+  for (const id of gw.enabledProviders()) {
+    const p = gw.providers[id];
+    if (p.keyless || p.local || !gw.keys[id]) continue;
+    const models = gw.models[id] || [];
+    const chosen = new Set();
+    for (const task of TASKS) {
+      [...models].sort((a, b) => (priorFor(b)[task] ?? 0) - (priorFor(a)[task] ?? 0)).slice(0, 2).forEach((m) => chosen.add(m));
+    }
+    [...chosen].slice(0, id === "openrouter" ? openrouterMax : perProvider).forEach((model) => out.push({ provider: id, model }));
+  }
+  return out;
+}
+
+export function pinsFrom(results, minAcc = 0.66) {
+  const pins = {};
+  for (const task of TASKS) {
+    pins[task] = results.filter((r) => r.acc[task] >= minAcc)
+      .sort((a, b) => b.acc[task] - a.acc[task] || a.ms[task] - b.ms[task]).slice(0, 4).map((r) => r.provider + ":" + r.model);
+  }
+  pins.fast = results.filter((r) => r.acc.chat >= 0.99).sort((a, b) => a.ms.chat - b.ms.chat).slice(0, 4).map((r) => r.provider + ":" + r.model);
+  pins.long = pins.reason;
+  return pins;
+}
+
+export class Bench {
+  constructor(gw) { this.gw = gw; this.state = { running: false }; }
+
+  async start({ truth = true, truthLimit = SET.length, onPins = null } = {}) {
+    if (this.state.running) return this.state;
+    const st = this.state = { running: true, startedAt: Date.now(), phase: "models", done: 0, total: 0, models: [], truth: null, log: [] };
+    const gw = this.gw;
+    (async () => {
+      try {
+        await gw.refreshModels(true);
+        const picks = pickModels(gw);
+        st.total = picks.length * PROBES.length + (truth ? truthLimit * 2 : 0);
+        const byProvider = {};
+        for (const c of picks) (byProvider[c.provider] ||= []).push(c);
+        // providers in parallel (separate rate limits), models of one provider one after another
+        await Promise.all(Object.values(byProvider).map(async (list) => {
+          for (const c of list) {
+            const row = { provider: c.provider, model: c.model, acc: {}, ms: {}, errors: 0, answers: [] };
+            const per = {};
+            for (const pr of PROBES) {
+              const t0 = Date.now();
+              let ok = false, text = "";
+              try {
+                const r = await gw._call(c, { messages: [{ role: "user", content: pr.q }], temperature: 0, max_tokens: pr.task === "code" ? 2000 : 600 }, {}, () => {});
+                text = r.content;
+                ok = pr.test ? await runCodeTest(extractCode(text), pr.test) : pr.ok.test(text);
+              } catch (e) { row.errors++; text = "ERROR " + String(e.message).slice(0, 120); }
+              const ms = Date.now() - t0;
+              (per[pr.task] ||= []).push({ ok, ms });
+              row.answers.push({ task: pr.task, ok, ms, text: text.slice(0, 160) });
+              st.done++;
+              if (row.errors >= 3 && row.answers.every((a) => !a.ok)) break;  // dead or rate-limited: stop spending quota on it
+            }
+            for (const t of TASKS) {
+              const xs = per[t] || [];
+              row.acc[t] = xs.length ? +(xs.filter((x) => x.ok).length / PROBES.filter((p) => p.task === t).length).toFixed(2) : 0;
+              const good = xs.filter((x) => x.ok);
+              row.ms[t] = good.length ? Math.round(good.reduce((a, x) => a + x.ms, 0) / good.length) : 1e9;
+            }
+            st.models.push(row);
+            st.log.push(`${c.provider}:${c.model} chat ${row.acc.chat} code ${row.acc.code} reason ${row.acc.reason}`);
+          }
+        }));
+        st.pins = pinsFrom(st.models);
+        if (onPins) onPins(st.pins);
+        if (truth) {
+          st.phase = "truth";
+          const rows = [];
+          for (const [q, rx, kind] of SET.slice(0, truthLimit)) {
+            for (const mode of ["fast", "verified"]) {
+              const t0 = Date.now();
+              let text = "";
+              try { text = (await run(gw, { messages: [{ role: "user", content: q }] }, { mode })).content; }
+              catch (e) { text = "ERROR " + e.message; }
+              const body = text.split("\n---\n")[0];
+              const ok = rx.test(body);
+              rows.push({ q, kind, mode, ok, confidentWrong: !ok && !HEDGE.test(body), ms: Date.now() - t0, answer: body.slice(0, 200) });
+              st.done++;
+            }
+          }
+          const sum = {};
+          for (const mode of ["fast", "verified"]) {
+            const r = rows.filter((x) => x.mode === mode), by = (k) => r.filter((x) => x.kind === k);
+            sum[mode] = { accuracy: +(r.filter((x) => x.ok).length / r.length).toFixed(3), confidentlyWrong: r.filter((x) => x.confidentWrong).length,
+              traps: `${by("trap").filter((x) => x.ok).length}/${by("trap").length}`, math: `${by("math").filter((x) => x.ok).length}/${by("math").length}`,
+              facts: `${by("fact").filter((x) => x.ok).length}/${by("fact").length}`, avgSeconds: +(r.reduce((a, x) => a + x.ms, 0) / r.length / 1000).toFixed(1) };
+          }
+          st.truth = { summary: sum, rows };
+        }
+      } catch (e) {
+        st.error = e.message;
+      } finally {
+        st.running = false;
+        st.phase = "done";
+        st.finishedAt = Date.now();
+      }
+    })();
+    return st;
+  }
+}

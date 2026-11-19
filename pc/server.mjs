@@ -18,6 +18,7 @@ import { PROVIDERS } from "../core/providers.mjs";
 import { pkcePair, openRouterAuthUrl, openRouterExchange, detectKeys, validateKey, identifyPlainKey, CONNECT, SEARCH_KEYS } from "../core/accounts.mjs";
 import { Search, SEARCH_PROVIDERS } from "../core/search.mjs";
 import { Ledger } from "../core/ledger.mjs";
+import { Bench } from "./bench.mjs";
 
 const HOME = process.env.MYCHAT_HOME || path.join(process.env.APPDATA || path.join(os.homedir(), ".config"), "MyChat");
 const PORT = Number(process.env.MYCHAT_PORT || 11500);
@@ -32,7 +33,7 @@ try { token = fs.readFileSync(F("token"), "utf8").trim(); } catch { /* first run
 if (!token) { token = crypto.randomBytes(24).toString("base64url"); fs.writeFileSync(F("token"), token); }
 
 const settings = { allowKeyless: true, allowLocal: true, pins: {}, ...readJson("settings.json", {}) };
-let gw, search;
+let gw, search, bench = null;
 const ledger = new Ledger({ load: () => readJson("ledger.json", null), save: (v) => { try { writeJson("ledger.json", v); } catch { /* best effort */ } } });
 function build() {
   const keys = readJson("keys.json", {});
@@ -179,6 +180,9 @@ ${flash ? `<div class=flash>${flash}</div>` : ""}
 <div class=s>Open WebUI → Admin Panel → Settings → Connections → OpenAI API → <b>+</b>. URL: <code>http://127.0.0.1:${PORT}/v1</code> · Key: the MyChat key (button below). The models mychat/auto, max, consensus, verified, fast and private then appear in the model list.</div>
 <div class=a><button class=btn onclick="navigator.clipboard.writeText(T).then(()=>{cp.textContent='✓ copied'})" id=cp>Copy MyChat key</button>
 <button class="btn ghost" onclick="navigator.clipboard.writeText('http://127.0.0.1:${PORT}/v1').then(()=>{cu.textContent='✓ copied'})" id=cu>Copy URL</button></div></div>
+<div class=card style="margin:12px 0"><div class=h><b>Measure my models</b><span class=off id=bst></span></div>
+<div class=s>Asks every connected account short questions with known answers (facts, Hebrew, exact math, code that is actually run) and routes each kind of task to the models that really got it right. Also compares the Truth Engine with a single model. Uses a little of each free quota; takes 10–30 minutes.</div>
+<div class=a><button class=btn onclick="bstart()">Start</button></div><pre id=bout style="white-space:pre-wrap;font-size:12px;color:#bbb"></pre></div>
 <h2>Models</h2><div class=grid>${order.filter((id) => PROVIDERS[id]).map(card).join("")}</div>
 <h2>Web evidence for the Truth Engine</h2><div class=s>Wikipedia is always on (no key). Each search key below adds broader, fresher evidence.</div>
 <div class=grid>${Object.entries(SEARCH_PROVIDERS).map(([id, p]) => `<div class=card><div class=h><b>${p.name}</b>${keys[id] ? "<span class=ok>✓ connected</span>" : "<span class=off>not connected</span>"}</div><div class=s>${p.note}</div><div class=a><a class="btn ghost" href="${p.keyUrl}" target=_blank rel=noopener>${keys[id] ? "Manage key" : "Get key"}</a>${keys[id] ? ` <button class=x onclick="rm('${id}')">Remove</button>` : ""}</div></div>`).join("")}</div>
@@ -188,6 +192,14 @@ async function paste(text){if(!text||!text.trim())return;out.textContent='Checki
 out.textContent=j.results.map(x=>(x.ok?'✓ ':'✗ ')+x.name+(x.ok?' — '+x.models+' models':' — '+x.error)).join('\\n')||'No key recognised';if(j.results.some(x=>x.ok))setTimeout(()=>location.reload(),1200)}
 document.addEventListener('paste',e=>{if(e.target===t)return;const s=(e.clipboardData||window.clipboardData).getData('text');if(s){t.value=s;paste(s)}});
 async function rm(id){await fetch('/connections/remove',{method:'POST',headers:H,body:JSON.stringify({provider:id})});location.reload()}
+async function bstart(){await fetch('/bench/start',{method:'POST',headers:H,body:'{}'});bpoll()}
+async function bpoll(){const j=await (await fetch('/bench',{headers:H})).json();if(!j.startedAt)return;
+bst.textContent=j.running?`running · ${j.phase} · ${j.done}/${j.total}`:(j.error?'✗ '+j.error:'✓ done');
+let t=(j.models||[]).map(m=>`${m.provider}:${m.model}  chat ${m.acc.chat}  code ${m.acc.code}  reason ${m.acc.reason}`).join('\n');
+if(j.pins)t+='\n\nRouting now prefers:\n'+Object.entries(j.pins).map(([k,v])=>k+': '+(v.join(', ')||'—')).join('\n');
+if(j.truth)t+='\n\nTruth Engine vs one fast model:\n'+JSON.stringify(j.truth.summary,null,1);
+bout.textContent=t;if(j.running)setTimeout(bpoll,4000)}
+bpoll();
 async function opt(){await fetch('/connections',{method:'POST',headers:H,body:JSON.stringify({allowKeyless:kl.checked})})}</script>`;
 }
 
@@ -243,6 +255,14 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/v1/chat/completions") return await completions(req, res);
     if (req.method === "GET" && url.pathname === "/status") return send(res, 200, gw.status());
+    if (req.method === "POST" && url.pathname === "/bench/start") {
+      const b = await body(req);
+      bench = bench && bench.gw === gw ? bench : new Bench(gw);
+      const st = await bench.start({ truth: b.truth !== false, truthLimit: Number(b.truthLimit) || undefined,
+        onPins: (pins) => { if (b.apply !== false) { settings.pins = pins; writeJson("settings.json", settings); gw.pins = pins; } } });
+      return send(res, 200, { running: st.running, total: st.total });
+    }
+    if (req.method === "GET" && url.pathname === "/bench") return send(res, 200, bench ? bench.state : { running: false });
     if (req.method === "POST" && url.pathname === "/admin/shutdown") {   // used by the Open WebUI function to reload updated code
       send(res, 200, { ok: true });
       setTimeout(() => process.exit(0), 150);
