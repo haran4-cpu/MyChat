@@ -28,6 +28,11 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
   const u = `http://127.0.0.1:${server.address().port}`;
   // strip the real catalogue so only the mocks are used
   assert.equal((await fetch(u + "/v1/models")).status, 401);
+  // DNS rebinding: a foreign Host header is refused even for the Accounts page (which carries the local key)
+  const rebound = await new Promise((ok) => http.get({ host: "127.0.0.1", port: server.address().port, path: "/connections",
+    headers: { Host: "evil.example:" + server.address().port } }, (res) => { res.resume(); ok(res.statusCode); }));
+  assert.equal(rebound, 403);
+  assert.match(await (await fetch(u + "/connections")).text(), /Use MyChat inside Open WebUI/);
   const H = { Authorization: "Bearer " + token, "Content-Type": "application/json" };
   const models = await (await fetch(u + "/v1/models", { headers: H })).json();
   assert.ok(models.data.some((m) => m.id === "mychat/max"));
