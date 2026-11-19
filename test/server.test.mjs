@@ -32,7 +32,10 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
   const rebound = await new Promise((ok) => http.get({ host: "127.0.0.1", port: server.address().port, path: "/connections",
     headers: { Host: "evil.example:" + server.address().port } }, (res) => { res.resume(); ok(res.statusCode); }));
   assert.equal(rebound, 403);
-  assert.match(await (await fetch(u + "/connections")).text(), /Use MyChat inside Open WebUI/);
+  const html = await (await fetch(u + "/connections")).text();
+  assert.match(html, /Use MyChat inside Open WebUI/);
+  // the page's own script must at least parse (template-literal escaping bugs show up here)
+  for (const [, js] of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new Function(js.replace(/\bawait\b/g, "")), js.slice(0, 80));
   const H = { Authorization: "Bearer " + token, "Content-Type": "application/json" };
   const models = await (await fetch(u + "/v1/models", { headers: H })).json();
   assert.ok(models.data.some((m) => m.id === "mychat/max"));

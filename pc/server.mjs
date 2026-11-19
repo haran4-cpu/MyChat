@@ -194,10 +194,10 @@ document.addEventListener('paste',e=>{if(e.target===t)return;const s=(e.clipboar
 async function rm(id){await fetch('/connections/remove',{method:'POST',headers:H,body:JSON.stringify({provider:id})});location.reload()}
 async function bstart(){await fetch('/bench/start',{method:'POST',headers:H,body:'{}'});bpoll()}
 async function bpoll(){const j=await (await fetch('/bench',{headers:H})).json();if(!j.startedAt)return;
-bst.textContent=j.running?`running · ${j.phase} · ${j.done}/${j.total}`:(j.error?'✗ '+j.error:'✓ done');
-let t=(j.models||[]).map(m=>`${m.provider}:${m.model}  chat ${m.acc.chat}  code ${m.acc.code}  reason ${m.acc.reason}`).join('\n');
-if(j.pins)t+='\n\nRouting now prefers:\n'+Object.entries(j.pins).map(([k,v])=>k+': '+(v.join(', ')||'—')).join('\n');
-if(j.truth)t+='\n\nTruth Engine vs one fast model:\n'+JSON.stringify(j.truth.summary,null,1);
+bst.textContent=j.running?('running · '+j.phase+' · '+j.done+'/'+j.total):(j.error?'✗ '+j.error:'✓ done');
+let t=(j.models||[]).map(m=>m.provider+':'+m.model+'  chat '+m.acc.chat+'  code '+m.acc.code+'  reason '+m.acc.reason).join('\\n');
+if(j.pins)t+='\\n\\nRouting now prefers:\\n'+Object.entries(j.pins).map(([k,v])=>k+': '+(v.join(', ')||'—')).join('\\n');
+if(j.truth)t+='\\n\\nTruth Engine vs one fast model:\\n'+JSON.stringify(j.truth.summary,null,1);
 bout.textContent=t;if(j.running)setTimeout(bpoll,4000)}
 bpoll();
 async function opt(){await fetch('/connections',{method:'POST',headers:H,body:JSON.stringify({allowKeyless:kl.checked})})}</script>`;
