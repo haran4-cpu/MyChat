@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Back to MyChat</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #101114; color: #ECECEF;
+         font: 16px/1.5 system-ui, sans-serif; text-align: center; padding: 24px; box-sizing: border-box; }
+  a { display: inline-block; margin-top: 18px; padding: 14px 22px; border-radius: 12px; background: #2B5BD7; color: #fff; text-decoration: none; font-weight: 600; }
+  p { color: #A1A1AA; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Signed in</h1>
+  <p id="msg">Returning to MyChat…</p>
+  <a id="back" href="#">Open MyChat</a>
+</main>
+<script>
+  // OpenRouter sends the one-time code here; this page only hands it to the app on this phone.
+  // The code is useless without the secret the app kept (PKCE), so passing it along is safe.
+  var q = new URLSearchParams(location.search), code = q.get("code");
+  var link = document.getElementById("back");
+  if (!code) { document.getElementById("msg").textContent = "No sign-in code was received. Go back to MyChat and try again."; link.href = "intent://open#Intent;scheme=mychat;package=il.mychat;end"; }
+  else {
+    var intent = "intent://oauth/openrouter?code=" + encodeURIComponent(code) + "#Intent;scheme=mychat;package=il.mychat;end";
+    link.href = /android/i.test(navigator.userAgent) ? intent : "mychat://oauth/openrouter?code=" + encodeURIComponent(code);
+    setTimeout(function () { location.href = link.href; }, 300);
+  }
+  history.replaceState(null, "", location.pathname);   // keep the code out of the browser history
+</script>
+</body>
+</html>

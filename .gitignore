@@ -7,3 +7,7 @@ settings.json
 *.keystore
 *.jks
 .env*
+app/node_modules/
+app/www/core/
+app/android/
+app/www/selftest.html

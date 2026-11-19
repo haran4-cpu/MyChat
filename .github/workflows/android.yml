@@ -1,0 +1,105 @@
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+    paths: ["app/**", "core/**", ".github/workflows/android.yml"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HAS_KS: ${{ secrets.MYCHAT_KEYSTORE_B64 != '' }}
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Engine tests (the app runs this exact code)
+        working-directory: .
+        run: npm test
+
+      - name: Install Capacitor
+        run: npm install --no-audit --no-fund
+
+      - name: Copy the shared engine into the app
+        run: node scripts/prepare.mjs
+
+      - name: App self-test in headless Chrome (chat, streaming, Hebrew, encrypted keys)
+        run: |
+          cp test/selftest.html www/selftest.html
+          (PORT=5173 node scripts/serve.mjs &) ; sleep 1
+          out=$(node test/cdp.mjs http://127.0.0.1:5173/selftest.html 'document.body.getAttribute("data-selftest")' "" 30000)
+          echo "$out"
+          echo "$out" | grep -q '\\"code\\":true' && echo "$out" | grep -q '\\"keyInPlaintext\\":false' && echo "$out" | grep -q '\\"messages\\":2'
+          rm www/selftest.html
+
+      - name: Create the Android project
+        run: |
+          npx cap add android
+          node scripts/patch-android.mjs
+          npx cap sync android
+
+      # One signing key across builds, so a new APK installs as an update over the old one.
+      # Permanent: repo secret MYCHAT_KEYSTORE_B64 (base64 of a keystore, alias androiddebugkey, password android).
+      # Until that secret exists, the key is kept in the Actions cache.
+      - name: Signing key (from secret)
+        if: env.HAS_KS == 'true'
+        env:
+          KS: ${{ secrets.MYCHAT_KEYSTORE_B64 }}
+        run: mkdir -p ~/.android && echo "$KS" | base64 -d > ~/.android/debug.keystore
+
+      - name: Signing key (cache)
+        if: env.HAS_KS != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: mychat-signing-key-v1
+
+      - name: Create signing key if none yet
+        run: |
+          if [ ! -f ~/.android/debug.keystore ]; then
+            mkdir -p ~/.android
+            keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey \
+              -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=MyChat,O=MyChat,C=IL"
+          fi
+          keytool -list -v -keystore ~/.android/debug.keystore -storepass android | grep -m1 "SHA256"
+
+      - name: Build APK
+        run: |
+          cd android
+          ./gradlew --no-daemon assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/MyChat-${{ github.run_number }}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MyChat-${{ github.run_number }}
+          path: MyChat-${{ github.run_number }}.apk
+
+      - name: Publish to Releases
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" "MyChat-${{ github.run_number }}.apk" \
+            --title "MyChat build ${{ github.run_number }}" --prerelease \
+            --notes "Built from ${{ github.sha }}. Install on Android: download the APK, open it, allow installing from this source."

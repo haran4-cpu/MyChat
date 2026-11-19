@@ -171,3 +171,11 @@ test("Wikipedia: identified request, Hebrew falls back to the quoted title and t
   assert.deepEqual(await bad.evidence("Eiffel Tower height"), []);
   assert.match(bad.errors[0].error, /403/);
 });
+
+test("small talk is never routed to the slow fact-checking path", async () => {
+  const { triage } = await import("../core/truth.mjs");
+  for (const t of ["בדיקה: מה שלומך?", "היי", "מה נשמע?", "thanks!", "Hello there", "who are you?"])
+    assert.equal(triage([{ role: "user", content: t }]).verify, false, t);
+  assert.equal(triage([{ role: "user", content: "מי כתב את אהבת ציון?" }]).verify, true);
+  assert.equal(triage([{ role: "user", content: "What is the capital of Burkina Faso?" }]).verify, true);
+});

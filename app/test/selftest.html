@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="he">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#101114">
+<title>MyChat</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <button id="menuBtn" class="icon" aria-label="Chats">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+    </button>
+    <div class="title"><span id="viewTitle">MyChat</span><span id="viewSub" class="sub"></span></div>
+    <button id="newChat" class="icon" aria-label="New chat">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </header>
+
+  <main id="view-chat" class="view">
+    <div id="messages" class="messages" aria-live="polite"></div>
+    <div id="statusLine" class="status" hidden></div>
+    <div class="composer">
+      <div id="modes" class="modes" role="radiogroup" aria-label="Mode"></div>
+      <form id="sendForm" class="inputRow">
+        <label for="msg" class="sr">Message</label>
+        <textarea id="msg" rows="1" dir="auto" placeholder="Message · הודעה"></textarea>
+        <button id="sendBtn" class="send" aria-label="Send">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+        </button>
+      </form>
+    </div>
+  </main>
+
+  <main id="view-accounts" class="view" hidden></main>
+  <main id="view-agent" class="view" hidden></main>
+  <main id="view-files" class="view" hidden></main>
+
+  <nav class="tabs">
+    <button data-view="chat" class="on"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4z"/></svg>Chat</button>
+    <button data-view="agent"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l6-6-6-6M12 19h8"/></svg>Agent</button>
+    <button data-view="files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h6l2 2h10v10H3z"/></svg>Files</button>
+    <button data-view="accounts"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/></svg>Accounts</button>
+  </nav>
+
+  <div id="sheet" class="sheet" hidden role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+    <div class="sheetBody">
+      <div class="sheetHead"><h2 id="sheetTitle">Checks</h2><button id="sheetClose" class="icon" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+      <div id="sheetContent"></div>
+    </div>
+  </div>
+
+  <div id="drawer" class="drawer" hidden>
+    <div class="drawerBody"><h2>Chats</h2><div id="chatList"></div></div>
+  </div>
+  <div id="toast" class="toast" hidden></div>
+</div>
+<script>
+// Self-test: a stand-in provider so the whole app runs offline (model list + streamed answer).
+const sse = (parts) => new Response(new ReadableStream({ start(c) { const e = new TextEncoder();
+  for (const p of parts) c.enqueue(e.encode("data: " + JSON.stringify({ choices: [{ delta: { content: p } }] }) + "\n\n"));
+  c.enqueue(e.encode("data: [DONE]\n\n")); c.close(); } }), { headers: { "Content-Type": "text/event-stream" } });
+const realFetch = window.fetch.bind(window);
+window.fetch = async (url, init) => {
+  url = String(url);
+  if (url.includes("api.groq.com") && url.endsWith("/models")) return new Response(JSON.stringify({ data: [{ id: "openai/gpt-oss-120b" }] }), { headers: { "Content-Type": "application/json" } });
+  if (url.includes("api.groq.com") && url.endsWith("/chat/completions")) return sse(["שלום! ", "**MyChat** ", "עובד.", "\n\n```js\nconsole.log(1)\n```"]);
+  if (url.startsWith(location.origin)) return realFetch(url, init);
+  return new Response("offline in self-test", { status: 503 });
+};
+localStorage.clear();
+localStorage.setItem("mychat.settings", JSON.stringify({ allowKeyless: false }));
+</script>
+<script type="module" src="main.mjs"></script>
+<script type="module">
+import { state, setKey } from "./engine.mjs";
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const mark = (k) => document.body.setAttribute("data-step", k);
+mark("start");
+for (let i = 0; i < 100 && document.querySelector("#viewTitle").textContent !== "Accounts"; i++) await wait(50);
+mark("main-ready");
+await setKey("groq", "gsk_" + "t".repeat(40));
+mark("key-saved");
+document.querySelector('.tabs button[data-view="chat"]').click();
+document.querySelector("#msg").value = "בדיקה: מה שלומך?";
+document.querySelector("#sendForm").requestSubmit();
+mark("sent");
+for (let i = 0; i < 60 && !document.querySelector(".actions"); i++) await wait(100);
+mark("answered");
+await wait(800);
+const saved = JSON.parse(localStorage.getItem("mychat.chats") || "[]");
+const vault = localStorage.getItem("mychat.keys.v1") || "";
+document.body.setAttribute("data-selftest", JSON.stringify({
+  bot: document.querySelector(".msg.bot")?.innerText || "", bold: !!document.querySelector(".msg.bot b"), code: !!document.querySelector(".msg.bot pre code"),
+  saved: saved.length, messages: saved[0]?.messages?.length || 0, keyInPlaintext: vault.includes("gsk_"), vaultEncrypted: /^[A-Za-z0-9+/=]+\.[A-Za-z0-9+/=]+$/.test(vault) }));
+</script>
+
+</body>
+</html>

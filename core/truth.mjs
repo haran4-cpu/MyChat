@@ -18,11 +18,14 @@ const CURRENT_RX = /\b(today|now|current(ly)?|latest|recent(ly)?|this (year|mont
 const FACT_RX = /\b(who|what|when|where|which|how (many|much|long|far|old|big)|is it true|did|does|was|were|population|capital|founded|invented|born|died|distance|height|largest|smallest|first)\b|(מי |מה |מתי|איפה|היכן|כמה|האם נכון|האם זה נכון|אוכלוסי|בירה|נוסד|הומצא|נולד|נפטר|מרחק|גובה|הגדול|הראשון)/i;
 const MATH_RX = /\d[\d,.]*\s*(%|percent|[-+*/^×÷])\s*\d|\d[\d,.]*\s*(%|percent)\s*(of|מ)\s*\d|\b(calculate|compute|how much is|sum of|average of)\b|(חשב|תחשב|כמה זה|ממוצע|סכום)/i;
 const CREATIVE_RX = /\b(write|compose)\s+(a |an )?(poem|story|song|joke|haiku|limerick|lyrics|tagline|slogan)|(שיר|סיפור|בדיחה|סלוגן)\b/i;
+// Small talk never needs fact-checking (measured: "מה שלומך?" was sent through the slow verified path because of "מה").
+const SMALLTALK_RX = /^\W*(hi|hello|hey|yo|thanks?|thank you|good (morning|evening|night)|how are you|how's it going|who are you|what('?s| is) your name)\b|(^|\s)(שלום|היי|הי|מה שלומך|מה נשמע|מה קורה|מה המצב|תודה|בוקר טוב|ערב טוב|לילה טוב|מי אתה|איך קוראים לך)(\s|[?!.,]|$)/i;
 const OPINION_RX = /\b(what do you think|your opinion|should i|do you like|recommend)\b|(מה דעתך|כדאי לי|האם כדאי|תמליץ)/i;
 
 /** Decide whether an answer needs verification. Rules only: this runs before any model call. */
 export function triage(messages) {
   const t = lastUserText(messages);
+  if (SMALLTALK_RX.test(t) && t.length < 80) return { kind: "chat", verify: false };
   if (CREATIVE_RX.test(t)) return { kind: "creative", verify: false };
   const task = classify(messages);
   if (task === "code") return { kind: "code", verify: false };   // code is verified by running it (Kestrel / app sandbox)

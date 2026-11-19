@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="he">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src *; font-src 'self'">
+<meta name="theme-color" content="#101114">
+<title>MyChat</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <header class="top">
+    <button id="menuBtn" class="icon" aria-label="Chats">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+    </button>
+    <div class="title"><span id="viewTitle">MyChat</span><span id="viewSub" class="sub"></span></div>
+    <button id="newChat" class="icon" aria-label="New chat">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </header>
+
+  <main id="view-chat" class="view">
+    <div id="messages" class="messages" aria-live="polite"></div>
+    <div id="statusLine" class="status" hidden></div>
+    <div class="composer">
+      <div id="modes" class="modes" role="radiogroup" aria-label="Mode"></div>
+      <form id="sendForm" class="inputRow">
+        <label for="msg" class="sr">Message</label>
+        <textarea id="msg" rows="1" dir="auto" placeholder="Message · הודעה"></textarea>
+        <button id="sendBtn" class="send" aria-label="Send">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+        </button>
+      </form>
+    </div>
+  </main>
+
+  <main id="view-accounts" class="view" hidden></main>
+  <main id="view-agent" class="view" hidden></main>
+  <main id="view-files" class="view" hidden></main>
+
+  <nav class="tabs">
+    <button data-view="chat" class="on"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H8l-4 4z"/></svg>Chat</button>
+    <button data-view="agent"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17l6-6-6-6M12 19h8"/></svg>Agent</button>
+    <button data-view="files"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h6l2 2h10v10H3z"/></svg>Files</button>
+    <button data-view="accounts"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c1-4 4-6 8-6s7 2 8 6"/></svg>Accounts</button>
+  </nav>
+
+  <div id="sheet" class="sheet" hidden role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+    <div class="sheetBody">
+      <div class="sheetHead"><h2 id="sheetTitle">Checks</h2><button id="sheetClose" class="icon" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+      <div id="sheetContent"></div>
+    </div>
+  </div>
+
+  <div id="drawer" class="drawer" hidden>
+    <div class="drawerBody"><h2>Chats</h2><div id="chatList"></div></div>
+  </div>
+  <div id="toast" class="toast" hidden></div>
+</div>
+<script type="module" src="main.mjs"></script>
+</body>
+</html>
