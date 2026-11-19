@@ -187,3 +187,19 @@ test("Gemini native endpoint end to end through the gateway", async () => {
   assert.equal(r.content, "Hello");
   srv.closeAllConnections(); srv.close();
 });
+
+test("an account without credit is parked as a whole; a model not on the plan is skipped for a day", async () => {
+  const w = await mockWorld({
+    a: { m1: { status: 402 }, m2: { text: "never reached" } },
+    b: { "gemini-pro": { status: 429 }, "fast-1": { text: "ok from b" } },
+  });
+  const gw = gwFor(w, ["a", "b"]);
+  try {
+    await gw.refreshModels(true);
+    const r = await gw.chat({ messages: [{ role: "user", content: "hi" }] }, { onDelta: () => {} });
+    assert.equal(r.content, "ok from b");
+    assert.match(gw.status().providers.a.disabled, /no credit/);
+    assert.ok(!gw.enabledProviders().includes("a"));
+    assert.ok(!w.calls.some((c) => c.prov === "a" && c.model === "m2"));
+  } finally { w.srv.closeAllConnections(); w.srv.close(); }
+});

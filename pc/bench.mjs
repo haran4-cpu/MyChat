@@ -50,17 +50,22 @@ export function runCodeTest(code, test, timeoutMs = 4000) {
   })();
 }
 
-export function pickModels(gw, { perProvider = 4, openrouterMax = 3 } = {}) {
+/** Candidate models per provider, best prior first. The run tries them in order and keeps the first `perProvider`
+ *  that actually answer (a listed model can still be unavailable on the account's plan). */
+export function pickModels(gw, { perProvider = 4, openrouterMax = 3, pool = 10 } = {}) {
   const out = [];
   for (const id of gw.enabledProviders()) {
     const p = gw.providers[id];
     if (p.keyless || p.local || !gw.keys[id]) continue;
     const models = gw.models[id] || [];
-    const chosen = new Set();
-    for (const task of TASKS) {
-      [...models].sort((a, b) => (priorFor(b)[task] ?? 0) - (priorFor(a)[task] ?? 0)).slice(0, 2).forEach((m) => chosen.add(m));
+    const ranked = [];
+    for (let k = 0; ranked.length < pool && k < models.length; k++) {
+      for (const task of TASKS) {
+        const m = [...models].sort((a, b) => (priorFor(b)[task] ?? 0) - (priorFor(a)[task] ?? 0))[k];
+        if (m && !ranked.includes(m)) ranked.push(m);
+      }
     }
-    [...chosen].slice(0, id === "openrouter" ? openrouterMax : perProvider).forEach((model) => out.push({ provider: id, model }));
+    ranked.slice(0, pool).forEach((model) => out.push({ provider: id, model, keep: id === "openrouter" ? openrouterMax : perProvider }));
   }
   return out;
 }
@@ -87,12 +92,15 @@ export class Bench {
       try {
         await gw.refreshModels(true);
         const picks = pickModels(gw);
-        st.total = picks.length * PROBES.length + (truth ? truthLimit * 2 : 0);
+        st.total = Object.values(picks.reduce((a, c) => ((a[c.provider] = c.keep), a), {})).reduce((a, k) => a + k, 0) * PROBES.length
+                   + (truth ? truthLimit * 2 : 0);
         const byProvider = {};
         for (const c of picks) (byProvider[c.provider] ||= []).push(c);
         // providers in parallel (separate rate limits), models of one provider one after another
         await Promise.all(Object.values(byProvider).map(async (list) => {
+          let kept = 0;
           for (const c of list) {
+            if (kept >= c.keep || gw.parked[c.provider]?.until > Date.now()) break;
             const row = { provider: c.provider, model: c.model, acc: {}, ms: {}, errors: 0, answers: [] };
             const per = {};
             for (const pr of PROBES) {
@@ -115,6 +123,8 @@ export class Bench {
               const good = xs.filter((x) => x.ok);
               row.ms[t] = good.length ? Math.round(good.reduce((a, x) => a + x.ms, 0) / good.length) : 1e9;
             }
+            if (row.errors >= 3 && row.answers.every((a) => !a.ok)) { st.skipped = [...(st.skipped || []), `${c.provider}:${c.model}`]; continue; }
+            kept++;
             st.models.push(row);
             st.log.push(`${c.provider}:${c.model} chat ${row.acc.chat} code ${row.acc.code} reason ${row.acc.reason}`);
           }

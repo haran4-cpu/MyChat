@@ -85,6 +85,8 @@ class Stats {
 }
 
 /** OpenAI-style request -> Gemini native generateContent body. */
+const BILLING_RX = /insufficient.{0,12}(balance|credit|funds)|purchase pre-?paid credits|payment required|billing|out of credits|exceeded your monthly included credits/i;
+
 export function toGemini(req) {
   const contents = [], sys = [];
   const parts = (c) => {
@@ -150,6 +152,7 @@ export class Gateway {
     this.models = {};          // provider -> [model ids]
     this.modelsAt = {};
     this.disabled = {};        // provider -> reason (bad key etc.)
+    this.parked = {};          // provider -> { until, reason } (no credit / balance): retried after a while, shown on Accounts
     this.log = o.log || (() => {});
     this.firstTokenTimeoutMs = o.firstTokenTimeoutMs || 45000;
     this.pins = o.pins || {};  // task -> ["provider:model", ...] preferred order (from evals)
@@ -158,6 +161,7 @@ export class Gateway {
   enabledProviders() {
     return Object.entries(this.providers).filter(([id, p]) => {
       if (this.disabled[id]) return false;
+      if (this.parked[id] && this.parked[id].until > Date.now()) return false;
       if (p.local) return this.allowLocal;
       if (p.keyless) return this.allowKeyless;
       return !!this.keyFor(id);
@@ -260,6 +264,7 @@ export class Gateway {
     let partial = "";
     for (const c of list) {
       if (opt.signal?.aborted) break;
+      if (this.disabled[c.provider] || this.parked[c.provider]?.until > Date.now()) continue;   // found out during this request
       const messages = partial
         ? [...req.messages, { role: "assistant", content: partial },
            { role: "user", content: "Your previous answer was cut off. Continue exactly where it stopped, without repeating anything." }]
@@ -308,7 +313,13 @@ export class Gateway {
       clearTimeout(firstTimer);
       const txt = (await res.text().catch(() => "")).slice(0, 300);
       const ra = Number(res.headers.get?.("retry-after")) || 0;
-      if (res.status === 429) this.stats.failure(c.provider, c.model, "429 " + txt, Math.max(ra * 1000, 60000));
+      if (res.status === 402 || BILLING_RX.test(txt)) {
+        // the account itself has no credit: park the whole provider instead of trying its models one by one
+        this.parked[c.provider] = { until: Date.now() + 6 * 3600e3, reason: "no credit or balance on this account" };
+        this.stats.failure(c.provider, c.model, txt, 6 * 3600e3);
+      } else if (res.status === 429 && /limit:\s*0\b|free.?tier.{0,40}not|not available on the free/i.test(txt)) {
+        this.stats.failure(c.provider, c.model, "not on this plan: " + txt, 24 * 3600e3);   // e.g. Pro models on a free Gemini key
+      } else if (res.status === 429) this.stats.failure(c.provider, c.model, "429 " + txt, Math.max(ra * 1000, 60000));
       else if (res.status === 401 || res.status === 403) { this.disabled[c.provider] = `key rejected (${res.status})`; this.stats.failure(c.provider, c.model, txt); }
       else if (res.status === 404 || res.status === 400) this.stats.failure(c.provider, c.model, txt, 6 * 3600e3); // model gone / unsupported params
       else this.stats.failure(c.provider, c.model, txt, 20000);
@@ -386,7 +397,8 @@ export class Gateway {
   status() {
     return {
       providers: Object.fromEntries(Object.entries(this.providers).map(([id, p]) => [id, {
-        name: p.name, enabled: this.enabledProviders().includes(id), disabled: this.disabled[id] || "",
+        name: p.name, enabled: this.enabledProviders().includes(id),
+        disabled: this.disabled[id] || (this.parked[id]?.until > Date.now() ? this.parked[id].reason : ""),
         hasKey: !!this.keys[id], keyless: !!p.keyless, models: (this.models[id] || []).length, free: p.free, keyUrl: p.keyUrl, signIn: p.signIn }])),
       stats: this.stats.toJSON(),
     };
