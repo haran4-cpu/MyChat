@@ -9,12 +9,14 @@
 //  consensus  3 drafts from 3 different families in parallel, then an aggregator that sees all of them and
 //             their disagreements (mixture-of-agents + self-consistency). For facts, math, decisions.
 import { classify, family, lastUserText } from "./router.mjs";
+import { verifiedAnswer, triage } from "./truth.mjs";
 
 export const MODES = {
   fast: "Fastest capable model",
   auto: "Best model for the task, automatic failover",
   max: "Draft, cross-family review, revise (code and analysis)",
   consensus: "Three model families answer, an aggregator reconciles them",
+  verified: "Truth Engine: claims checked against evidence, exact math and independent models",
 };
 
 const REVIEW_SYS = "You are an independent senior reviewer. Another model wrote the answer below. Check it against the request. " +
@@ -46,6 +48,10 @@ export async function run(gw, req, o = {}) {
   const trace = [];
   if (!Object.keys(gw.models).length) await gw.refreshModels();  // strategies pick models before the first call
 
+  // Truth Engine: always in "verified"; automatically in "auto"/"max" for factual, current and numeric questions.
+  if (!req.tools?.length && (mode === "verified" || ((mode === "auto" || mode === "max") && o.truth && triage(req.messages).verify))) {
+    return verifiedAnswer(gw, req, { ...(o.truth || {}), onStatus: o.onStatus, onDelta: o.onDelta, signal: o.signal, privateData: o.privateData });
+  }
   // Tool calls and very short chit-chat need one direct pass: orchestration would only add latency.
   if (mode === "fast" || req.tools?.length || (mode !== "consensus" && task === "fast")) {
     const r = await gw.chat(req, { ...base, task: mode === "fast" ? "fast" : task });

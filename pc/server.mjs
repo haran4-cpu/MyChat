@@ -15,7 +15,9 @@ import { fileURLToPath } from "node:url";
 import { Gateway } from "../core/router.mjs";
 import { run, MODES } from "../core/reason.mjs";
 import { PROVIDERS } from "../core/providers.mjs";
-import { pkcePair, openRouterAuthUrl, openRouterExchange, detectKeys, validateKey, identifyPlainKey, CONNECT } from "../core/accounts.mjs";
+import { pkcePair, openRouterAuthUrl, openRouterExchange, detectKeys, validateKey, identifyPlainKey, CONNECT, SEARCH_KEYS } from "../core/accounts.mjs";
+import { Search, SEARCH_PROVIDERS } from "../core/search.mjs";
+import { Ledger } from "../core/ledger.mjs";
 
 const HOME = process.env.MYCHAT_HOME || path.join(process.env.APPDATA || path.join(os.homedir(), ".config"), "MyChat");
 const PORT = Number(process.env.MYCHAT_PORT || 11500);
@@ -29,9 +31,11 @@ try { token = fs.readFileSync(F("token"), "utf8").trim(); } catch { /* first run
 if (!token) { token = crypto.randomBytes(24).toString("base64url"); fs.writeFileSync(F("token"), token); }
 
 const settings = { allowKeyless: true, allowLocal: true, pins: {}, ...readJson("settings.json", {}) };
-let gw;
+let gw, search;
+const ledger = new Ledger({ load: () => readJson("ledger.json", null), save: (v) => { try { writeJson("ledger.json", v); } catch { /* best effort */ } } });
 function build() {
   const keys = readJson("keys.json", {});
+  search = new Search({ keys });
   gw = new Gateway({ keys, allowKeyless: settings.allowKeyless, allowLocal: settings.allowLocal, pins: settings.pins,
                      extraProviders: settings.extraProviders || {},
                      log: (m) => fs.appendFileSync(F("gateway.log"), new Date().toISOString() + " " + m + "\n") });
@@ -42,6 +46,7 @@ build();
 setInterval(() => { try { writeJson("stats.json", gw.stats.toJSON()); } catch { /* ignore */ } }, 30000).unref();
 
 const MODEL_IDS = [...Object.keys(MODES).map((m) => "mychat/" + m), "mychat/private"];
+const truthFor = (privateData) => (privateData ? undefined : { search, ledger });
 
 function send(res, code, obj, headers = {}) {
   res.writeHead(code, { "Content-Type": "application/json", ...headers });
@@ -64,7 +69,7 @@ async function completions(req, res) {
   const id = "chatcmpl-" + crypto.randomBytes(8).toString("hex"), created = Math.floor(Date.now() / 1000);
   const ctl = new AbortController();
   res.on("close", () => { if (!res.writableEnded) ctl.abort(); });
-  const opts = { mode, privateData, signal: ctl.signal };
+  const opts = { mode, privateData, signal: ctl.signal, truth: truthFor(privateData) };
   const oreq = { messages: b.messages || [], tools: b.tools, tool_choice: b.tool_choice, temperature: b.temperature,
                  max_tokens: b.max_tokens, response_format: b.response_format };
   if (privateData) {
@@ -158,7 +163,9 @@ ${flash ? `<div class=flash>${flash}</div>` : ""}
 <div class=paste><b>Paste any key here — or press Ctrl+V anywhere on this page.</b>
 <div class=s>The provider is recognised automatically, the key is checked live, and stored only on this PC. Several keys at once are fine.</div>
 <textarea id=t placeholder="AIza… · nvapi-… · gsk_… · sk-or-… · sk-ant-… · hf_…"></textarea><button class=btn onclick="paste(t.value)">Add</button><div id=out></div></div>
-<div class=grid>${order.filter((id) => PROVIDERS[id]).map(card).join("")}</div>
+<h2>Models</h2><div class=grid>${order.filter((id) => PROVIDERS[id]).map(card).join("")}</div>
+<h2>Web evidence for the Truth Engine</h2><div class=s>Wikipedia is always on (no key). Each search key below adds broader, fresher evidence.</div>
+<div class=grid>${Object.entries(SEARCH_PROVIDERS).map(([id, p]) => `<div class=card><div class=h><b>${p.name}</b>${keys[id] ? "<span class=ok>✓ connected</span>" : "<span class=off>not connected</span>"}</div><div class=s>${p.note}</div><div class=a><a class="btn ghost" href="${p.keyUrl}" target=_blank rel=noopener>${keys[id] ? "Manage key" : "Get key"}</a>${keys[id] ? ` <button class=x onclick="rm('${id}')">Remove</button>` : ""}</div></div>`).join("")}</div>
 <p class=s><label><input type=checkbox id=kl ${settings.allowKeyless ? "checked" : ""} onchange="opt()"> Use free no-key public channels as a last resort (never for private chats)</label></p>
 <script>const T=${JSON.stringify(token)};const H={'Content-Type':'application/json','X-MyChat-Token':T};
 async function paste(text){if(!text||!text.trim())return;out.textContent='Checking…';const r=await fetch('/connections/paste',{method:'POST',headers:H,body:JSON.stringify({text})});const j=await r.json();
@@ -204,7 +211,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/v1/models") {
       return send(res, 200, { object: "list", data: MODEL_IDS.map((id) => ({ id, object: "model", owned_by: "mychat",
         name: { "mychat/auto": "MyChat Auto", "mychat/max": "MyChat Max (draft · review · revise)", "mychat/consensus": "MyChat Consensus (3 families)",
-                "mychat/fast": "MyChat Fast", "mychat/private": "MyChat Private (local only)" }[id] })) });
+                "mychat/fast": "MyChat Fast", "mychat/verified": "MyChat Verified (Truth Engine)", "mychat/private": "MyChat Private (local only)" }[id] })) });
     }
     if (req.method === "POST" && url.pathname === "/v1/chat/completions") return await completions(req, res);
     if (req.method === "GET" && url.pathname === "/status") return send(res, 200, gw.status());
@@ -218,6 +225,13 @@ const server = http.createServer(async (req, res) => {
       }
       const results = [];
       for (const f of found) {
+        if (SEARCH_KEYS.has(f.provider)) {
+          let v = { ok: true, models: 0 };
+          if (f.provider !== "jina") { try { const r = await new Search({ keys: { [f.provider]: f.key } }).provider(f.provider, "wikipedia", 1); v = { ok: true, models: r.length }; } catch (e) { v = { ok: false, error: e.message }; } }
+          if (v.ok) saveKey(f.provider, f.key);
+          results.push({ provider: f.provider, name: SEARCH_PROVIDERS[f.provider].name, ...v, models: v.models });
+          continue;
+        }
         const v = await validateKey(f.provider, f.key, gw.providers);
         if (v.ok) saveKey(f.provider, f.key);
         results.push({ provider: f.provider, name: gw.providers[f.provider]?.name || f.provider, ...v });

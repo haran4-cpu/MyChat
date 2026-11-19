@@ -44,15 +44,23 @@ export const KEY_SHAPES = [
   ["anthropic", /\bsk-ant-api\d\d-[A-Za-z0-9_-]{40,}\b/],
   ["nvidia", /\bnvapi-[A-Za-z0-9_-]{40,}\b/],
   ["groq", /\bgsk_[A-Za-z0-9]{40,}\b/],
-  ["gemini", /\bAIza[0-9A-Za-z_-]{35}\b/],
+  ["google", /\bAIza[0-9A-Za-z_-]{35}\|[A-Za-z0-9:_-]{8,}/],   // Google Programmable Search: API_KEY|ENGINE_ID
+  ["gemini", /\bAIza[0-9A-Za-z_-]{35}\b(?!\|)/],
   ["huggingface", /\bhf_[A-Za-z0-9]{30,}\b/],
   ["github", /\b(github_pat_[A-Za-z0-9_]{60,}|gh[pousr]_[A-Za-z0-9]{36,})\b/],
   ["cerebras", /\bcsk-[A-Za-z0-9]{40,}\b/],
+  ["tavily", /\btvly-[A-Za-z0-9_-]{20,}\b/],
+  ["jina", /\bjina_[A-Za-z0-9_-]{40,}\b/],
+  ["brave", /\bBSA[A-Za-z0-9_-]{20,}\b/],
 ];
+export const SEARCH_KEYS = new Set(["tavily", "jina", "brave", "serper", "google", "exa"]);
 
 /** Find every recognisable key in a pasted text (a key page copy, a note, several keys at once). */
 export function detectKeys(text) {
   const out = [];
+  const whole = String(text || "").trim();
+  if (/^[a-f0-9]{40}$/.test(whole)) return [{ provider: "serper", key: whole }];                 // Serper: 40 hex
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(whole)) return [{ provider: "exa", key: whole }];
   for (const [provider, rx] of KEY_SHAPES) {
     const g = new RegExp(rx.source, "g");
     for (const m of String(text || "").matchAll(g)) if (!out.some((o) => o.key === m[0])) out.push({ provider, key: m[0] });
