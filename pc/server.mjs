@@ -365,6 +365,8 @@ function linkUrls() {
   const out = [];
   for (const [name, list] of Object.entries(os.networkInterfaces())) for (const a of list || []) {
     if (a.family !== "IPv4" || a.internal) continue;
+    // virtual adapters (Hyper-V/WSL "vEthernet", VirtualBox, VMware, Docker) are never reachable from the phone
+    if (/vEthernet|VirtualBox|VMware|Docker|WSL|Hyper-V|vboxnet|br-|docker/i.test(name)) continue;
     out.push({ url: `http://${a.address}:${LINK_PORT}`, via: /^100\./.test(a.address) ? "Tailscale (works anywhere)" : `${name} (home network)` });
   }
   return out.sort((a, b) => (a.via.startsWith("Tailscale") ? -1 : 1) - (b.via.startsWith("Tailscale") ? -1 : 1));
