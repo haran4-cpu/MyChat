@@ -25,20 +25,26 @@ export async function challenge(gw, { answer, files, by = "", signal, privateDat
   if (!answer || !files?.size) return out;
   const fam = family(String(by).split(":").slice(1).join(":") || "x");
   const names = [...files.keys()].slice(0, 40).join(", ");
-  let r;
-  try {
-    r = await gw.chat({ temperature: 0.1, messages: [{ role: "system", content: SYS },
-      { role: "user", content: `FILES THE ANSWER IS ABOUT: ${names}\n\nANSWER:\n${String(answer).slice(0, 12000)}` }] },
-      { task: "reason", signal, privateData, quality: true, exclude: by ? [by] : [], avoidFamily: fam });
-  } catch { return out; }
-  out.by = `${r.provider}:${r.model}`;
-  const checks = (parseJsonLoose(r.content)?.checks || []).filter((c) => c && c.pattern && c.claim).slice(0, 6);
+  // up to two checkers: if the first returns nothing usable (no JSON, no checks), a second model is asked
+  let checks = [];
+  const tried = [...(by ? [by] : [])];
+  for (let attempt = 0; attempt < 2 && !checks.length; attempt++) {
+    let r;
+    try {
+      r = await gw.chat({ temperature: 0.1, messages: [{ role: "system", content: SYS },
+        { role: "user", content: `FILES THE ANSWER IS ABOUT: ${names}\n\nANSWER:\n${String(answer).slice(0, 12000)}` }] },
+        { task: "reason", signal, privateData, quality: true, exclude: tried, avoidFamily: fam });
+    } catch (e) { out.note = "checker failed: " + String(e.message).slice(0, 120); continue; }
+    out.by = `${r.provider}:${r.model}`; tried.push(out.by);
+    checks = (parseJsonLoose(r.content)?.checks || []).filter((c) => c && c.pattern && c.claim).slice(0, 6);
+    if (!checks.length) out.note = `${r.model} returned no usable checks: ${String(r.content).replace(/\s+/g, " ").slice(0, 120)}`;
+  }
   for (const c of checks) {
     const key = [...files.keys()].find((k) => k === c.file || k.endsWith("/" + String(c.file || "").replace(/^\.?\//, "")) || k.split("/").pop() === String(c.file || "").split("/").pop())
       || (files.size === 1 ? [...files.keys()][0] : null);
-    if (!key) continue;
+    if (!key) { out.note = `checker named a file that was not read: ${c.file}`; continue; }
     let re;
-    try { re = new RegExp(String(c.pattern).slice(0, 300), "gi"); } catch { continue; }
+    try { re = new RegExp(String(c.pattern).slice(0, 300), "gi"); } catch { out.note = `bad pattern from the checker: ${String(c.pattern).slice(0, 60)}`; continue; }
     const text = files.get(key), hits = [];
     for (const m of text.matchAll(re)) { hits.push(m.index); if (hits.length >= 500 || !m[0].length) break; }
     out.tried++;

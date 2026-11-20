@@ -322,10 +322,15 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     }
     if (!last) {   // models sometimes answer in plain text: accept it as the final answer — unless it is broken protocol JSON
       const protocol = /["'](thought|tool|calls|final)["']\s*:/.test(r.content);
-      if (!protocol && (step > 0 || !/\{/.test(r.content))) { last = { final: r.content }; break; }
-      msgs.push({ role: "assistant", content: r.content }, { role: "user", content: "Reply with one JSON object as described (tool call or final)." });
-      continue;
+      // a plain-text answer goes through the same checks as a JSON one (measured on the PC: a model answered in plain
+      // markdown and every check — wrong language, unopened file, run, citations, challenge — was skipped)
+      if (!protocol && (step > 0 || !/\{/.test(r.content))) last = { final: r.content };
+      else {
+        msgs.push({ role: "assistant", content: r.content }, { role: "user", content: "Reply with one JSON object as described (tool call or final)." });
+        continue;
+      }
     }
+
     if (last.final != null || Array.isArray(last.ops) && !last.tool && !last.calls) {
       // Describing files it never opened is invention (measured 2026-11-20: a 7-second "deep study" described the
       // contents of six files — API paths, Django versions, schemas — without reading one).
@@ -429,6 +434,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   }
   let answer = String(last?.final ?? last?.summary ?? "").trim() || "No usable answer came back from the models this time (they replied with nothing). Please try again — or connect an account for stronger models.";
   if (last?.final != null && (!checked || repaired)) checked = await checkClaims(answer, seen, reader);
+  if (challenged && !challenged.tried && challenged.note) answer += `\n\n*Challenge step: no claim could be checked (${challenged.note}).*`;
   if (challenged?.tried) answer += `\n\n*Challenged by another model: ${challenged.tried} claim check(s) run on the files${challenged.refuted.length ? ` — ${challenged.refuted.length} disproved and corrected` : " — none disproved"}.*`;
   if (checked && checked.total) answer += `\n\n---\n*Checked against the files: ${checked.total - checked.bad.length} of ${checked.total} citation(s) and code quote(s) found` +
     (checked.bad.length ? ` · not found: ${checked.bad.slice(0, 4).join("; ")}` : "") + "*";
