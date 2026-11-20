@@ -87,6 +87,7 @@ export const TOOL_DOCS = {
   tree: ["{\"path\":\"optional sub-folder or archive\"}", "the folder (or an archive) as an indented listing"],
   read: ["{\"path\":\"file or archive!/inner/file\",\"from\":1,\"to\":1500}", "a text file with line numbers; without from/to the whole file (up to 1,500 lines)"],
   search: ["{\"pattern\":\"regex\",\"path\":\"optional folder or archive\"}", "matching lines (path:line: text) across text files"],
+  find: ["{\"query\":\"words describing what you look for\",\"path\":\"optional folder\"}", "ranked search: the files most about these words, with their best lines (use when you don't know the exact text)"],
   study: ["{\"question\":\"...\",\"path\":\"folder or archive\"}", "deep read of many files by several models; returns verified findings"],
   calc: ["{\"expression\":\"(17.5/100)*2480\"}", "exact arithmetic"],
   web_search: ["{\"query\":\"...\"}", "web results with excerpts"],
@@ -151,14 +152,26 @@ export function workspaceReader(fs) {
  * host = { search?: Search, fetchText?(url), runJs?(code), privateData?, onStep?(step) }
  * Returns { id, goal, answer, summary, ops, rejected, steps, by, calls, reads, at }.
  */
-export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, search, fetchText, runJs, onStep = () => {}, evaluate }) {
+export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, search, fetchText, runJs, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
   const reader = workspaceReader(fs);
   const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate));
   const sys = SYS.replace("__TOOLS__", avail.map((t) => `  ${t} ${TOOL_DOCS[t][0]} — ${TOOL_DOCS[t][1]}`).join("\n")) + (REVIEW_RX.test(goal) ? REVIEW_GUIDE : "");
   const { workspaceMap } = await import("./projects.mjs");
   const [map, listing] = await Promise.all([workspaceMap(fs).catch(() => ""), tree(fs, { maxEntries: 150, maxDepth: 2 })]);
+  const mem = memory ? String((await Promise.resolve().then(() => memory.get()).catch(() => "")) || "").slice(-4000) : "";
+  // team of models: for real work the strongest available reasoning model writes the plan, the worker follows it
+  let planText = "", planBy = "";
+  if (planFirst && goal.length > 30 && !/^(hi|hello|thanks|שלום|תודה)/i.test(goal)) {
+    try {
+      onStep({ kind: "status", text: "Planning…" });
+      const p = await gw.chat({ temperature: 0.2, messages: [{ role: "system", content: "You plan work for an agent that has file tools (tree, read, search, find, study) over the person's folder. Write 2-5 numbered steps: which projects/files to look at first and how to verify the result. No preamble, no answer to the task itself." },
+        { role: "user", content: `WORKSPACE MAP:\n${map}\n${mem ? "\nMEMORY FROM EARLIER TASKS:\n" + mem + "\n" : ""}\nTASK:\n${goal}` }] }, { task: "reason", signal, privateData });
+      planText = String(p.content || "").trim().slice(0, 1500); planBy = `${p.provider}:${p.model}`;
+      if (planText) onStep({ kind: "thought", text: "Plan: " + planText.replace(/\s+/g, " ").slice(0, 300) });
+    } catch { /* plan is a help, not a must */ }
+  }
   const msgs = [{ role: "system", content: sys }, ...history.slice(-8),
-    { role: "user", content: `WORKSPACE MAP:\n${map}\n\nTOP LEVELS:\n${listing}\n\nREQUEST:\n${goal}` }];
+    { role: "user", content: `WORKSPACE MAP:\n${map}\n\nTOP LEVELS:\n${listing}\n${mem ? `\nMEMORY FROM EARLIER TASKS (may be outdated; verify before relying on it):\n${mem}\n` : ""}${planText ? `\nPLAN FROM A PLANNING MODEL (follow it unless the files show it is wrong):\n${planText}\n` : ""}\nREQUEST:\n${goal}` }];
   const done = new Map();
   let repeats = 0;
   const steps = [], reads = new Set(), seen = new Map();   // seen: path -> full text of every file it read (for checking its claims)
@@ -179,6 +192,24 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
         reads.add(args.path); seen.set(args.path, t);
         const lines = t.split("\n"), from = Math.max(1, Number(args.from) || 1), to = Math.min(lines.length, Number(args.to) || from + 1499);
         return `${args.path} — lines ${from}-${to} of ${lines.length}\n` + lines.slice(from - 1, to).map((l, i) => `${from + i}| ${l}`).join("\n");
+      }
+      if (name === "find") {
+        const terms = String(args.query || "").toLowerCase().match(/[\p{L}\p{N}_]{3,}/gu) || [];
+        if (!terms.length) return "give some words to look for";
+        const scored = [];
+        for (const f of await reader.files(args.path || "", { limit: 3000 })) {
+          if (f.size > 2_000_000 || !isText(f.path.split("!/").pop())) continue;
+          const t = await reader.text(f.path).catch(() => null);
+          if (!t) continue;
+          const low = t.toLowerCase(), pathLow = f.path.toLowerCase();
+          let score = 0;
+          for (const w of terms) { const n = low.split(w).length - 1; if (n) score += 1 + Math.log(1 + n); if (pathLow.includes(w)) score += 2; }
+          if (!score) continue;
+          const lines = t.split("\n").map((l, i) => [i + 1, l, terms.filter((w) => l.toLowerCase().includes(w)).length]).filter((x) => x[2]).sort((a, b) => b[2] - a[2]).slice(0, 3);
+          scored.push([score / Math.log(3 + t.length / 2000), f.path, lines]);
+        }
+        scored.sort((a, b) => b[0] - a[0]);
+        return scored.slice(0, 10).map(([, p, ls]) => `${p}\n` + ls.map(([n, l]) => `  ${n}: ${l.trim().slice(0, 160)}`).join("\n")).join("\n") || "nothing matches";
       }
       if (name === "search") {
         const rx = new RegExp(String(args.pattern || ""), "i"), hits = [];
@@ -263,6 +294,11 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   if (last?.final != null && (!checked || repaired)) checked = await checkClaims(answer, seen, reader);
   if (checked && checked.total) answer += `\n\n---\n*Checked against the files: ${checked.total - checked.bad.length} of ${checked.total} citation(s) and code quote(s) found` +
     (checked.bad.length ? ` · not found: ${checked.bad.slice(0, 4).join("; ")}` : "") + "*";
+  if (memory && last?.final != null && !(checked && checked.bad.length)) {
+    const line = `- ${new Date().toISOString().slice(0, 10)} · ${goal.replace(/\s+/g, " ").slice(0, 120)} → ${String(last.final).replace(/\s+/g, " ").slice(0, 220)}${reads.size ? ` (read: ${[...reads].slice(0, 6).join(", ")})` : ""}`;
+    try { await memory.add(line); } catch { /* memory is best-effort */ }
+  }
+  if (planBy) steps.unshift({ thought: planText.slice(0, 600), tool: "plan", args: { by: planBy }, result: "" });
   return { id: newId(), goal, answer, checked, summary: answer.slice(0, 600), ops, rejected, steps, by, calls, reads: [...reads], at: Date.now() };
 }
 

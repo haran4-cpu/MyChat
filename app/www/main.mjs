@@ -1,11 +1,10 @@
 // MyChat for Android — UI. All model work is done by ./engine.mjs (the same core as the PC gateway).
-import { init, state, ask, setKey, settings, saveSettings, smartFetch, brain, pcLink } from "./engine.mjs";
+import { init, state, ask, setKey, settings, saveSettings, smartFetch, brain, pcLink, assistant, pollJob } from "./engine.mjs";
 import { detectKeys, validateKey, identifyPlainKey, pkcePair, openRouterAuthUrl, openRouterExchange, CONNECT, SEARCH_KEYS, exportKeys, importKeys, transferCode, BUNDLE_PREFIX } from "./core/accounts.mjs";
 import { SEARCH_PROVIDERS, Search } from "./core/search.mjs";
 import { agentView, filesView, hostTools } from "./agentui.mjs";
 import { workspace, importFiles } from "./files.mjs";
-import { workspaceReader, runAgent, preview as previewOps, apply as applyOps, undo as undoOps } from "./core/agent.mjs";
-import { WORKSPACE_RX } from "./core/projects.mjs";
+import { workspaceReader, apply as applyOps, undo as undoOps } from "./core/agent.mjs";
 import { study } from "./core/digest.mjs";
 
 const $ = (s) => document.querySelector(s);
@@ -37,7 +36,7 @@ function inline(t) {
 }
 export function md(src) {
   return String(src).split("```").map((part, i) => {
-    if (i % 2) return `<pre><code>${esc(part.replace(/^[\w+.-]*\n/, ""))}</code></pre>`;
+    if (i % 2) return `<pre><button class="copycode" type="button">Copy</button><code>${esc(part.replace(/^[\w+.-]*\n/, ""))}</code></pre>`;
     return part.split(/\n{2,}/).filter((p) => p.trim()).map((p) => {
       const h = /^#{1,4}\s+(.*)$/.exec(p.trim());
       if (h && !p.trim().includes("\n")) return `<p><b>${inline(h[1])}</b></p>`;
@@ -95,7 +94,11 @@ function chatOps(o) {
   const wrap = el("div", { class: "card opsbox" }, el("b", {}, "Proposed changes"));
   if (o.journal) {
     wrap.append(el("p", {}, `${o.journal.undone ? "Undone" : "Applied"}: ${o.journal.steps.length} change(s)${o.journal.error ? " — stopped at: " + o.journal.error : ""}`));
-    if (!o.journal.undone) wrap.append(el("button", { class: "btn ghost", type: "button", onclick: async () => { const r = await undoOps(await workspace(), o.journal); o.journal.undone = Date.now(); saveChats(); renderChat(); toast(r.ok ? "Undone" : r.problems.join("; ")); } }, "Undo"));
+    if (!o.journal.undone) wrap.append(el("button", { class: "btn ghost", type: "button", onclick: async () => {
+      const r = o.remote ? await (await smartFetch(o.remote + "/agent/undo", { method: "POST", headers: { Authorization: "Bearer " + state.settings.pc.token, "Content-Type": "application/json" }, body: JSON.stringify({ id: o.id }) })).json()
+                         : await undoOps(await workspace(), o.journal);
+      o.journal.undone = Date.now(); saveChats(); renderChat(); toast(r.ok ? "Undone" : (r.problems || [r.error?.message]).join("; "));
+    } }, "Undo"));
     return wrap;
   }
   const boxes = (o.preview || o.ops).map((p, i) => {
@@ -106,7 +109,12 @@ function chatOps(o) {
   wrap.append(el("div", { class: "actions" }, el("button", { class: "btn", type: "button", onclick: async () => {
     const pick = boxes.map((b, i) => (b.checked ? i : -1)).filter((i) => i >= 0);
     if (!pick.length) return toast("Nothing selected");
-    o.journal = await applyOps(await workspace(), { id: o.id, goal: o.goal, ops: o.ops }, pick);
+    if (o.remote) {
+      const H = { Authorization: "Bearer " + state.settings.pc.token, "Content-Type": "application/json" };
+      const r = await smartFetch(o.remote + "/agent/apply", { method: "POST", headers: H, body: JSON.stringify({ id: o.id, approve: pick }) });
+      o.journal = await r.json();
+      if (!r.ok) { toast("✗ " + (o.journal.error?.message || "could not apply on the PC")); o.journal = null; return; }
+    } else o.journal = await applyOps(await workspace(), { id: o.id, goal: o.goal, ops: o.ops }, pick);
     saveChats(); renderChat();
   } }, "Approve and apply")));
   return wrap;
@@ -121,7 +129,13 @@ function renderChat() {
     return;
   }
   current.messages.forEach((m, i) => {
-    if (m.role === "user") box.append(el("div", { class: "msg user", dir: "auto" }, m.content, m.files?.length ? el("div", { class: "files" }, m.files.map((f) => el("span", { class: "chip file" }, "📎 " + f.split("/").pop()))) : null));
+    if (m.role === "user") {
+      box.append(el("div", { class: "msg user", dir: "auto" }, m.content, m.files?.length ? el("div", { class: "files" }, m.files.map((f) => el("span", { class: "chip file" }, "📎 " + f.split("/").pop()))) : null));
+      if (i >= current.messages.length - 2 && !running) box.append(el("div", { class: "actions right" }, el("button", { type: "button", onclick: () => {
+        // edit and resend: the question goes back into the box, it and everything after it are removed
+        $("#msg").value = m.content; current.messages.splice(i); current.meta.splice(i); saveChats(); renderChat(); $("#msg").focus();
+      } }, "Edit")));
+    }
     else {
       const meta = current.meta[i] || {};
       const w = whoLine(meta); if (w) box.append(w);
@@ -190,13 +204,29 @@ async function filesContext(items, question, onStatus, signal) {
   return { study: await study(gw, { question, files, onStatus, signal, ...(gw.remote ? { concurrency: 4 } : {}) }) };
 }
 
+// A task that was running on the PC when the app closed: pick up its answer.
+async function resumeJob() {
+  let p; try { p = JSON.parse(localStorage.getItem("mychat.pendingJob") || "null"); } catch { p = null; }
+  if (!p || Date.now() - p.at > 24 * 3600e3 || !state.settings.pc) return;
+  const chat = chats.find((c) => c.id === p.chat);
+  if (!chat || chat.messages.at(-1)?.role !== "user") { localStorage.removeItem("mychat.pendingJob"); return; }
+  toast("Getting the answer your PC finished…");
+  try {
+    const r = await pollJob(p.base, p.id, {});
+    chat.messages.push({ role: "assistant", content: r.content });
+    chat.meta[chat.messages.length - 1] = { mode: r.mode, trace: r.trace, claims: r.claims, sources: r.sources };
+    if (r.ops?.length) chat.meta[chat.messages.length - 1].ops = { id: r.planId, goal: chat.messages.at(-2).content, ops: r.ops, preview: r.preview, remote: p.base };
+    localStorage.removeItem("mychat.pendingJob"); saveChats();
+    if (current === chat) renderChat();
+  } catch (e) { toast("✗ " + e.message, 5000); }
+}
+
 // Long tasks keep running with the screen off: a foreground service (Android) while they run, "Answer ready" when done.
 const keepAlive = {
   on: false,
   async start(text) { const K = plugin("KeepAlive"); if (!K || this.on) return; try { await K.start({ text }); this.on = true; } catch { /* still runs in the foreground */ } },
   async end(text) { const K = plugin("KeepAlive"); if (!K || !this.on) return; this.on = false; try { await K.done({ text, notify: document.visibilityState === "hidden" }); } catch { /* ignore */ } },
 };
-const IDENTITY = `You are MyChat, the user's own assistant (Android app + PC). The app has the user's MyChat folder (Files tab: Inbox, Projects) and an Agent with tools; when the user asks about their files, the app reads them for you — so never claim you have no access to their files. Answer in the user's language, directly and specifically; say plainly when you are unsure.`;
 const modelKeys = () => Object.keys(state.keys).filter((k) => state.gw.providers[k] && !state.gw.providers[k].keyless);
 
 async function send(text) {
@@ -221,21 +251,6 @@ async function send(text) {
   const noKeys = !modelKeys().length;
   try {
     const apiMsgs = current.messages.map(({ role, content, files: fl }) => ({ role, content: fl?.length ? content + `\n(attached: ${fl.join(", ")})` : content }));
-    // one assistant: a question about the user's own files/projects is answered by looking (agent tools), not guessing
-    const prevAgentic = current.meta[current.messages.length - 2]?.mode === "agent";
-    if (!files.length && (WORKSPACE_RX.test(text) || (prevAgentic && text.length < 400))) {
-      keepAlive.start("Looking at your files…");
-      const fs = await workspace(), gw = await brain(), steps = [];
-      const history = current.messages.slice(0, -1).slice(-8).map(({ role, content }) => ({ role, content: String(content).slice(0, 4000) }));
-      const r = await runAgent(gw, { goal: text, fs, history, signal: running.signal, ...hostTools({ search: state.search, fetch: smartFetch }),
-        onStep: (st) => { if (st.kind !== "status") steps.push(st); status.textContent = st.kind === "tool" ? `🔧 ${st.tool} ${JSON.stringify(st.args || {}).slice(0, 70)}` : String(st.text || "").slice(0, 120); } });
-      current.messages.push({ role: "assistant", content: r.answer });
-      const k = current.messages.length - 1;
-      current.meta[k] = { mode: "agent", trace: [{ by: r.by }], ms: Date.now() - t0, steps: steps.filter((x) => x.kind === "tool").map((x) => `${x.tool} ${JSON.stringify(x.args || {}).slice(0, 100)}`) };
-      if (r.ops.length) current.meta[k].ops = { id: r.id, goal: text, ops: r.ops, preview: await previewOps(fs, r.ops) };
-      return;
-    }
-    apiMsgs.unshift({ role: "system", content: IDENTITY });
     if (files.length) {
       status.textContent = "Reading the attached files…";
       const ctx = await filesContext(files, text, (t) => (status.textContent = t), running.signal);
@@ -250,13 +265,20 @@ async function send(text) {
       const last = apiMsgs[apiMsgs.length - 1];
       last.content = imgs.length ? [{ type: "text", text: text + ctx.inline }, ...imgs.map((i) => ({ type: "image_url", image_url: { url: i.url } }))] : text + ctx.inline;
     }
-    const r = await ask(apiMsgs, {
-      mode, signal: running.signal,
+    const steps = [];
+    const r = await assistant(apiMsgs, {
+      mode, signal: running.signal, fs: await workspace(), tools: hostTools({ search: state.search, fetch: smartFetch }),
+      onJob: (id, base) => { localStorage.setItem("mychat.pendingJob", JSON.stringify({ chat: current.id, id, base, at: Date.now() })); },
+      onStep: (st) => { if (st.kind === "tool") steps.push(`${st.tool} ${JSON.stringify(st.args || {}).slice(0, 100)}`); status.textContent = st.kind === "tool" ? `🔧 ${st.tool} ${JSON.stringify(st.args || {}).slice(0, 70)}` : String(st.text || "").slice(0, 120); },
       onStatus: (s) => { status.textContent = String(s).split("\n").filter(Boolean).pop() || ""; },
       onDelta: (t) => { acc += t; if (!raf) raf = requestAnimationFrame(() => { raf = 0; live.querySelector(".body").innerHTML = md(acc); box.scrollTop = box.scrollHeight; }); },
     });
+    localStorage.removeItem("mychat.pendingJob");
     current.messages.push({ role: "assistant", content: r.content });
-    current.meta[current.messages.length - 1] = { mode: r.mode, trace: r.trace, claims: r.claims, sources: r.sources, ms: Date.now() - t0 };
+    const k = current.messages.length - 1;
+    current.meta[k] = { mode: r.mode, trace: r.trace, claims: r.claims, sources: r.sources, ms: Date.now() - t0,
+      ...(steps.length || r.steps?.length ? { steps: steps.length ? steps : r.steps.filter((x) => x.tool).map((x) => `${x.tool} ${JSON.stringify(x.args || {}).slice(0, 100)}`) } : {}) };
+    if (r.ops?.length) current.meta[k].ops = { id: r.planId, goal: text, ops: r.ops, preview: r.preview, remote: r.remote || null };
   } catch (e) {
     const msg = running.signal.aborted ? (acc || "Stopped.") : `${acc ? acc + "\n\n" : ""}**Could not answer:** ${e.message}\n\n` +
       (noKeys ? "No account is connected on this phone — only the free no-key channels were available, and they are busy. Connect Google Gemini or Groq in **Accounts** (about a minute)." : "All connected accounts failed just now (limits or outages). Try again in a minute, or connect one more account in **Accounts**.");
@@ -474,8 +496,15 @@ function show(name) {
 
 function renderDrawer() {
   const list = $("#chatList"); list.replaceChildren();
-  list.append(el("button", { type: "button", onclick: () => { newChat(); $("#drawer").hidden = true; } }, "+ New chat"));
-  for (const c of chats) list.append(el("button", { type: "button", dir: "auto", onclick: () => { openChat(c.id); show("chat"); $("#drawer").hidden = true; } }, c.title || "Untitled"));
+  const q = el("input", { type: "search", class: "chatsearch", dir: "auto", placeholder: "Search chats · חיפוש", oninput: () => fill() });
+  const box = el("div");
+  const fill = () => {
+    const t = q.value.trim().toLowerCase();
+    box.replaceChildren(...chats.filter((c) => !t || (c.title + " " + c.messages.map((m) => typeof m.content === "string" ? m.content : "").join(" ")).toLowerCase().includes(t)).slice(0, 100)
+      .map((c) => el("button", { type: "button", dir: "auto", onclick: () => { openChat(c.id); show("chat"); $("#drawer").hidden = true; } }, c.title || "Untitled")));
+  };
+  list.append(el("button", { type: "button", onclick: () => { newChat(); $("#drawer").hidden = true; } }, "+ New chat"), q, box);
+  fill();
 }
 
 function wire() {
@@ -485,6 +514,10 @@ function wire() {
   $("#msg").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing && window.matchMedia("(pointer:fine)").matches) { e.preventDefault(); $("#sendForm").requestSubmit(); } });
   $("#newChat").addEventListener("click", newChat);
   $("#attachBtn").addEventListener("click", attachSheet);
+  $("#messages").addEventListener("click", (e) => {
+    const b = e.target.closest?.(".copycode"); if (!b) return;
+    navigator.clipboard?.writeText(b.parentElement.querySelector("code").textContent).then(() => toast("Code copied"));
+  });
   $("#menuBtn").addEventListener("click", () => { renderDrawer(); $("#drawer").hidden = false; });
   $("#drawer").addEventListener("click", (e) => { if (e.target.id === "drawer") $("#drawer").hidden = true; });
   $("#sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") $("#sheet").hidden = true; });
@@ -544,4 +577,5 @@ async function checkUpdate(force = false) {
   const n = Object.keys(state.keys).length;
   if (!n) { show("accounts"); toast("Connect an account to start — free options included"); }
   checkUpdate();
+  resumeJob();
 })();

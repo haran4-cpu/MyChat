@@ -32,7 +32,7 @@ test("plan: reads what it needs, then proposes; preview shows a diff; apply + un
       { op: "write", path: "new/readme.md", content: "# hi" },
       { op: "write", path: "../escape.txt", content: "no" }] },
   ]);
-  const p = await plan(gw, { goal: "add bread to my todo, archive docs, remove old.txt", fs });
+  const p = await plan(gw, { plan: false, goal: "add bread to my todo, archive docs, remove old.txt", fs });
   assert.deepEqual(p.reads, ["notes/todo.md"]);
   assert.match(gw.seen[1].messages.at(-1).content, /1\| - milk/, "the file it asked for was shown with line numbers");
   assert.equal(p.ops.length, 5);
@@ -76,7 +76,7 @@ test("diff and listing", async () => {
 });
 
 test("a plain-text reply is taken as the answer (no tool call, no changes)", async () => {
-  const r = await plan(fakeGw(["The folder is empty."]), { goal: "x", fs: memoryFs() });
+  const r = await plan(fakeGw(["The folder is empty."]), { plan: false, goal: "x", fs: memoryFs() });
   assert.equal(r.answer, "The folder is empty.");
   assert.equal(r.ops.length, 0);
 });
@@ -93,7 +93,7 @@ test("ZIP: read, list and search inside an archive (an APK is a ZIP) without unp
     { final: "It is an APK build.", ops: [{ op: "extract", path: "Inbox/build.zip", to: "Projects/build" }] },
   ]);
   const steps = [];
-  const r = await runAgent(gw, { goal: "what is this?", fs, onStep: (s) => steps.push(s) });
+  const r = await runAgent(gw, { plan: false, goal: "what is this?", fs, onStep: (s) => steps.push(s) });
   assert.match(gw.seen[1].messages.at(-1).content, /MyChat\.apk[\s\S]*1\| # MyChat/);
   assert.match(gw.seen[2].messages.at(-1).content, /README\.md:2: Android build/);
   assert.equal(r.ops[0].op, "extract");
@@ -178,7 +178,7 @@ test("workspace map says what each project is and where its code is; the agent s
   for (const q of ["יש לך גישה לקבצים של הפרויקט שלי?", "review my app", "what's in Projects/shop"]) assert.ok(WORKSPACE_RX.test(q), q);
   for (const q of ["מהי בירת קנדה?", "write a poem about rain"]) assert.ok(!WORKSPACE_RX.test(q), q);
   const gw = fakeGw([{ tool: "tree", args: { path: "Projects" } }, { tool: "tree", args: { path: "Projects" } }, { final: "done" }]);
-  const r = await runAgent(gw, { goal: "look", fs });
+  const r = await runAgent(gw, { plan: false, goal: "look", fs });
   assert.match(gw.seen[0].messages.at(-1).content, /WORKSPACE MAP:[\s\S]*assets\/public/);
   assert.match(gw.seen[2].messages.at(-1).content, /already ran exactly this/);
   assert.equal(r.steps.length, 1);
@@ -202,7 +202,7 @@ test("the agent's answer is checked against the files it read; a wrong citation 
     { tool: "read", args: { path: "src/a.js", from: 1, to: 3 } },
     { final: "Bug at src/a.js:2: `return a - b;` subtracts; it should use `return a + b;` instead." },
   ]);
-  const r = await runAgent(gw, { goal: "find the bug", fs });
+  const r = await runAgent(gw, { plan: false, goal: "find the bug", fs });
   assert.match(gw.seen[2].messages.at(-1).content, /CHECK FAILED[\s\S]*src\/a\.js:9[\s\S]*return a \+ b/);
   assert.match(r.answer, /src\/a\.js:2/);
   assert.match(r.answer, /Checked against the files: 2 of 2/);
@@ -212,6 +212,35 @@ test("the agent's answer is checked against the files it read; a wrong citation 
 test("out of steps mid-work: one forced final answer; broken protocol JSON is never shown as the answer", async () => {
   const fs = memoryFs({ "a.md": "hello" });
   const gw = fakeGw([{ tool: "read", args: { path: "a.md" } }, '{"thought":"more","calls":[{"tool":"read","args":{"path":"a.md"', "The file says hello."]);
-  const r = await runAgent(gw, { goal: "what does a.md say?", fs, maxSteps: 2 });
+  const r = await runAgent(gw, { plan: false, goal: "what does a.md say?", fs, maxSteps: 2 });
   assert.equal(r.answer, "The file says hello.");
+});
+
+test("team: a planning call goes first and its plan reaches the worker; memory of earlier tasks is shown and grows; find ranks files", async () => {
+  const fs = memoryFs({ "shop/cart.js": "export function total(items) { return items.length; }\n", "shop/readme.md": "A shop.\n", "notes/x.md": "unrelated\n" });
+  const mem = { lines: ["- 2026-11-01 · earlier task → the shop uses cents"], get() { return this.lines.join("\n"); }, add(l) { this.lines.push(l); } };
+  const gw = fakeGw(["1. find the cart code\n2. read it", { tool: "find", args: { query: "cart total items" } }, { final: "The total is in shop/cart.js:1." }]);
+  const r = await runAgent(gw, { goal: "where is the cart total computed in my shop?", fs, memory: mem });
+  assert.match(gw.seen[0].messages[0].content, /You plan work/);
+  assert.match(gw.seen[1].messages.at(-1).content, /PLAN FROM A PLANNING MODEL[\s\S]*find the cart code/);
+  assert.match(gw.seen[1].messages.at(-1).content, /MEMORY FROM EARLIER TASKS[\s\S]*uses cents/);
+  assert.match(gw.seen[2].messages.at(-1).content, /^RESULT of find[\s\S]*shop\/cart\.js/);
+  assert.equal(r.steps[0].tool, "plan");
+  assert.equal(mem.lines.length, 2);
+});
+
+test("one brain: a normal question streams normally; when the model asks for tools it switches to the agent", async () => {
+  const { respond, TOOL_TOKEN } = await import("../core/assistant.mjs");
+  const fs = memoryFs({ "notes/todo.md": "- milk\n" });
+  const mk = (replies) => ({ models: { a: ["m"] }, async refreshModels() {}, providers: {}, async chat(req, opt) { const c = replies.shift(); opt?.onDelta?.(c); return { content: c, provider: "a", model: "m" }; } });
+  let shown = "";
+  const r1 = await respond(mk(["Paris is the capital of France."]), { messages: [{ role: "user", content: "capital of France?" }], fs, mode: "fast", onDelta: (d) => (shown += d) });
+  assert.equal(shown, "Paris is the capital of France.");
+  assert.notEqual(r1.mode, "agent");
+  shown = "";
+  const r2 = await respond(mk([TOOL_TOKEN, JSON.stringify({ tool: "read", args: { path: "notes/todo.md" } }), JSON.stringify({ final: "Your list has milk." })]),
+    { messages: [{ role: "user", content: "what do I still need to buy?" }], fs, mode: "fast", onDelta: (d) => (shown += d), tools: {} });
+  assert.equal(r2.mode, "agent");
+  assert.ok(!shown.includes(TOOL_TOKEN), "the switch token never reaches the screen");
+  assert.match(shown, /Your list has milk/);
 });

@@ -85,6 +85,14 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
   const { importKeys } = await import("../core/accounts.mjs");
   const got = await importKeys(pair.text, pair.code);
   assert.equal(got.__pc.token, token);
+  // jobs: work that outlives the connection (the phone polls; the PC keeps the result)
+  const job = await (await fetch(lp + "/jobs", { method: "POST", headers: H, body: JSON.stringify({ mode: "fast", messages: [{ role: "user", content: "write f" }] }) })).json();
+  assert.match(job.id, /^job-/);
+  let j2;
+  for (let i = 0; i < 50; i++) { j2 = await (await fetch(lp + "/jobs/" + job.id, { headers: H })).json(); if (j2.status !== "running") break; await new Promise((r) => setTimeout(r, 100)); }
+  assert.equal(j2.status, "done");
+  assert.ok(j2.content.length > 0, "the job kept its answer");
+  assert.equal((await fetch(lp + "/jobs/" + job.id)).status, 401);
   await fetch(u + "/system/phone-link", { method: "POST", headers: H, body: JSON.stringify({ enabled: false }) });
   server.closeAllConnections(); server.close(); mock.closeAllConnections(); mock.close();
 });

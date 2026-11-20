@@ -113,3 +113,9 @@ details summary { color: var(--muted); font-size: 12.5px; cursor: pointer; }
 .gkey { text-align: start; background: rgba(255,255,255,.06); border: 1px solid #2B4170; border-radius: 12px; padding: 10px; color: var(--text); display: flex; flex-direction: column; gap: 2px; font: inherit; }
 .gkey small { color: var(--muted); font-size: 11.5px; } .gkey.on { border-color: #2f6b4a; }
 .code { font: 600 22px/1.3 ui-monospace, Menlo, Consolas, monospace; letter-spacing: 1px; background: var(--surface2); border-radius: 10px; padding: 10px; text-align: center; direction: ltr; }
+/* code copy, edit, search */
+.msg pre { position: relative; }
+.copycode { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 3px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface2); color: var(--muted); }
+.actions.right { justify-content: flex-end; }
+.chatsearch { width: 100%; margin: 8px 0; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface2); color: var(--text); font: inherit; }
+.steps-box { margin: 4px 0 6px; }

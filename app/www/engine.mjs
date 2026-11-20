@@ -5,6 +5,7 @@ import { Search } from "./core/search.mjs";
 import { Ledger } from "./core/ledger.mjs";
 import { PROVIDERS } from "./core/providers.mjs";
 import { loadKeys, saveKeys } from "./vault.mjs";
+import { respond } from "./core/assistant.mjs";
 
 // Streaming needs the WebView's own fetch; providers that don't allow browser (CORS) calls go through Capacitor's
 // native HTTP instead (complete answer, no token-by-token streaming). The choice is remembered per host.
@@ -128,6 +129,50 @@ export async function ask(messages, { mode = "auto", onDelta, onStatus, signal }
   }
   if (!Object.keys(state.gw.models).length) await state.gw.refreshModels();
   const r = await run(state.gw, { messages }, { mode, onDelta, onStatus, signal, truth: { search: state.search, ledger: state.ledger } });
+  try { if (state.gw.stats.toJSON) lsStore("mychat.stats").save(state.gw.stats.toJSON()); } catch { /* not essential */ }
+  return r;
+}
+
+// ---------------------------------------------------------------- the one assistant (phone or PC)
+export const memory = {
+  get: () => localStorage.getItem("mychat.memory") || "",
+  add: (line) => { const t = ((localStorage.getItem("mychat.memory") || "") + line + "\n").split("\n").filter(Boolean).slice(-200); localStorage.setItem("mychat.memory", t.join("\n") + "\n"); },
+};
+/** A job on the PC, polled. If the connection drops, keeps retrying (the PC keeps working); resumable by id. */
+export async function pollJob(base, id, { onDelta, onStatus, signal, shown = 0 } = {}) {
+  const H = { Authorization: "Bearer " + state.settings.pc.token };
+  let fails = 0, lastStatus = "";
+  for (;;) {
+    if (signal?.aborted) throw new Error("stopped");
+    try {
+      const j = await (await smartFetch(base + "/jobs/" + id, { headers: H, signal: AbortSignal.timeout(15000) })).json();
+      fails = 0;
+      if (j.content?.length > shown) { onDelta?.(j.content.slice(shown)); shown = j.content.length; }
+      if (j.statusLine && j.statusLine !== lastStatus) { lastStatus = j.statusLine; onStatus?.("PC · " + j.statusLine); }
+      if (j.status === "done") return { content: j.content, ...(j.result || {}), remote: base, trace: [{ step: "pc", by: (j.result?.trace || []).map((t) => t.by).filter(Boolean).pop() || "your PC" }] };
+      if (j.status === "error") throw Object.assign(new Error(j.error || "failed on the PC"), { final: true });
+      if (!j.id) throw Object.assign(new Error("the PC no longer has this job"), { final: true });
+    } catch (e) {
+      if (e.final || signal?.aborted) throw e;
+      if (++fails > 120) throw new Error("lost the connection to your PC; the answer is kept there — open this chat again later");
+      onStatus?.("Waiting for your PC… (it keeps working)");
+    }
+    await new Promise((r) => setTimeout(r, fails ? Math.min(10000, 1500 * fails) : 1200));
+  }
+}
+export async function assistant(messages, { mode = "auto", onDelta, onStatus, onStep, signal, fs, tools, onJob } = {}) {
+  const base = await pcLink();
+  if (base) {
+    try {
+      const r = await smartFetch(base + "/jobs", { method: "POST", signal, headers: { Authorization: "Bearer " + state.settings.pc.token, "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, messages: messages.map(({ role, content }) => ({ role, content })) }) });
+      const job = await r.json();
+      if (job.id) { onJob?.(job.id, base); return await pollJob(base, job.id, { onDelta, onStatus, signal }); }
+    } catch (e) { if (signal?.aborted || e.final) throw e; pcCache = { at: Date.now(), base: null }; onStatus?.("PC not reachable — working on the phone"); }
+  }
+  if (!Object.keys(state.gw.models).length) await state.gw.refreshModels();
+  const r = await respond(state.gw, { messages, fs, mode, onDelta, onStatus, onStep, signal, memory, tools,
+    truth: { search: state.search, ledger: state.ledger } });
   try { if (state.gw.stats.toJSON) lsStore("mychat.stats").save(state.gw.stats.toJSON()); } catch { /* not essential */ }
   return r;
 }

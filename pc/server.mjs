@@ -17,6 +17,7 @@ import { run, MODES } from "../core/reason.mjs";
 import { PROVIDERS } from "../core/providers.mjs";
 import { pkcePair, openRouterAuthUrl, openRouterExchange, detectKeys, validateKey, identifyPlainKey, CONNECT, SEARCH_KEYS, exportKeys, importKeys, transferCode, BUNDLE_PREFIX } from "../core/accounts.mjs";
 import { evaluate } from "../core/exact.mjs";
+import { respond } from "../core/assistant.mjs";
 import { htmlToText } from "../core/search.mjs";
 import { Search, SEARCH_PROVIDERS } from "../core/search.mjs";
 import { Ledger } from "../core/ledger.mjs";
@@ -80,6 +81,60 @@ function body(req) {
 }
 const authed = (req) => (req.headers.authorization || "") === "Bearer " + token || req.headers["x-mychat-token"] === token;
 
+// ---------------------------------------------------------------- one brain on the PC
+// Chat from Open WebUI or the phone goes through the same assistant as the Agent: it reads your folders when the
+// question needs them. API clients that bring their own tools or a JSON format (Kestrel) get the plain engine.
+function agentMemory(root) {
+  const f = path.join(F("agent"), "memory-" + crypto.createHash("sha1").update(root).digest("hex").slice(0, 12) + ".md");
+  return {
+    get: () => { try { return fs.readFileSync(f, "utf8"); } catch { return ""; } },
+    add: (line) => {
+      let t = ""; try { t = fs.readFileSync(f, "utf8"); } catch { /* new */ }
+      const lines = (t + line + "\n").split("\n").filter(Boolean).slice(-300);
+      fs.writeFileSync(f, lines.join("\n") + "\n");
+    },
+  };
+}
+const hostTools = () => ({ search, evaluate: (e) => evaluate(e).toString(12),
+  fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } });
+async function brainRun(oreq, opts) {
+  if (oreq.tools?.length || oreq.response_format || settings.oneBrain === false) return run(gw, oreq, opts);
+  const root = agentRoots()[0];
+  const r = await respond(gw, { ...opts, messages: oreq.messages, fs: root ? nodeFs(root.path) : null,
+    memory: root ? agentMemory(root.path) : null, tools: hostTools(), privateData: opts.privateData || root?.private,
+    onStep: (st) => opts.onStatus?.(st.kind === "tool" ? `🔧 ${st.tool} ${JSON.stringify(st.args || {}).slice(0, 90)}` : String(st.text || "").slice(0, 160)) });
+  if (r.ops?.length) {
+    agentSave("plan", r.planId, { id: r.planId, goal: lastText(oreq.messages), ops: r.ops, preview: r.preview, root: root.path, rootIndex: 0, at: Date.now(), answer: r.content });
+    const list = (r.preview || r.ops).map((o, i) => `${i + 1}. ${o.label || o.op + " " + o.path}`).join("\n");
+    const extra = `\n\n**Proposed changes** (nothing changed yet):\n${list}\n\nReply **/approve** to apply all, **/approve 1,3** for some — **/undo** reverses it afterwards.`;
+    r.content += extra; opts.onDelta?.(extra);
+  }
+  return r;
+}
+const lastText = (msgs) => { for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].role === "user") return typeof msgs[i].content === "string" ? msgs[i].content : ""; return ""; };
+
+// ---------------------------------------------------------------- jobs: work that outlives the connection
+// The phone starts a job and polls it; if the phone sleeps or loses Wi-Fi, the PC keeps working and keeps the result.
+const jobs = new Map();
+function startJob(b) {
+  const id = "job-" + newIdLocal();
+  const job = { id, status: "running", at: Date.now(), content: "", steps: [], statusLine: "", mode: b.mode || "auto" };
+  jobs.set(id, job);
+  const oreq = { messages: Array.isArray(b.messages) ? b.messages : [] };
+  brainRun(oreq, { mode: job.mode, privateData: b.mode === "private", truth: truthFor(false),
+    onDelta: (t) => { job.content += t; }, onStatus: (st) => { job.statusLine = st; job.steps.push(st); if (job.steps.length > 200) job.steps.shift(); } })
+    .then((r) => Object.assign(job, { status: "done", content: r.content, result: { mode: r.mode, trace: r.trace, claims: r.claims, sources: r.sources, ops: r.ops, planId: r.planId, checked: r.checked } }))
+    .catch((e) => Object.assign(job, { status: "error", error: e.message }))
+    .finally(() => { job.ended = Date.now(); try { fs.writeFileSync(path.join(AGENT_DIR, id + ".json"), JSON.stringify(job)); } catch { /* ignore */ } });
+  for (const [k, j] of jobs) if (j.ended && Date.now() - j.ended > 24 * 3600e3) jobs.delete(k);
+  return job;
+}
+const newIdLocal = () => Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
+function getJob(id) {
+  if (jobs.has(id)) return jobs.get(id);
+  try { return JSON.parse(fs.readFileSync(path.join(AGENT_DIR, String(id).replace(/[^\w-]/g, "") + ".json"), "utf8")); } catch { return null; }
+}
+
 async function completions(req, res) {
   const b = await body(req);
   const name = String(b.model || "mychat/auto").replace(/^mychat\//, "");
@@ -98,7 +153,7 @@ async function completions(req, res) {
   }
   if (!b.stream) {
     try {
-      const r = await run(gw, oreq, opts);
+      const r = await brainRun(oreq, opts);
       return send(res, 200, { id, object: "chat.completion", created, model: b.model,
         choices: [{ index: 0, finish_reason: r.tool_calls?.length ? "tool_calls" : "stop",
                     message: { role: "assistant", content: r.content, ...(r.tool_calls?.length ? { tool_calls: r.tool_calls } : {}) } }],
@@ -113,7 +168,7 @@ async function completions(req, res) {
   chunk({ role: "assistant" });
   const tick = setInterval(() => res.write(": keep-alive\n\n"), 15000);
   try {
-    const r = await run(gw, oreq, { ...opts, onDelta: (t) => chunk({ content: t }),
+    const r = await brainRun(oreq, { ...opts, onDelta: (t) => chunk({ content: t }),
                                    onStatus: (s) => chunk({ reasoning_content: s + "\n" }) });
     const who = (r.trace || []).map((t) => t.by ? `${t.step}: ${t.by}` : t.step).join(" · ");
     if (who) chunk({ reasoning_content: `\n[${r.mode}] ${who}\n` });
@@ -303,7 +358,7 @@ function serveUi(res, name) {
 // The phone can use this PC — its accounts, local models and folders — over the home Wi-Fi or Tailscale. A SEPARATE port
 // that serves only the API, only with the token: no pages, no keys, no settings. Repeated wrong tokens are blocked.
 const LINK_PORT = Number(process.env.MYCHAT_LINK_PORT || 11501);
-const LINK_ROUTES = /^\/(health|status|v1\/chat\/completions|v1\/models|agent\/(roots|tree|plan|apply|undo|history))$/;
+const LINK_ROUTES = /^\/(health|status|v1\/chat\/completions|v1\/models|agent\/(roots|tree|plan|apply|undo|history)|jobs(\/[\w-]+)?)$/;
 let linkServer = null;
 const strikes = new Map();
 function linkUrls() {
@@ -407,6 +462,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/bench/stop") return send(res, 200, bench ? bench.stop() : { running: false });
     if (url.pathname.startsWith("/agent/")) return await agentRoute(req, res, url);
+    if (req.method === "POST" && url.pathname === "/jobs") return send(res, 200, startJob(await body(req)));
+    if (req.method === "GET" && url.pathname.startsWith("/jobs/")) {
+      const j = getJob(url.pathname.slice(6));
+      return j ? send(res, 200, j) : send(res, 404, { error: { message: "no such job" } });
+    }
     if (req.method === "GET" && url.pathname === "/catalog") {
       const keys = readJson("keys.json", {});
       return send(res, 200, { connect: CONNECT, allowKeyless: settings.allowKeyless,

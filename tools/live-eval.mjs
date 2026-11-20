@@ -13,6 +13,7 @@ import { study } from "../core/digest.mjs";
 import { evaluate } from "../core/exact.mjs";
 import { makeZip, extractZip } from "../core/zip.mjs";
 import { nodeFs } from "../pc/agentfs.mjs";
+import { respond } from "../core/assistant.mjs";
 
 const keys = JSON.parse(process.env.MYCHAT_KEYS_JSON || "{}");
 const gw = new Gateway({ keys, allowKeyless: true, allowLocal: false });
@@ -82,6 +83,15 @@ await task("access", async () => {
   const denies = /(אין לי גישה|don'?t have access|no access|cannot access|can'?t access)/i.test(r.answer);
   const knows = /demo-app|demo-shop/i.test(r.answer) && /(cart|auth|users)\.js|cart|users/i.test(r.answer);
   return { pass: !denies && knows && !leaks(r.answer), score: (denies ? 0 : 0.5) + (knows ? 0.5 : 0), by: r.by, detail: `steps: ${r.steps.map((s) => s.tool).join(",")}\n${r.answer.slice(0, 600)}` };
+});
+
+await task("one-brain", async () => {   // a plain chat message with no file words: the assistant must decide to look
+  const mem = { lines: [], get() { return this.lines.join("\n"); }, add(l) { this.lines.push(l); } };
+  const r = await respond(gw, { messages: [{ role: "user", content: "Is the order total in my shop calculated correctly?" }], fs: wfs, mode: "auto", truth: { search }, tools, memory: mem });
+  const looked = r.mode === "agent";
+  const right = /(off.by.one|i\s*=\s*1|first item|index 0|items\[0\]|skips? the first)/i.test(r.content);
+  return { pass: looked && right && !leaks(r.content), score: (looked ? 0.5 : 0) + (right ? 0.5 : 0), by: (r.trace || []).map((t) => t.by).join(", "),
+    detail: `mode ${r.mode} · memory lines ${mem.lines.length}\n${String(r.content).slice(0, 600)}` };
 });
 
 await task("review", async () => {
