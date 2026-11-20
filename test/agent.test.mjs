@@ -254,3 +254,10 @@ test("a change 'called' as a tool becomes a proposed change, not an error", asyn
   assert.equal(r.ops[0].path, "notes/todo.md");
   assert.equal(await fs.exists("notes/todo.md"), false, "nothing changes before approval");
 });
+
+test("tool calls written in the Hermes/Qwen XML style are understood (measured on a free 1.7B model)", async () => {
+  const { parseJsonLoose } = await import("../core/json.mjs");
+  assert.deepEqual(parseJsonLoose("<tool_call> <function=tree> <parameter=path> Projects/demo-app </parameter> </function> </tool_call>"),
+    { tool: "tree", args: { path: "Projects/demo-app" } });
+  assert.deepEqual(parseJsonLoose('<tool_call>{"name":"read","arguments":{"path":"a.js"}}</tool_call>'), { tool: "read", args: { path: "a.js" } });
+});

@@ -334,6 +334,9 @@ export class Gateway {
         if (lang === "he" && st.heWrong && !(this.pins.he || []).includes(id + ":" + model)) score *= 0.05;   // caught answering in Arabic
         // small models are weak in Hebrew (measured: a 7B "mini" model got "capital of Canada?" wrong) unless measured good
         if (lang === "he" && /(\b|[-_])(1b|3b|7b|8b|a1b|a3b|mini|nano|tiny|small|lite)\b/i.test(model) && !(this.pins.he || []).includes(id + ":" + model)) score *= 0.35;
+        // tiny models (≤4B) can chat but not work: measured 2026-11-20, a 1.7B free model was picked for the agent and
+        // answered in its own tool format; for code, analysis, long and tool work they come last
+        if (task !== "fast" && task !== "chat" && /(\b|[-_])(0\.\d+b|1(\.\d)?b|2b|3b|4b|e2b|e4b)\b/i.test(model)) score *= 0.15;
         out.push({ provider: id, model, score, family: family(model) });
       }
     }
@@ -429,7 +432,8 @@ export class Gateway {
                                             exclude: opt.exclude, limit: 200 }).find((c) => this.providers[c.provider]?.local);
       if (local) list.push(local);
     }
-    if (!list.length) throw new GatewayError("No model available: add a key in Connections, or allow the free no-key channels.", []);
+    // an empty list is not the end: the rescue round below re-checks every account (measured: after a long run every
+    // free channel was cooling down and the next task failed at once with "No model available")
     const attempts = [];
     let partial = "", kept = null, fatal = false;
     for (const c of list) {

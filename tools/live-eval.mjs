@@ -99,8 +99,8 @@ await task("modes", async () => {   // the switch must change what happens, on r
   let works = false;
   try { const median = new Function(code + "\nreturn median;")(); const a = [5, 1, 3]; works = median(a) === 3 && median([4, 1, 3, 2]) === 2.5 && a.join() === "5,1,3"; } catch { /* no */ }
   const reviewed = /reviewed/.test(max.route || "");
-  return { pass: fast.route === "fastest model" && c1 - c0 === 1 && reviewed && fams.size >= 2 && works, score: (reviewed ? 0.4 : 0) + (fams.size >= 2 ? 0.2 : 0) + (works ? 0.4 : 0),
-    by: (max.trace || []).map((t) => t.by).filter(Boolean).join(" → "), detail: `fast: 1 call (${fast.model}); max: ${c2 - c1} calls, route "${max.route}", families ${[...fams].join("+")}, code runs: ${works}` };
+  return { pass: fast.route === "fastest model" && (fast.trace || []).length === 1 && reviewed && fams.size >= 2 && works, score: (reviewed ? 0.4 : 0) + (fams.size >= 2 ? 0.2 : 0) + (works ? 0.4 : 0),
+    by: (max.trace || []).map((t) => t.by).filter(Boolean).join(" → "), detail: `fast: ${c1 - c0} call(s) incl. failover, answered by ${fast.model}; max: ${c2 - c1} calls, route "${max.route}", families ${[...fams].join("+")}, code runs: ${works}` };
 });
 
 await task("access", async () => {

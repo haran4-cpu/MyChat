@@ -430,3 +430,15 @@ test("Max: a review with only minor points keeps the draft; a blocker gets fixed
   assert.equal(r.content, "fixed answer"); assert.match(r.issues[0], /\[blocker\] point 2/);
   w.srv.close();
 });
+
+test("tiny models come last for real work, and an empty candidate list still gets the rescue round", async () => {
+  const w = await mockWorld({ a: { "liquid/lfm-3-1.7b:free": { text: "tiny" }, "qwen3-coder-30b": { text: "def f(): pass" } } });
+  const g = only(["a"])(gwFor(w, ["a"]));
+  await g.refreshModels();
+  assert.equal(g.candidates("code")[0].model, "qwen3-coder-30b");
+  // everything cooling down (a long run of failures): the request still gets answered
+  for (const m of g.models.a) g.stats.failure("a", m, "429", 600000);
+  const r = await g.chat({ messages: [{ role: "user", content: "write a python function" }] });
+  assert.equal(r.model, "qwen3-coder-30b");
+  w.srv.close();
+});

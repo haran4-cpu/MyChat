@@ -25,7 +25,14 @@ export function parseJsonLoose(t) {
   if (a >= 0 && b > a) cands.push(raw.slice(a, b + 1));
   const fence = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/i.exec(raw);
   if (fence) cands.push(fence[1]);
-  for (const c of cands) for (const x of [c, repairJson(c)]) { try { const v = JSON.parse(x); if (v && typeof v === "object") return v; } catch { /* next */ } }
+  for (const c of cands) for (const x of [c, repairJson(c)]) { try { const v = JSON.parse(x); if (v && typeof v === "object") return v.name && (v.arguments || v.parameters) && !v.tool && !v.final ? { tool: v.name, args: v.arguments || v.parameters } : v; } catch { /* next */ } }
+  // Hermes/Qwen-style tool calls (measured 2026-11-20 on a free 1.7B model: "<tool_call> <function=tree>
+  // <parameter=path> Projects/demo-app </parameter> </function> </tool_call>" instead of our JSON)
+  const calls = [...raw.matchAll(/<function=([\w.-]+)>([\s\S]*?)<\/function>/g)].map(([, tool, body]) => ({
+    tool, args: Object.fromEntries([...body.matchAll(/<parameter=([\w.-]+)>([\s\S]*?)<\/parameter>/g)].map(([, k, v]) => [k, v.trim()])) }));
+  if (calls.length) return calls.length === 1 ? { tool: calls[0].tool, args: calls[0].args } : { calls: calls.slice(0, 4) };
+  const tc = /<tool_call>\s*(\{[\s\S]*?\})\s*<\/tool_call>/.exec(raw);
+  if (tc) { try { const v = JSON.parse(tc[1]); if (v.name) return { tool: v.name, args: v.arguments || v.parameters || {} }; } catch { /* no */ } }
   // last resort: the "final" text alone
   const m = /"final"\s*:\s*"/.exec(raw);
   if (m) {
