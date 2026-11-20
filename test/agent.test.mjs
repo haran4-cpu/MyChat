@@ -220,7 +220,7 @@ test("team: a planning call goes first and its plan reaches the worker; memory o
   const fs = memoryFs({ "shop/cart.js": "export function total(items) { return items.length; }\n", "shop/readme.md": "A shop.\n", "notes/x.md": "unrelated\n" });
   const mem = { lines: ["- 2026-11-01 · earlier task → the shop uses cents"], get() { return this.lines.join("\n"); }, add(l) { this.lines.push(l); } };
   const gw = fakeGw(["1. find the cart code\n2. read it", { tool: "find", args: { query: "cart total items" } }, { final: "The total is in shop/cart.js:1." }]);
-  const r = await runAgent(gw, { goal: "where is the cart total computed in my shop?", fs, memory: mem });
+  const r = await runAgent(gw, { goal: "review how the cart total is computed in my shop", fs, memory: mem });
   assert.match(gw.seen[0].messages[0].content, /You plan work/);
   assert.match(gw.seen[1].messages.at(-1).content, /PLAN FROM A PLANNING MODEL[\s\S]*find the cart code/);
   assert.match(gw.seen[1].messages.at(-1).content, /MEMORY FROM EARLIER TASKS[\s\S]*uses cents/);
