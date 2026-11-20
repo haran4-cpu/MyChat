@@ -26,6 +26,7 @@ const OPINION_RX = /\b(what do you think|your opinion|should i|do you like|recom
 export function triage(messages) {
   const t = lastUserText(messages);
   if (SMALLTALK_RX.test(t) && t.length < 80) return { kind: "chat", verify: false };
+  if (t.length > 3000) return { kind: "document", verify: false };   // pasted or attached files: answered from the text itself, not web-checked
   if (CREATIVE_RX.test(t)) return { kind: "creative", verify: false };
   const task = classify(messages);
   if (task === "code") return { kind: "code", verify: false };   // code is verified by running it (Kestrel / app sandbox)
