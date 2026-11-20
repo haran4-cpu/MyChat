@@ -75,7 +75,7 @@ Never repeat a tool call with the same arguments. Be direct and specific, no fil
 // What a senior reviewer checks, in order (measured: free models found the off-by-one and the SQL injection but
 // called an API key kept in localStorage merely "a browser API used in Node").
 const REVIEW_GUIDE = `
-CODE REVIEW METHOD (this request is a review): read every source file, then check each one systematically:
+CODE REVIEW METHOD (this request is a review). With more than 8 source files, first run "study" on the folder (all files are read in parallel and every finding is verified), then "read" the exact lines you will cite; with fewer, read every source file. Check each file systematically:
 - Security: injection (SQL, shell, HTML/XSS), secrets or tokens stored in plain text (localStorage, files, logs, URLs), missing auth checks, unsafe eval.
 - Correctness: off-by-one and boundary errors, wrong conditions, null/undefined, unhandled promise errors, race conditions.
 - Data: loss or corruption, wrong units, money as floats.
@@ -214,8 +214,9 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData });
     calls++; by = `${r.provider}:${r.model}`;
     last = parseJson(r.content);
-    if (!last) {   // models sometimes answer in plain text: accept it as the final answer
-      if (step > 0 || !/\{/.test(r.content)) { last = { final: r.content }; break; }
+    if (!last) {   // models sometimes answer in plain text: accept it as the final answer — unless it is broken protocol JSON
+      const protocol = /"(thought|tool|calls|final)"\s*:/.test(r.content);
+      if (!protocol && (step > 0 || !/\{/.test(r.content))) { last = { final: r.content }; break; }
       msgs.push({ role: "assistant", content: r.content }, { role: "user", content: "Reply with one JSON object as described (tool call or final)." });
       continue;
     }
@@ -248,6 +249,16 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     else if (step && step % 5 === 4) msgs.push({ role: "user", content: `(${step + 1} of ${maxSteps} steps used. If you already have enough to answer well, answer now; otherwise continue with the most informative next step.)` });
   }
   const { ops, rejected } = checkOps(last?.ops);
+  if (last?.final == null && !signal?.aborted) {
+    // out of steps mid-work: one last call, no tools, to write the answer from everything gathered (never raw protocol)
+    msgs.push({ role: "user", content: "No more tool calls. Write your final answer now from what you have read, as plain markdown (not JSON). Cite path:line only for lines you actually read." });
+    try {
+      const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData });
+      calls++; by = `${r.provider}:${r.model}`;
+      const j = parseJson(r.content);
+      last = { ...(last || {}), final: j?.final ?? (/"(thought|tool|calls)"\s*:/.test(r.content) ? "(The model did not produce a readable answer; please try again.)" : r.content) };
+    } catch { /* keep what we have */ }
+  }
   let answer = String(last?.final ?? last?.summary ?? "").trim() || "(no answer)";
   if (last?.final != null && (!checked || repaired)) checked = await checkClaims(answer, seen, reader);
   if (checked && checked.total) answer += `\n\n---\n*Checked against the files: ${checked.total - checked.bad.length} of ${checked.total} citation(s) and code quote(s) found` +

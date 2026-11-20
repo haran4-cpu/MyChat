@@ -208,3 +208,10 @@ test("the agent's answer is checked against the files it read; a wrong citation 
   assert.match(r.answer, /Checked against the files: 2 of 2/);
   assert.deepEqual(r.checked.bad, []);
 });
+
+test("out of steps mid-work: one forced final answer; broken protocol JSON is never shown as the answer", async () => {
+  const fs = memoryFs({ "a.md": "hello" });
+  const gw = fakeGw([{ tool: "read", args: { path: "a.md" } }, '{"thought":"more","calls":[{"tool":"read","args":{"path":"a.md"', "The file says hello."]);
+  const r = await runAgent(gw, { goal: "what does a.md say?", fs, maxSteps: 2 });
+  assert.equal(r.answer, "The file says hello.");
+});
