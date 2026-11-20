@@ -1,7 +1,7 @@
 """
 title: MyChat
 author: MyChat (multi-model gateway)
-version: 1.5.1
+version: 1.6.0
 required_open_webui_version: 0.6.0
 description: MyChat inside Open WebUI. Cloud and local models combined per task (Auto, Max, Consensus, Verified/Truth Engine, Fast, Private). Starts the MyChat gateway on this PC by itself; accounts and keys are managed from the "MyChat · Accounts" model without leaving Open WebUI.
 """
@@ -258,7 +258,7 @@ class Pipe:
         return "\n".join(out)
 
     # ---------------------------------------------------------------- Agent mode (plan → you approve → apply → undo)
-    async def _agent(self, client, token: str, text: str, emitter) -> str:
+    async def _agent(self, client, token: str, text: str, emitter, history=None) -> str:
         base = self.valves.MYCHAT_URL.rstrip("/")
         H = {"Authorization": "Bearer " + token}
         t = text.strip()
@@ -290,15 +290,19 @@ class Pipe:
         mm = re.match(r"^\s*#(\d+)\s+", t)
         if mm:
             root, t = int(mm.group(1)) - 1, t[mm.end():]
-        await self._status(emitter, "Looking at the folder and planning… (nothing changes yet)")
-        r = await client.post(base + "/agent/plan", json={"goal": t, "root": root}, headers=H, timeout=600)
+        await self._status(emitter, "Working: reading, searching, thinking… (nothing changes until you approve)")
+        r = await client.post(base + "/agent/plan", json={"goal": t, "root": root, "history": history or []}, headers=H, timeout=600)
         p = r.json()
         await self._status(emitter, "Plan ready", True)
         if r.status_code != 200:
             return "✗ " + (p.get("error", {}) or {}).get("message", "planning failed")
-        out = [f"### Plan for `{p.get('root')}`", "", p.get("summary") or "", ""]
+        steps = p.get("steps") or []
+        out = [p.get("answer") or p.get("summary") or "", ""]
+        if steps:
+            out.append(f"_{len(steps)} tool steps: " + ", ".join(f"{s.get('tool')}" for s in steps[:12]) + "_")
         if not p.get("ops"):
-            return "\n".join(out + ["No changes proposed."])
+            return "\n".join(out + [f"\n_By {p.get('by', '')}_"])
+        out += ["", f"### Proposed changes in `{p.get('root')}`", ""]
         for i, o in enumerate(p.get("preview", []), 1):
             stats = f" (+{o['stats']['added']} −{o['stats']['removed']})" if o.get("stats") else ""
             out.append(f"**{i}. {o['label']}**{stats}" + (f" — {o['why']}" if o.get("why") else ""))
@@ -356,7 +360,9 @@ class Pipe:
             if model == "agent" or low.startswith("/agent") or low.startswith("/approve") or low == "/undo" or low == "/folders":
                 goal = re.sub(r"^\s*/agent\b\s*", "", last) if low.startswith("/agent") and len(low) > 7 else last
                 try:
-                    yield await self._agent(client, token, goal, __event_emitter__)
+                    hist = [{"role": m.get("role"), "content": m.get("content")[:6000]} for m in msgs[:-1]
+                            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)][-8:]
+                    yield await self._agent(client, token, goal, __event_emitter__, hist)
                 except Exception as e:
                     yield f"✗ Agent: {e}"
                 return

@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { safeRel, checkOps, plan, preview, apply, undo, memoryFs, lineDiff, tree, TRASH } from "../core/agent.mjs";
+import { safeRel, checkOps, plan, runAgent, preview, apply, undo, memoryFs, lineDiff, tree, TRASH } from "../core/agent.mjs";
+import { makeZip, zipEntries, zipRead, extractZip } from "../core/zip.mjs";
+import { study, verifyQuote, chunk } from "../core/digest.mjs";
 
 const fakeGw = (replies) => {
   const seen = [];
-  return { seen, async chat(req) { seen.push(req); const c = replies.shift(); return { content: typeof c === "string" ? c : JSON.stringify(c), provider: "p", model: "m" }; } };
+  return { seen, async chat(req) { seen.push(JSON.parse(JSON.stringify(req))); const c = replies.shift(); return { content: typeof c === "string" ? c : JSON.stringify(c), provider: "p", model: "m" }; } };
 };
 
 test("paths stay inside the workspace and away from secrets", () => {
@@ -21,8 +23,8 @@ test("plan: reads what it needs, then proposes; preview shows a diff; apply + un
   const fs = memoryFs({ "notes/todo.md": "- milk\n- eggs\n", "old.txt": "bye", "docs/a.md": "A" });
   const before = JSON.stringify([...fs.files.entries()].sort());
   const gw = fakeGw([
-    { read: ["notes/todo.md"] },
-    { summary: "Add bread, archive docs, remove old.txt", ops: [
+    { thought: "read the list first", tool: "read", args: { path: "notes/todo.md" } },
+    { final: "Add bread, archive docs, remove old.txt", ops: [
       { op: "write", path: "notes/todo.md", content: "- milk\n- eggs\n- bread\n", why: "asked" },
       { op: "mkdir", path: "archive" },
       { op: "move", path: "docs", to: "archive/docs" },
@@ -32,7 +34,7 @@ test("plan: reads what it needs, then proposes; preview shows a diff; apply + un
   ]);
   const p = await plan(gw, { goal: "add bread to my todo, archive docs, remove old.txt", fs });
   assert.deepEqual(p.reads, ["notes/todo.md"]);
-  assert.match(gw.seen[1].messages.at(-1).content, /- milk/, "the file it asked for was shown");
+  assert.match(gw.seen[1].messages.at(-1).content, /1\| - milk/, "the file it asked for was shown with line numbers");
   assert.equal(p.ops.length, 5);
   assert.equal(p.rejected.length, 1);
   const pv = await preview(fs, p.ops);
@@ -73,8 +75,56 @@ test("diff and listing", async () => {
   assert.match(t, /src\//); assert.match(t, /node_modules\//); assert.doesNotMatch(t, /i\.js/);
 });
 
-test("a plan that is not JSON is an error, not a silent no-op", async () => {
-  await assert.rejects(plan(fakeGw(["sorry I can't"]), { goal: "x", fs: memoryFs() }), /not valid JSON/);
+test("a plain-text reply is taken as the answer (no tool call, no changes)", async () => {
+  const r = await plan(fakeGw(["The folder is empty."]), { goal: "x", fs: memoryFs() });
+  assert.equal(r.answer, "The folder is empty.");
+  assert.equal(r.ops.length, 0);
+});
+
+test("ZIP: read, list and search inside an archive (an APK is a ZIP) without unpacking; unpack + undo", async () => {
+  const inner = makeZip({ "assets/public/main.mjs": "const key = localStorage.getItem('k');\nexport default key;\n" });
+  const zip = makeZip({ "MyChat.apk": inner, "README.md": "# MyChat\nAndroid build" });
+  assert.deepEqual(zipEntries(zip).map((e) => e.name), ["MyChat.apk", "README.md"]);
+  assert.equal(new TextDecoder().decode(await zipRead(zip, zipEntries(zip)[1])), "# MyChat\nAndroid build");
+  const fs = memoryFs({ "Inbox/build.zip": zip });
+  const gw = fakeGw([
+    { calls: [{ tool: "tree", args: { path: "Inbox/build.zip" } }, { tool: "read", args: { path: "Inbox/build.zip!/README.md" } }] },
+    { tool: "search", args: { pattern: "Android", path: "Inbox/build.zip" } },
+    { final: "It is an APK build.", ops: [{ op: "extract", path: "Inbox/build.zip", to: "Projects/build" }] },
+  ]);
+  const steps = [];
+  const r = await runAgent(gw, { goal: "what is this?", fs, onStep: (s) => steps.push(s) });
+  assert.match(gw.seen[1].messages.at(-1).content, /MyChat\.apk[\s\S]*1\| # MyChat/);
+  assert.match(gw.seen[2].messages.at(-1).content, /README\.md:2: Android build/);
+  assert.equal(r.ops[0].op, "extract");
+  const j = await apply(fs, r);
+  assert.equal(j.error, undefined);
+  assert.equal(await fs.read("Projects/build/README.md"), "# MyChat\nAndroid build");
+  assert.ok(await fs.exists("Projects/build/MyChat.apk"), "binary entries kept as bytes");
+  // the APK inside can now be unpacked too, and its code read
+  await extractZip(await fs.readBytes("Projects/build/MyChat.apk"), fs, "Projects/build/apk");
+  assert.match(await fs.read("Projects/build/apk/assets/public/main.mjs"), /localStorage/);
+  assert.ok((await undo(fs, j)).ok);
+  assert.equal(await fs.exists("Projects/build/README.md"), false);
+});
+
+test("study: parts are read in parallel and a note whose quote is not in the file is dropped", async () => {
+  const files = [{ path: "a.js", text: "function add(a,b){\n  return a - b;\n}\n" }, { path: "b.js", text: "export const x = 1;\n" }];
+  assert.equal(verifyQuote(files[0].text, "return a - b;"), 2);
+  assert.equal(verifyQuote(files[0].text, "return a + b;"), 0);
+  assert.ok(chunk(files, 30).length >= 2);
+  const gw = { calls: 0, async chat(req) {
+    this.calls++;
+    if (req.messages[0].content.startsWith("You read ONE PART")) return { provider: "p", model: "m", content: JSON.stringify({ summary: "math", notes: [
+      { path: "a.js", line: 2, quote: "return a - b;", note: "add subtracts", severity: "high" },
+      { path: "a.js", line: 9, quote: "eval(userInput)", note: "invented", severity: "high" }] }) };
+    return { provider: "p", model: "m", content: "FINAL: " + req.messages[1].content };
+  } };
+  const r = await study(gw, { question: "bugs?", files, partSize: 100000 });
+  assert.equal(r.notes.length, 1);
+  assert.equal(r.dropped, 1);
+  assert.match(r.answer, /a\.js:2/);
+  assert.doesNotMatch(r.answer, /eval\(userInput\)/);
 });
 
 test("PC folder adapter: real files, trash, undo, and nothing outside the folder", async () => {

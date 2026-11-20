@@ -1,8 +1,11 @@
 // MyChat for Android — UI. All model work is done by ./engine.mjs (the same core as the PC gateway).
 import { init, state, ask, setKey, settings, saveSettings, smartFetch } from "./engine.mjs";
-import { detectKeys, validateKey, identifyPlainKey, pkcePair, openRouterAuthUrl, openRouterExchange, CONNECT, SEARCH_KEYS } from "./core/accounts.mjs";
+import { detectKeys, validateKey, identifyPlainKey, pkcePair, openRouterAuthUrl, openRouterExchange, CONNECT, SEARCH_KEYS, exportKeys, importKeys, transferCode, BUNDLE_PREFIX } from "./core/accounts.mjs";
 import { SEARCH_PROVIDERS, Search } from "./core/search.mjs";
-import { agentView, filesView } from "./agentui.mjs";
+import { agentView, filesView, hostTools } from "./agentui.mjs";
+import { workspace, importFiles } from "./files.mjs";
+import { workspaceReader } from "./core/agent.mjs";
+import { study } from "./core/digest.mjs";
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, attrs = {}, ...kids) => {
@@ -95,7 +98,7 @@ function renderChat() {
     return;
   }
   current.messages.forEach((m, i) => {
-    if (m.role === "user") box.append(el("div", { class: "msg user", dir: "auto" }, m.content));
+    if (m.role === "user") box.append(el("div", { class: "msg user", dir: "auto" }, m.content, m.files?.length ? el("div", { class: "files" }, m.files.map((f) => el("span", { class: "chip file" }, "📎 " + f.split("/").pop()))) : null));
     else {
       const meta = current.meta[i] || {};
       const w = whoLine(meta); if (w) box.append(w);
@@ -108,11 +111,66 @@ function renderChat() {
   box.scrollTop = box.scrollHeight;
 }
 
+// ---------------------------------------------------------------- attachments (📎): files from the phone or the MyChat folder
+let attached = [];   // [{ name, path, kind: "file"|"folder"|"image", url? }]
+function renderAttached() {
+  const row = $("#attachRow"); row.replaceChildren(); row.hidden = !attached.length;
+  attached.forEach((a, i) => row.append(el("span", { class: "chip file" }, (a.kind === "image" ? "🖼️ " : a.kind === "folder" ? "📁 " : "📄 ") + a.name,
+    el("button", { type: "button", "aria-label": "Remove " + a.name, onclick: () => { attached.splice(i, 1); renderAttached(); } }, "×"))));
+}
+async function attachPhoneFiles(list) {
+  const fs = await workspace();
+  const status = $("#statusLine"); status.hidden = false;
+  const images = [...list].filter((f) => /^image\//.test(f.type));
+  const others = [...list].filter((f) => !/^image\//.test(f.type));
+  for (const f of images) attached.push({ name: f.name, kind: "image", url: await new Promise((ok) => { const r = new FileReader(); r.onload = () => ok(r.result); r.readAsDataURL(f); }) });
+  if (others.length) {
+    const r = await importFiles(fs, others, { onStatus: (t) => (status.textContent = t) });
+    const unpacked = new Set(r.projects.filter((p) => p.to && !p.from.includes("/Projects/")).map((p) => p.from));
+    for (const p of r.projects) if (p.to && !p.from.startsWith("Projects/")) attached.push({ name: p.to.split("/").pop(), path: p.to, kind: "folder" });
+    for (const rel of r.saved) if (!unpacked.has(rel)) attached.push({ name: rel.split("/").pop(), path: rel, kind: "file" });
+  }
+  status.hidden = true;
+  renderAttached();
+}
+async function attachSheet() {
+  const fs = await workspace();
+  const box = $("#sheetContent"); $("#sheetTitle").textContent = "Attach";
+  const input = el("input", { type: "file", multiple: true, hidden: true, onchange: async (e) => { $("#sheet").hidden = true; await attachPhoneFiles(e.target.files); } });
+  const recent = [];
+  for (const top of ["Projects", "Inbox"]) {
+    for (const it of await fs.list(top).catch(() => [])) {
+      if (top === "Inbox" && it.dir) for (const f of await fs.list(`Inbox/${it.name}`).catch(() => [])) recent.push({ name: f.name, path: `Inbox/${it.name}/${f.name}`, kind: f.dir ? "folder" : "file", t: it.name });
+      else recent.push({ name: it.name, path: `${top}/${it.name}`, kind: it.dir ? "folder" : "file", t: top });
+    }
+  }
+  recent.sort((a, b) => String(b.t).localeCompare(String(a.t)));
+  box.replaceChildren(el("div", { class: "actions" }, el("button", { class: "btn", type: "button", onclick: () => input.click() }, "From this phone")), input,
+    el("p", { class: "sub" }, "Or from your MyChat folder:"),
+    ...recent.slice(0, 40).map((r) => el("button", { class: "row file linkish", type: "button", onclick: () => { attached.push(r); renderAttached(); $("#sheet").hidden = true; } },
+      el("span", { class: "ic" }, r.kind === "folder" ? "📁" : "📄"), el("span", { class: "grow", dir: "auto" }, r.path))));
+  $("#sheet").hidden = false;
+}
+/** Text of the attached files: inline when small; a verified deep read (several models) when big. */
+async function filesContext(items, question, onStatus, signal) {
+  const fs = await workspace(), reader = workspaceReader(fs), files = [];
+  for (const a of items.filter((x) => x.kind !== "image")) {
+    const list = a.kind === "folder" || /\.(zip|apk|jar)$/i.test(a.path) ? await reader.files(a.path, { limit: 3000 }) : [{ path: a.path }];
+    for (const f of list) { if (f.size > 1_500_000) continue; const t = await reader.text(f.path).catch(() => null); if (t != null) files.push({ path: f.path, text: t }); }
+  }
+  const total = files.reduce((n, f) => n + f.text.length, 0);
+  if (!files.length) return { inline: items.some((x) => x.kind !== "image") ? "\n\n(The attached files are not text and could not be read.)" : "" };
+  if (total <= 60000) return { inline: "\n\nATTACHED FILES:\n" + files.map((f) => `===== ${f.path} =====\n${f.text}`).join("\n\n") };
+  return { study: await study(state.gw, { question, files, onStatus, signal }) };
+}
+
 async function send(text) {
   if (running) { running.abort(); return; }
-  text = text.trim(); if (!text) return;
+  text = text.trim(); if (!text && !attached.length) return;
+  if (!text) text = "Look at the attached files and tell me what they are and what stands out.";
   if (!current.title) current.title = text.slice(0, 60);
-  current.messages.push({ role: "user", content: text });
+  const files = attached; attached = []; renderAttached();
+  current.messages.push({ role: "user", content: text, ...(files.length ? { files: files.map((f) => f.path || f.name) } : {}) });
   if (!chats.includes(current)) chats.unshift(current);
   renderChat();
   const box = $("#messages");
@@ -125,7 +183,21 @@ async function send(text) {
   let acc = "", raf = 0;
   const t0 = Date.now();
   try {
-    const r = await ask(current.messages.map(({ role, content }) => ({ role, content })), {
+    const apiMsgs = current.messages.map(({ role, content, files: fl }) => ({ role, content: fl?.length ? content + `\n(attached: ${fl.join(", ")})` : content }));
+    if (files.length) {
+      status.textContent = "Reading the attached files…";
+      const ctx = await filesContext(files, text, (t) => (status.textContent = t), running.signal);
+      if (ctx.study) {
+        const s2 = ctx.study;
+        current.messages.push({ role: "assistant", content: s2.answer + `\n\n---\n*Read ${s2.read} files in ${s2.parts} part(s) by several models · ${s2.notes.length} findings checked against the code · ${s2.dropped} unproven dropped${s2.skipped.length ? ` · ${s2.skipped.length} not read` : ""}*` });
+        current.meta[current.messages.length - 1] = { mode: "deep read", trace: [{ by: s2.by }], ms: Date.now() - t0 };
+        return;
+      }
+      const imgs = files.filter((f) => f.kind === "image");
+      const last = apiMsgs[apiMsgs.length - 1];
+      last.content = imgs.length ? [{ type: "text", text: text + ctx.inline }, ...imgs.map((i) => ({ type: "image_url", image_url: { url: i.url } }))] : text + ctx.inline;
+    }
+    const r = await ask(apiMsgs, {
       mode, signal: running.signal,
       onStatus: (s) => { status.textContent = String(s).split("\n").filter(Boolean).pop() || ""; },
       onDelta: (t) => { acc += t; if (!raf) raf = requestAnimationFrame(() => { raf = 0; live.querySelector(".body").innerHTML = md(acc); box.scrollTop = box.scrollHeight; }); },
@@ -186,6 +258,16 @@ async function finishOpenRouter(code) {
 
 async function pasteKeys(text, out) {
   out.textContent = "Checking…";
+  if (text.includes(BUNDLE_PREFIX)) {
+    const code = prompt("Code shown on the other device (XXXX-XXXX-XXXX-XXXX)") || "";
+    try {
+      const keys = await importKeys(text, code);
+      for (const [k, v] of Object.entries(keys)) await setKey(k, v);
+      out.textContent = `✓ ${Object.keys(keys).length} keys added: ${Object.keys(keys).join(", ")}`;
+      setTimeout(() => show("accounts"), 1500);
+    } catch (e) { out.textContent = "✗ " + e.message; }
+    return;
+  }
   const found = detectKeys(text);
   const plain = text.trim();
   if (!found.length && /^[A-Za-z0-9._-]{24,120}$/.test(plain)) {
@@ -210,6 +292,41 @@ async function pasteKeys(text, out) {
   if (lines.some((l) => l.startsWith("✓"))) setTimeout(() => show("accounts"), 1200);
 }
 
+function transferCard() {
+  const out = el("div", { class: "result", "aria-live": "polite" });
+  return el("section", { class: "card" }, el("h3", {}, "Same keys on PC and phone"),
+    el("p", {}, "Send: makes one encrypted text with all your keys and a code. Send the text to yourself (WhatsApp, e-mail) and paste it into “Add a key” on the other device — it asks for the code. Without the code the text is useless."),
+    el("div", { class: "actions" }, el("button", { type: "button", onclick: async () => {
+      const n = Object.keys(state.keys).length; if (!n) return toast("No keys on this phone yet");
+      const code = transferCode(), text = await exportKeys(state.keys, code);
+      out.replaceChildren(el("p", {}, "Code (type it on the other device):"), el("div", { class: "code" }, code),
+        el("div", { class: "actions" },
+          el("button", { type: "button", onclick: async () => { try { await navigator.share({ text }); } catch { await navigator.clipboard?.writeText(text); toast("Copied the keys text"); } } }, "Share the keys text"),
+          el("button", { type: "button", onclick: async () => { await navigator.clipboard?.writeText(text); toast("Copied"); } }, "Copy")));
+    } }, "Send my keys")), out);
+}
+
+// After "Get key": when you come back with a key in the clipboard, it is recognised, tested and added (only within 15 minutes of
+// tapping a provider, so the clipboard is not read at other times).
+async function keyHunt() {
+  let h; try { h = JSON.parse(localStorage.getItem("mychat.keyHunt") || "null"); } catch { h = null; }
+  if (!h || Date.now() - h.at > 15 * 60e3) return;
+  let text = "";
+  try { text = (await plugin("Clipboard")?.read())?.value || (await navigator.clipboard?.readText()) || ""; } catch { return; }
+  text = String(text).trim();
+  if (!text || Object.values(state.keys).includes(text)) return;
+  let found = detectKeys(text);
+  if (!found.length && /^[A-Za-z0-9._-]{24,120}$/.test(text)) { const id = await identifyPlainKey(text, state.gw.providers, [h.id, "mistral", "cohere", "siliconflow"], smartFetch); if (id) found = [{ provider: id.provider, key: text }]; }
+  if (!found.length) return;
+  localStorage.removeItem("mychat.keyHunt");
+  for (const f of found) {
+    const v = await validateKey(f.provider, f.key, state.gw.providers, smartFetch);
+    if (v.ok) { await setKey(f.provider, f.key); toast(`✓ ${state.gw.providers[f.provider]?.name || f.provider} added (${v.models} models)`, 4000); }
+    else toast(`✗ That ${f.provider} key did not work: ${v.error}`, 5000);
+  }
+  if (view === "accounts") renderAccounts();
+}
+
 function renderAccounts() {
   const v = $("#view-accounts"); v.replaceChildren();
   const pad = el("div", { class: "pad" });
@@ -219,10 +336,17 @@ function renderAccounts() {
   if (update) pad.append(el("section", { class: "card hero" }, el("h3", {}, `Update available — build ${update.build}`),
     el("p", {}, `You have build ${update.current}. Download it, open it, and Android installs it over this version (your chats and keys stay).`),
     el("button", { class: "btn white", type: "button", onclick: () => openExternal(update.url) }, "Download the update")));
+  const G = [["gemini", "Google Gemini", "free"], ["groq", "Groq", "free, very fast"], ["mistral", "Mistral", "free credits"], ["cohere", "Cohere", "free trial"],
+             ["siliconflow", "SiliconFlow", "some models free"], ["nvidia", "NVIDIA", "free endpoints"], ["huggingface", "Hugging Face", "small free credit"]];
   pad.append(el("section", { class: "card hero" },
-    el("h3", {}, "One sign-in, many models"),
-    el("p", {}, "OpenRouter with your Google account: Claude, GPT, Gemini, GLM, Kimi, DeepSeek. Opens in your browser and comes back here."),
-    el("button", { class: "btn white", type: "button", onclick: startOpenRouter }, st.openrouter?.hasKey ? "Reconnect OpenRouter" : "Continue with Google")));
+    el("h3", {}, "Your Google account opens everything"),
+    el("p", {}, "1 · One tap: OpenRouter with Google — Claude, GPT, Gemini, GLM, Kimi, DeepSeek in one account."),
+    el("button", { class: "btn white", type: "button", onclick: startOpenRouter }, st.openrouter?.hasKey ? "✓ OpenRouter — reconnect" : "Continue with Google"),
+    el("p", {}, "2 · Free keys: tap a provider, sign in with Google on its site, copy the key, come back — MyChat finds the key and adds it."),
+    el("div", { class: "gkeys" }, G.map(([id, name, note]) => el("button", { type: "button", class: "gkey" + (st[id]?.hasKey ? " on" : ""),
+      onclick: () => { if (st[id]?.hasKey) return toast(`${name} is connected`); localStorage.setItem("mychat.keyHunt", JSON.stringify({ id, at: Date.now() })); openExternal(state.gw.providers[id].keyUrl); toast("Copy the key there, then come back here", 5000); } },
+      el("b", {}, (st[id]?.hasKey ? "✓ " : "") + name), el("small", {}, note))))));
+  pad.append(transferCard());
 
   const paste = el("section", { class: "card paste" }, el("h3", {}, "Add a key"),
     el("p", {}, "Copy a key on the provider’s site, then paste it here. The provider is recognised and the key is tested. Keys are encrypted on this phone."));
@@ -269,7 +393,7 @@ function renderAccounts() {
 
 
 // ---------------------------------------------------------------- navigation
-let view = "chat";
+let view = "chat", agentPrefill = "";
 function show(name) {
   view = name;
   for (const v of document.querySelectorAll(".view")) v.hidden = v.id !== "view-" + name;
@@ -279,8 +403,9 @@ function show(name) {
   if (name !== "chat") $("#viewSub").textContent = "";
   if (name === "chat") renderChat();
   if (name === "accounts") renderAccounts();
-  if (name === "agent") agentView($("#view-agent"), { el, toast, gw: () => state.gw });
-  if (name === "files") filesView($("#view-files"), { el, toast, onAsk: (text) => { show("agent"); setTimeout(() => { const g = document.querySelector("#view-agent .goal"); if (g) { g.value = text; g.focus(); } }, 300); } });
+  if (name === "agent") { agentView($("#view-agent"), { el, md, toast, gw: () => state.gw, tools: () => hostTools({ search: state.search, fetch: smartFetch }), prefill: agentPrefill }); agentPrefill = ""; }
+  if (name === "files") filesView($("#view-files"), { el, toast, onAgent: (text) => { agentPrefill = text; show("agent"); },
+    onAttach: (rel) => { attached.push({ name: rel.split("/").pop(), path: rel, kind: /\.(zip|apk|jar)$/i.test(rel) ? "folder" : "file" }); renderAttached(); show("chat"); } });
 }
 
 function renderDrawer() {
@@ -295,6 +420,7 @@ function wire() {
   $("#msg").addEventListener("input", (e) => { e.target.style.height = "auto"; e.target.style.height = Math.min(140, e.target.scrollHeight) + "px"; });
   $("#msg").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing && window.matchMedia("(pointer:fine)").matches) { e.preventDefault(); $("#sendForm").requestSubmit(); } });
   $("#newChat").addEventListener("click", newChat);
+  $("#attachBtn").addEventListener("click", attachSheet);
   $("#menuBtn").addEventListener("click", () => { renderDrawer(); $("#drawer").hidden = false; });
   $("#drawer").addEventListener("click", (e) => { if (e.target.id === "drawer") $("#drawer").hidden = true; });
   $("#sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") $("#sheet").hidden = true; });
@@ -303,8 +429,10 @@ function wire() {
     const a = e.target.closest?.("a[href^='http']");
     if (a) { e.preventDefault(); openExternal(a.href); }
   });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") setTimeout(keyHunt, 400); });
   const App = plugin("App");
   if (App) {
+    App.addListener("resume", () => setTimeout(keyHunt, 400));
     App.addListener("appUrlOpen", ({ url }) => {
       const u = new URL(url.replace(/^mychat:\/\//, "https://mychat/"));
       if (u.pathname.startsWith("/openrouter") || u.hostname === "oauth" || url.includes("oauth")) {

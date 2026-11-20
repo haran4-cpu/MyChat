@@ -15,7 +15,9 @@ import { fileURLToPath } from "node:url";
 import { Gateway } from "../core/router.mjs";
 import { run, MODES } from "../core/reason.mjs";
 import { PROVIDERS } from "../core/providers.mjs";
-import { pkcePair, openRouterAuthUrl, openRouterExchange, detectKeys, validateKey, identifyPlainKey, CONNECT, SEARCH_KEYS } from "../core/accounts.mjs";
+import { pkcePair, openRouterAuthUrl, openRouterExchange, detectKeys, validateKey, identifyPlainKey, CONNECT, SEARCH_KEYS, exportKeys, importKeys, transferCode, BUNDLE_PREFIX } from "../core/accounts.mjs";
+import { evaluate } from "../core/exact.mjs";
+import { htmlToText } from "../core/search.mjs";
 import { Search, SEARCH_PROVIDERS } from "../core/search.mjs";
 import { Ledger } from "../core/ledger.mjs";
 import { Bench } from "./bench.mjs";
@@ -242,7 +244,9 @@ async function agentRoute(req, res, url) {
   if (url.pathname === "/agent/tree") return send(res, 200, { tree: await agentTree(nodeFs(rootAt(url.searchParams.get("root")).path)) });
   if (url.pathname === "/agent/plan" && req.method === "POST") {
     const root = rootAt(b.root), afs = nodeFs(root.path);
-    const p = await agentPlan(gw, { goal: String(b.goal || "").slice(0, 4000), fs: afs, privateData: root.private });
+    const p = await agentPlan(gw, { goal: String(b.goal || "").slice(0, 4000), fs: afs, privateData: root.private, history: Array.isArray(b.history) ? b.history.slice(-8) : [],
+      search, evaluate: (e) => evaluate(e).toString(12),
+      fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } });
     p.root = root.path; p.rootIndex = Number(b.root) || 0;
     p.preview = await agentPreview(afs, p.ops);
     agentSave("plan", p.id, p);
@@ -379,8 +383,20 @@ const server = http.createServer(async (req, res) => {
       setTimeout(() => process.exit(0), 150);
       return;
     }
+    if (req.method === "POST" && url.pathname === "/connections/export") {
+      const code = transferCode();
+      return send(res, 200, { code, text: await exportKeys(readJson("keys.json", {}), code) });
+    }
     if (req.method === "POST" && url.pathname === "/connections/paste") {
       const b = await body(req);
+      if (String(b.text || "").includes(BUNDLE_PREFIX)) {
+        try {
+          const got = await importKeys(b.text, String(b.code || ""));
+          for (const [k, v] of Object.entries(got)) saveKey(k, v);
+          build(); await gw.refreshModels(true);
+          return send(res, 200, { results: Object.keys(got).map((k) => ({ provider: k, name: PROVIDERS[k]?.name || SEARCH_PROVIDERS[k]?.name || k, ok: true, models: 0 })) });
+        } catch (e) { return send(res, 200, { results: [], needCode: true, error: e.message }); }
+      }
       const found = detectKeys(b.text);
       const plain = String(b.text || "").trim();
       if (!found.length && /^[A-Za-z0-9._-]{24,120}$/.test(plain)) {   // a key without a recognisable prefix (Mistral, Z.ai…)

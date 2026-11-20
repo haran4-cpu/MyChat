@@ -49,6 +49,8 @@ export function nodeFs(root) {
       if (buf.subarray(0, 8000).includes(0)) return null;   // binary
       return buf.toString("utf8");
     },
+    async readBytes(rel) { const p = await abs(rel); const st = await fs.stat(p).catch(() => null); return st?.isFile() && st.size < 300_000_000 ? new Uint8Array(await fs.readFile(p)) : null; },
+    async writeBytes(rel, u8) { await fs.writeFile(await abs(rel), u8); },
     async write(rel, text) { const p = await abs(rel); const tmp = p + ".mychat-tmp"; await fs.writeFile(tmp, text, "utf8"); await fs.rename(tmp, p); },
     async mkdir(rel) { await fs.mkdir(await abs(rel), { recursive: true }); },
     async exists(rel) { try { await fs.stat(await abs(rel)); return true; } catch { return false; } },

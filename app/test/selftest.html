@@ -24,7 +24,11 @@
     <div id="statusLine" class="status" hidden></div>
     <div class="composer">
       <div id="modes" class="modes" role="radiogroup" aria-label="Mode"></div>
+      <div id="attachRow" class="attachRow" hidden></div>
       <form id="sendForm" class="inputRow">
+        <button id="attachBtn" class="attach" type="button" aria-label="Attach files">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5l-8.5 8.5a5 5 0 0 1-7-7l9-9a3.5 3.5 0 0 1 5 5l-9 9a2 2 0 0 1-3-3l8-8"/></svg>
+        </button>
         <label for="msg" class="sr">Message</label>
         <textarea id="msg" rows="1" dir="auto" placeholder="Message · הודעה"></textarea>
         <button id="sendBtn" class="send" aria-label="Send">
@@ -90,27 +94,42 @@ mark("sent");
 for (let i = 0; i < 60 && !document.querySelector(".actions"); i++) await wait(100);
 mark("answered");
 await wait(800);
-// Agent mode on the phone's folder (browser storage here, Documents/MyChat on the phone): plan → apply → undo
+// Agent, Files, attachments and key transfer on the phone's folder (browser storage here, Documents/MyChat on the phone)
 let agent = { ok: false };
 try {
-  const { workspace } = await import("./files.mjs");
+  const { workspace, importFiles } = await import("./files.mjs");
   const A = await import("./core/agent.mjs");
+  const { makeZip } = await import("./core/zip.mjs");
   const fs = await workspace();
-  await fs.write("notes.md", "- milk\n");
-  const fake = { chat: async () => ({ provider: "t", model: "t", content: JSON.stringify({ summary: "add eggs, new folder", ops: [
-    { op: "write", path: "notes.md", content: "- milk\n- eggs\n" }, { op: "write", path: "trip/plan.md", content: "# Trip" }, { op: "delete", path: "notes.md" }] }) }) };
-  const p = await A.plan(fake, { goal: "test", fs });
-  const j = await A.apply(fs, p, [0, 1]);
-  const afterApply = (await fs.read("notes.md")) === "- milk\n- eggs\n" && (await fs.read("trip/plan.md")) === "# Trip";
+  // 1. a ZIP with an APK inside is saved to Inbox/<date> and unpacked into Projects (the APK too)
+  const apk = makeZip({ "assets/public/main.mjs": "export const v = 1;\n" });
+  const zip = makeZip({ "MyChat.apk": apk, "README.md": "# Demo\n" });
+  const imp = await importFiles(fs, [new File([zip], "MyChat-14.zip", { type: "application/zip" })]);
+  agent.unzipped = (await fs.read("Projects/MyChat-14/README.md")) === "# Demo\n" && (await fs.read("Projects/MyChat-14/MyChat-apk/assets/public/main.mjs")) === "export const v = 1;\n";
+  agent.inbox = imp.saved[0].startsWith("Inbox/");
+  // 2. the agent loop: reads inside the archive with a tool, proposes a change, apply + undo
+  const replies = [{ tool: "read", args: { path: imp.saved[0] + "!/README.md" } }, { final: "Demo app.", ops: [{ op: "write", path: "notes.md", content: "- milk\n" }] }];
+  const seen = [];
+  const fake = { chat: async (req) => { seen.push(req.messages.at(-1).content); return { provider: "t", model: "t", content: JSON.stringify(replies.shift()) }; } };
+  const r = await A.runAgent(fake, { goal: "what is it?", fs });
+  const j = await A.apply(fs, r);
+  const applied = (await fs.read("notes.md")) === "- milk\n";
   const u = await A.undo(fs, j);
-  agent = { ok: afterApply && u.ok && (await fs.read("notes.md")) === "- milk\n" && !(await fs.exists("trip/plan.md")), kind: fs.kind };
+  agent.ok = applied && u.ok && !(await fs.exists("notes.md")) && /1\| # Demo/.test(seen[1]) && r.answer === "Demo app.";
+  agent.kind = fs.kind;
+  // 3. key transfer text round-trips with its code
+  const K = await import("./core/accounts.mjs");
+  const code = K.transferCode();
+  agent.keysMove = JSON.stringify(await K.importKeys(await K.exportKeys({ groq: "gsk_x" }, code), code)) === '{"groq":"gsk_x"}';
+  // 4. screens render
   document.querySelector('.tabs button[data-view="files"]').click();
   for (let i = 0; i < 40 && !document.querySelector("#view-files .row.file"); i++) await wait(100);
-  agent.filesTab = [...document.querySelectorAll("#view-files .row.file")].some((r) => r.textContent.includes("notes.md"));
+  agent.filesTab = [...document.querySelectorAll("#view-files .row.file")].some((x) => x.textContent.includes("Projects"));
   document.querySelector('.tabs button[data-view="agent"]').click();
   for (let i = 0; i < 40 && !document.querySelector("#view-agent .goal"); i++) await wait(100);
   agent.agentTab = !!document.querySelector("#view-agent .goal");
-} catch (e) { agent = { ok: false, error: String(e.message || e) }; }
+  agent.attachButton = !!document.querySelector("#attachBtn");
+} catch (e) { agent = { ok: false, error: String(e.stack || e) }; }
 const saved = JSON.parse(localStorage.getItem("mychat.chats") || "[]");
 const vault = localStorage.getItem("mychat.keys.v1") || "";
 document.body.setAttribute("data-selftest", JSON.stringify({

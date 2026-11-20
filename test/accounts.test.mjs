@@ -90,3 +90,14 @@ test("a provider whose model list is public does not accept any key: a real call
   assert.equal(await identifyPlainKey("AQ.someone-elses-key-xxxxxxxxxxxx", provs, ["samba"]), null);
   mock.closeAllConnections(); mock.close();
 });
+
+test("keys move between devices as an encrypted text that needs the code", async () => {
+  const { exportKeys, importKeys, transferCode, BUNDLE_PREFIX } = await import("../core/accounts.mjs");
+  const code = transferCode();
+  assert.match(code, /^[A-Z2-9]{4}(-[A-Z2-9]{4}){3}$/);
+  const keys = { groq: "gsk_" + "a".repeat(40), gemini: "AIza" + "b".repeat(35) };
+  const text = await exportKeys(keys, code);
+  assert.ok(text.startsWith(BUNDLE_PREFIX) && !text.includes("gsk_"));
+  assert.deepEqual(await importKeys("here you go: " + text + " thanks", code.toLowerCase()), keys);
+  await assert.rejects(importKeys(text, transferCode()), /wrong code/);
+});

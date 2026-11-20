@@ -61,7 +61,7 @@ async function agent() {
   async function showTree() { treeBox.querySelector("pre").textContent = (await api("/agent/tree?root=" + agentState.root).catch((e) => ({ tree: e.message }))).tree; }
   const planBtn = el("button", { class: "btn primary", onclick: () => busy(planBtn, async () => {
     if (!goal.value.trim()) return toast("Write what should change");
-    out.replaceChildren(el("div", { class: "sub" }, "Looking at the folder and planning… (nothing changes yet)"));
+    out.replaceChildren(el("div", { class: "sub" }, "Working: reading, searching and thinking… (nothing changes until you approve)"));
     try { agentState.plan = await api("/agent/plan", { goal: goal.value, root: agentState.root }); renderPlan(out); }
     catch (e) { out.replaceChildren(el("div", { class: "pill bad" }, e.message)); }
   }) }, "Plan the changes");
@@ -78,9 +78,12 @@ function diffPre(lines) {
 function renderPlan(out) {
   const p = agentState.plan;
   out.replaceChildren();
-  const card = el("div", { class: "card stack" }, el("h3", {}, "Proposed changes"), el("div", { dir: "auto" }, p.summary || ""),
-    el("div", { class: "sub" }, `Planned by ${p.by}${p.reads?.length ? " · read " + p.reads.join(", ") : ""}`));
-  if (!p.ops.length) { card.append(el("div", { class: "pill warn" }, "No changes proposed.")); out.append(card); return; }
+  const card = el("div", { class: "card stack" }, el("h3", {}, "Answer"), el("div", { dir: "auto", style: "white-space:pre-wrap" }, p.answer || p.summary || ""),
+    p.steps?.length ? el("details", {}, el("summary", {}, `${p.steps.length} tool steps · ${p.calls || "?"} model calls`),
+      el("pre", { class: "tree" }, p.steps.map((s) => `🔧 ${s.tool} ${JSON.stringify(s.args || {}).slice(0, 140)}${s.thought ? "\n   💭 " + s.thought.slice(0, 200) : ""}`).join("\n"))) : null,
+    el("div", { class: "sub" }, `By ${p.by}${p.reads?.length ? " · read " + p.reads.slice(0, 8).join(", ") : ""}`));
+  if (!p.ops.length) { out.append(card); return; }
+  card.append(el("h3", {}, "Proposed changes"));
   const list = el("ul", { class: "ops" });
   p.preview.forEach((o, i) => {
     const cb = el("input", { type: "checkbox", checked: !o.unchanged, "data-i": i });
@@ -178,11 +181,22 @@ function pasteCard() {
   const out = el("pre", { class: "sub", style: "white-space:pre-wrap;margin:0" });
   const b = el("button", { class: "btn primary", onclick: () => busy(b, async () => {
     out.textContent = "Checking…";
-    const { results } = await api("/connections/paste", { text: ta.value });
+    const isBundle = ta.value.includes("mychat-keys-v1:");
+    const code = isBundle ? prompt("Code shown on the phone (XXXX-XXXX-XXXX-XXXX)") || "" : "";
+    const { results, error } = await api("/connections/paste", { text: ta.value, code });
+    if (error) { out.textContent = "✗ " + error; return; }
     out.textContent = results.length ? results.map((r) => `${r.ok ? "✓" : "✗"} ${r.name} — ${r.ok ? (r.models ? r.models + " models" : "connected") : r.error}`).join("\n") : "✗ No key recognised. Nothing was saved.";
     if (results.some((r) => r.ok)) { ta.value = ""; setTimeout(accounts, 1500); }
   }) }, "Check and add");
-  return el("div", { class: "card stack" }, el("h3", {}, "Add a key"), el("div", { class: "sub" }, "The provider is recognised and the key tested before it is saved. Keys stay on this PC."), ta, el("div", { class: "row" }, out, b));
+  const xout = el("div", { class: "stack" });
+  const x = el("button", { class: "btn", onclick: () => busy(x, async () => {
+    const r = await api("/connections/export", {});
+    xout.replaceChildren(el("div", { class: "sub" }, "Code to type on the phone:"), el("div", { style: "font:600 22px ui-monospace,Consolas,monospace;letter-spacing:1px" }, r.code),
+      el("textarea", { readonly: true, style: "min-height:60px;font:12px ui-monospace,Consolas,monospace" }, r.text),
+      el("button", { class: "btn small", onclick: async () => { await navigator.clipboard.writeText(r.text); toast("Copied — send it to yourself and paste it in the phone's “Add a key”"); } }, "Copy the keys text"));
+  }) }, "Send my keys to the phone");
+  return el("div", { class: "card stack" }, el("h3", {}, "Add a key"), el("div", { class: "sub" }, "The provider is recognised and the key tested before it is saved. Keys stay on this PC. A keys text from the phone (mychat-keys-v1:…) works here too."), ta, el("div", { class: "row" }, out, b),
+    el("div", { class: "sub" }, "Same keys on the phone: makes one encrypted text plus a code; without the code the text is useless."), x, xout);
 }
 
 // ------------------------------------------------------------------------------------------------ Models

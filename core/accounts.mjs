@@ -128,3 +128,32 @@ export const CONNECT = {
   cohere: { how: "guided", note: "Google account · free trial key" },
   siliconflow: { how: "guided", note: "Google account · some models free" },
 };
+
+// ---------------------------------------------------------------- moving keys between your devices
+// All keys in one encrypted text ("mychat-keys-v1:…") plus a short code shown on the sending device. Send the text any way
+// you like (WhatsApp to yourself, e-mail); without the code it is useless (AES-256-GCM, key from PBKDF2-SHA256, 250k rounds).
+export const BUNDLE_PREFIX = "mychat-keys-v1:";
+const b64u = (u8) => btoa(String.fromCharCode(...u8)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64u = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4)), (c) => c.charCodeAt(0));
+export function transferCode() {
+  const A = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789", r = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(r, (b) => A[b % A.length]).join("").replace(/(.{4})(?!$)/g, "$1-");
+}
+async function bundleKey(code, salt) {
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(code.toUpperCase().replace(/[^A-Z0-9]/g, "")), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name: "PBKDF2", hash: "SHA-256", salt, iterations: 250000 }, base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+export async function exportKeys(keys, code) {
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new TextEncoder().encode(JSON.stringify({ v: 1, at: Date.now(), keys }));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await bundleKey(code, salt), data));
+  return BUNDLE_PREFIX + b64u(salt) + "." + b64u(iv) + "." + b64u(ct);
+}
+export async function importKeys(text, code) {
+  const m = new RegExp(BUNDLE_PREFIX.replace(/[-]/g, "\\-") + "([\\w-]+)\\.([\\w-]+)\\.([\\w-]+)").exec(String(text || ""));
+  if (!m) throw new Error("this is not a MyChat keys text");
+  try {
+    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64u(m[2]) }, await bundleKey(code, unb64u(m[1])), unb64u(m[3]));
+    return JSON.parse(new TextDecoder().decode(pt)).keys || {};
+  } catch { throw new Error("wrong code (or the text was changed)"); }
+}
