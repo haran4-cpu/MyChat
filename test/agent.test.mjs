@@ -316,3 +316,20 @@ test("an answer that describes files it never opened is sent back to read them",
   assert.match(nudged, /never read: a\.json, b\.md, c\.txt/);
   assert.match(r.answer, /one letter/);
 });
+
+test("edit op: an exact unique replacement on a big file, previewed as a small diff, applied and undone", async () => {
+  const { checkOps, preview, apply, undo, memoryFs } = await import("../core/agent.mjs");
+  const big = Array.from({ length: 12000 }, (_, i) => `line ${i + 1}`).join("\n").replace("line 9000", "for (let i = 1; i < n; i++) sum += a[i];");
+  const fs = memoryFs({ "P/app.html": big });
+  const { ops } = checkOps([{ op: "edit", path: "P/app.html", old: "for (let i = 1; i < n; i++)", new: "for (let i = 0; i < n; i++)", why: "off-by-one" },
+                             { op: "edit", path: "P/app.html", old: "line 1", new: "x" }]);
+  const pv = await preview(fs, ops);
+  assert.equal(pv[0].stats.line, 9000);
+  assert.ok(pv[0].diff.length < 10);
+  assert.match(pv[1].label, /more than once/);
+  const j = await apply(fs, { id: "e1", goal: "fix", ops: [ops[0]] }, [0]);
+  assert.match(await fs.read("P/app.html"), /let i = 0; i < n/);
+  assert.equal((await fs.read("P/app.html")).split("\n").length, 12000);
+  await undo(fs, j);
+  assert.equal(await fs.read("P/app.html"), big);
+});

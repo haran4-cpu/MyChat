@@ -12,7 +12,16 @@ export const TRASH = ".mychat-trash";
 const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv", TRASH, ".gradle", "build", "dist", "META-INF", "kotlin"]);
 const PROTECTED = /(^|\/)(keys\.json|token|\.env(\..*)?|id_rsa.*|.*\.pem|.*\.keystore)$/i;
 const TEXT_EXT = /\.(txt|md|markdown|json|jsonl|csv|tsv|ya?ml|toml|ini|cfg|conf|xml|html?|css|scss|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|kt|c|h|cpp|hpp|cs|php|sh|ps1|bat|sql|svg|log|env\.example|gitignore)$/i;
-export const OPS = ["write", "append", "mkdir", "move", "delete", "extract"];
+export const OPS = ["write", "edit", "append", "mkdir", "move", "delete", "extract"];
+
+/** An exact, unique find-and-replace (measured: rewriting a 12,000-line file to change 20 lines is how weak models
+ *  cut or break code). Returns { after, line } or throws when the text is missing or not unique. */
+export function editText(before, o) {
+  const at = before.indexOf(o.old);
+  if (at < 0) throw new Error(`${o.path}: the text to replace was not found (read the exact lines first)`);
+  if (before.indexOf(o.old, at + 1) >= 0) throw new Error(`${o.path}: the text to replace appears more than once — include more surrounding lines`);
+  return { after: before.slice(0, at) + o.new + before.slice(at + o.old.length), line: before.slice(0, at).split("\n").length };
+}
 
 /** A path inside the workspace: relative, forward slashes, no "..", no drive letters, nothing secret. */
 export function safeRel(p) {
@@ -49,7 +58,7 @@ export async function tree(fs, { maxEntries = 400, maxDepth = 4 } = {}) {
 }
 const fmtSize = (b) => (b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB");
 
-const SYS = `You are MyChat Agent: a senior engineer and careful assistant. You DO have access to the person's MyChat folder (the workspace) through the tools below — never say you cannot see their files; look. Never say something works, runs or is fine unless you ran or checked it (run_page runs HTML apps for real); otherwise say what you saw in the code and that it was not run. For a big file call outline first, then read only the line ranges you need. You are not one company's model: MyChat routes each step to one of several models (Google Gemini, open models such as gpt-oss, Qwen, Llama, DeepSeek, Kimi, GLM, and a local model on the PC) and has answers reviewed by a different family. Never say you were made by Google, OpenAI or anyone else; if asked which model, say this and that the model that answered is shown under the answer.
+const SYS = `You are MyChat Agent: a senior engineer and careful assistant. You DO have access to the person's MyChat folder (the workspace) through the tools below — never say you cannot see their files; look. Never say something works, runs or is fine unless you ran or checked it (run_page runs HTML apps for real); otherwise say what you saw in the code and that it was not run. For a big file call outline first, then read only the line ranges you need. To study or fix a web app (.html): outline it, run_page it, then read the lines around each error; every finding you report must come from a run result or from lines you read (path:line). You are not one company's model: MyChat routes each step to one of several models (Google Gemini, open models such as gpt-oss, Qwen, Llama, DeepSeek, Kimi, GLM, and a local model on the PC) and has answers reviewed by a different family. Never say you were made by Google, OpenAI or anyone else; if asked which model, say this and that the model that answered is shown under the answer.
 How you work (gather context → act → verify → repeat):
 0. In your first reply, put a short plan in "thought" (2-4 steps), then start. Use the WORKSPACE MAP: it tells you what each project is and where its real code is — go there directly.
 1. Understand what is asked and what "done" looks like.
@@ -66,6 +75,7 @@ __TOOLS__
 OPS (proposed changes, applied only after approval):
   {"op":"mkdir","path":"a/b","why":"..."}
   {"op":"write","path":"a/b.txt","content":"FULL file content","why":"..."}   (read a file before rewriting it)
+  {"op":"edit","path":"a/app.html","old":"exact existing lines (unique)","new":"replacement","why":"..."}   (PREFER this for existing files: small, exact, checkable)
   {"op":"append","path":"a/log.md","content":"text","why":"..."}
   {"op":"move","path":"old.txt","to":"new/old.txt","why":"..."}
   {"op":"delete","path":"a/old.txt","why":"..."}   (goes to trash; undo restores)
@@ -432,6 +442,8 @@ export function checkOps(raw) {
     const why = String(o?.why || "").slice(0, 300);
     if (!o || !OPS.includes(o.op) || !path) { rejected.push({ ...o, reason: "unknown operation or unsafe path" }); continue; }
     if ((o.op === "move" || o.op === "extract") && !to) { rejected.push({ ...o, reason: `${o.op} needs a safe destination ("to")` }); continue; }
+    if (o.op === "edit" && (typeof o.old !== "string" || !o.old || typeof o.new !== "string")) { rejected.push({ ...o, reason: "edit needs old (exact existing text) and new" }); continue; }
+    if (o.op === "edit") { ops.push({ op: "edit", path, old: o.old, new: o.new, why }); continue; }
     if ((o.op === "write" || o.op === "append") && typeof o.content !== "string") { rejected.push({ ...o, reason: "no content" }); continue; }
     if ((o.op === "write" || o.op === "append") && o.content.length > 2_000_000) { rejected.push({ op: o.op, path, reason: "content over 2 MB" }); continue; }
     if ((o.op === "write" || o.op === "append") && !isText(path)) { rejected.push({ op: o.op, path, reason: "not a text file type" }); continue; }
@@ -465,8 +477,18 @@ export async function preview(fs, ops) {
       item.stats = item.diff ? { added: item.diff.filter((l) => l[0] === "+").length, removed: item.diff.filter((l) => l[0] === "-").length } : null;
       item.unchanged = before === after;
     }
+    if (o.op === "edit") {
+      const before = exists ? await fs.read(o.path).catch(() => null) : null;
+      try {
+        if (before == null) throw new Error(`${o.path} does not exist or is not text`);
+        const { after, line } = editText(before, o);
+        item.diff = [`@@ line ${line}`, ...lineDiff(o.old, o.new, 2)];
+        item.stats = { added: item.diff.filter((l) => l[0] === "+").length, removed: item.diff.filter((l) => l[0] === "-").length, line };
+        item.unchanged = after === before;
+      } catch (e) { item.error = e.message; item.unchanged = true; }
+    }
     if (o.op === "move" || o.op === "extract") item.targetExists = await fs.exists(o.to).catch(() => false);
-    item.label = describe(o, exists);
+    item.label = describe(o, exists) + (item.error ? ` — ✗ ${item.error}` : "");
     out.push(item);
   }
   return out;
@@ -475,6 +497,7 @@ function describe(o, exists) {
   if (o.op === "mkdir") return exists ? `Folder ${o.path} (already there)` : `New folder ${o.path}`;
   if (o.op === "write") return exists ? `Change ${o.path}` : `New file ${o.path}`;
   if (o.op === "append") return `Add to ${o.path}`;
+  if (o.op === "edit") return `Edit ${o.path} (exact replacement)`;
   if (o.op === "move") return `Move ${o.path} → ${o.to}`;
   if (o.op === "extract") return `Unpack ${o.path} into ${o.to}/`;
   return `Delete ${o.path} (to trash, can be undone)`;
@@ -519,6 +542,11 @@ export async function apply(fs, p, approved = null) {
         if (exists && prev == null) throw new Error(`${o.path} is not a text file; not changed`);
         await ensureParent(fs, o.path, journal);
         await fs.write(o.path, o.op === "append" ? (prev || "") + o.content : o.content);
+        journal.steps.push({ op: "write", path: o.path, prev });
+      } else if (o.op === "edit") {
+        const prev = exists ? await fs.read(o.path) : null;
+        if (prev == null) throw new Error(`${o.path} does not exist or is not text`);
+        await fs.write(o.path, editText(prev, o).after);
         journal.steps.push({ op: "write", path: o.path, prev });
       } else if (o.op === "move") {
         if (!exists) throw new Error(`${o.path} does not exist`);
