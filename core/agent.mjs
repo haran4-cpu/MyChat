@@ -4,6 +4,7 @@
 //   5. keep a journal so every applied plan can be undone.
 // Nothing is ever deleted: "delete" moves the item into .mychat-trash/<plan id>/ inside the same folder.
 import { parseJsonLoose } from "./json.mjs";
+import { challenge } from "./challenge.mjs";
 // The same code runs on the PC gateway (Node fs) and in the phone app (Capacitor Filesystem); each passes a small
 // fs adapter: { list(rel) -> [{name, dir, size}], read(rel) -> string|null, write(rel, text), mkdir(rel),
 //               move(from, to), exists(rel) -> bool, rmdirEmpty(rel) }.
@@ -58,7 +59,7 @@ export async function tree(fs, { maxEntries = 400, maxDepth = 4 } = {}) {
 }
 const fmtSize = (b) => (b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB");
 
-const SYS = `You are MyChat Agent: a senior engineer and careful assistant. You DO have access to the person's MyChat folder (the workspace) through the tools below — never say you cannot see their files; look. Never say something works, runs or is fine unless you ran or checked it (run_page runs HTML apps for real); otherwise say what you saw in the code and that it was not run. For a big file call outline first, then read only the line ranges you need. To study or fix a web app (.html): outline it, run_page it, then read the lines around each error; every finding you report must come from a run result or from lines you read (path:line). To FIX a bug: first reproduce it (run_page, or run_js with the function's code) and show the failing output, then propose the edit; the PC re-runs the app before and after you are approved, so say what result should change. For a kind of task you have a procedure for (code review, debugging, security, testing), skill_search first and follow the best skill. If the person's words don't match a path exactly but one thing clearly matches, say \"I assume you mean X\" and continue; ask only when two or more things match or a wrong guess would change files. You are not one company's model: MyChat routes each step to one of several models (Google Gemini, open models such as gpt-oss, Qwen, Llama, DeepSeek, Kimi, GLM, and a local model on the PC) and has answers reviewed by a different family. Never say you were made by Google, OpenAI or anyone else; if asked which model, say this and that the model that answered is shown under the answer.
+const SYS = `You are MyChat Agent: a senior engineer and careful assistant. You DO have access to the person's MyChat folder (the workspace) through the tools below — never say you cannot see their files; look. Never say something works, runs or is fine unless you ran or checked it (run_page runs HTML apps for real); otherwise say what you saw in the code and that it was not run. For a big file call outline first, then read only the line ranges you need. To study or fix a web app (.html): outline it, run_page it, then read the lines around each error; every finding you report must come from a run result or from lines you read (path:line). To FIX a bug: first reproduce it (run_page, or run_js with the function's code) and show the failing output, then propose the edit; the PC re-runs the app before and after you are approved, so say what result should change. To check a version someone (another AI agent or a person) handed over against what they claim: compare the previous and the new version, run_page both if they are web apps, then judge every claim of their changelog as DONE (with the evidence), NOT DONE, or DONE DIFFERENTLY, and list changes they did not mention. For a kind of task you have a procedure for (code review, debugging, security, testing), skill_search first and follow the best skill. If the person's words don't match a path exactly but one thing clearly matches, say \"I assume you mean X\" and continue; ask only when two or more things match or a wrong guess would change files. You are not one company's model: MyChat routes each step to one of several models (Google Gemini, open models such as gpt-oss, Qwen, Llama, DeepSeek, Kimi, GLM, and a local model on the PC) and has answers reviewed by a different family. Never say you were made by Google, OpenAI or anyone else; if asked which model, say this and that the model that answered is shown under the answer.
 How you work (gather context → act → verify → repeat):
 0. In your first reply, put a short plan in "thought" (2-4 steps), then start. Use the WORKSPACE MAP: it tells you what each project is and where its real code is — go there directly.
 1. Understand what is asked and what "done" looks like.
@@ -104,6 +105,7 @@ export const TOOL_DOCS = {
   fetch: ["{\"url\":\"https://...\"}", "a web page as text"],
   outline: ["{\"path\":\"file\"}", "a parser-built map of a code file: every function/class/method with its exact line range, event handlers, element ids — read this FIRST for big files, then read only the ranges you need"],
   run_page: ["{\"path\":\"app.html\",\"clicks\":25}", "RUNS an HTML app in a real headless browser on the PC: load errors, every error after pressing each reachable button (with file:line), screenshots. The only way to say whether a page works"],
+  compare: ["{\"a\":\"older file/folder/zip\",\"b\":\"newer one\"}", "what REALLY changed between two versions: files added/removed/changed, functions added/removed/rewritten (computed, not guessed). Use it to check a handoff's claims (\"fixed X\") against the facts; with run_page on both versions you also see which errors appeared or disappeared"],
   skill_search: ["{\"query\":\"what kind of task\"}", "find expert procedures for this kind of task (review, debugging, security, testing, audio…) in a library of ~1,000 open-source skills"],
   skill_load: ["{\"id\":\"from skill_search\"}", "load one skill's full procedure and follow it where it fits"],
   run_js: ["{\"code\":\"...\"}", "pure computation in a JavaScript sandbox: NO file access, NO network (use read/search for files); returns console output"],
@@ -166,7 +168,7 @@ export function workspaceReader(fs) {
  * host = { search?: Search, fetchText?(url), runJs?(code), privateData?, onStep?(step) }
  * Returns { id, goal, answer, summary, ops, rejected, steps, by, calls, reads, at }.
  */
-export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, search, fetchText, runJs, runPage, skills, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
+export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, search, fetchText, runJs, runPage, skills, noChallenge = false, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
   const reader = workspaceReader(fs);
   const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate) && (t !== "run_page" || runPage) && (!t.startsWith("skill_") || skills));
   const sys = SYS.replace("__TOOLS__", avail.map((t) => `  ${t} ${TOOL_DOCS[t][0]} — ${TOOL_DOCS[t][1]}`).join("\n")) + (REVIEW_RX.test(goal) ? REVIEW_GUIDE : "");
@@ -190,7 +192,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   const done = new Map();
   let repeats = 0;
   const steps = [], reads = new Set(), seen = new Map();   // seen: path -> full text of every file it read (for checking its claims)
-  let checked = null, repaired = false, unreadAsked = false;
+  let checked = null, repaired = false, unreadAsked = false, challenged = null;
   const observed = new Set();   // names that came from a real run (run_page): not 'described without reading'
   const proposed = [];   // changes the model "called" as if they were tools
   let by = "", calls = 0, last = null, raw = "";
@@ -229,6 +231,12 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
         const { outline, outlineText } = await import("./codemap.mjs");
         reads.add(args.path); seen.set(args.path, t);   // the map is built from the whole file: citations into it are checkable
         return `MAP of ${args.path} (built by a parser from the whole file, not guessed):\n` + outlineText(outline(t, args.path), 400);
+      }
+      if (name === "compare") {
+        const { compareVersions } = await import("./versions.mjs");
+        const r = await compareVersions(reader, String(args.a || ""), String(args.b || ""));
+        for (const m of r.text.matchAll(/[\w.-]+\.\w{2,12}/g)) observed.add(m[0].toLowerCase());
+        return r.text;
       }
       if (name === "skill_search") return String(skills.search(String(args.query || goal)));
       if (name === "skill_load") return String(skills.load(String(args.id || "")));
@@ -341,6 +349,18 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
           "\nRe-read the exact lines (read with from/to) and give the corrected, COMPLETE final answer (the person sees only that one). Cite only what you actually read." });
         continue;
       }
+      // another family attacks the claims; the program runs the checks on the real files
+      if (!challenged && seen.size && String(last.final ?? "").length > 150 && step < maxSteps - 1 && !noChallenge) {
+        onStep({ kind: "status", text: "Another model is trying to disprove the answer — the PC runs its checks" });
+        challenged = await challenge(gw, { answer: String(last.final), files: seen, by, signal, privateData }).catch(() => ({ tried: 0, refuted: [], upheld: [] }));
+        if (challenged.refuted.length) {
+          onStep({ kind: "status", text: `${challenged.refuted.length} claim(s) disproved by the files — correcting` });
+          msgs.push({ role: "assistant", content: r.content }, { role: "user", content: "DISPROVED BY THE FILES (a program ran these checks):\n" +
+            challenged.refuted.map((x) => `- claim: "${x.claim}" — evidence: ${x.evidence}`).join("\n") +
+            "\nRead the lines shown, correct or remove those claims, and give the COMPLETE corrected final answer (the person sees only that one)." });
+          continue;
+        }
+      }
       break;
     }
     const list = Array.isArray(last.calls) ? last.calls.slice(0, 4) : last.tool ? [{ tool: last.tool, args: last.args }] : [];
@@ -374,6 +394,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   }
   let answer = String(last?.final ?? last?.summary ?? "").trim() || "No usable answer came back from the models this time (they replied with nothing). Please try again — or connect an account for stronger models.";
   if (last?.final != null && (!checked || repaired)) checked = await checkClaims(answer, seen, reader);
+  if (challenged?.tried) answer += `\n\n*Challenged by another model: ${challenged.tried} claim check(s) run on the files${challenged.refuted.length ? ` — ${challenged.refuted.length} disproved and corrected` : " — none disproved"}.*`;
   if (checked && checked.total) answer += `\n\n---\n*Checked against the files: ${checked.total - checked.bad.length} of ${checked.total} citation(s) and code quote(s) found` +
     (checked.bad.length ? ` · not found: ${checked.bad.slice(0, 4).join("; ")}` : "") + "*";
   if (memory && last?.final != null && !(checked && checked.bad.length)) {
@@ -381,7 +402,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     try { await memory.add(line); } catch { /* memory is best-effort */ }
   }
   if (planBy) steps.unshift({ thought: planText.slice(0, 600), tool: "plan", args: { by: planBy }, result: "" });
-  return { id: newId(), goal, answer, raw, checked, summary: answer.slice(0, 600), ops, rejected, steps, by, calls, reads: [...reads], at: Date.now() };
+  return { id: newId(), goal, answer, raw, checked, challenged, summary: answer.slice(0, 600), ops, rejected, steps, by, calls, reads: [...reads], at: Date.now() };
 }
 
 /**

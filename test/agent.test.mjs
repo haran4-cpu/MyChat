@@ -348,3 +348,50 @@ test("skills: the agent can search the library and load a procedure when the hos
   assert.match(sysText, /skill_search/);
   assert.match(r.steps[1].result, /SKILL s1/);
 });
+
+test("claims are attacked by another family and settled by a program on the files (tonight's two wrong review claims)", async () => {
+  const app = ["<script>", "async function boot(ctx) {",
+    "  try { await ctx.audioWorklet.addModule('forge-worklet.js'); }",
+    "  catch (e) { const u = URL.createObjectURL(new Blob([WORKLET_SRC])); await ctx.audioWorklet.addModule(u); }",
+    "}", "panel.innerHTML = rows.join('');", "</script>"].join("\n");
+  const fs = memoryFs({ "P/app.html": app });
+  let n = 0, fixMsg = "", challengerFamily = "";
+  const gw = { async chat(req, o) {
+    if (/hostile fact-checker/.test(req.messages[0].content)) {
+      challengerFamily = o.avoidFamily;
+      return { provider: "q", model: "deepseek-v4", content: JSON.stringify({ checks: [
+        { claim: "the code never uses innerHTML", file: "P/app.html", pattern: "innerHTML", refuted_if: "found" },
+        { claim: "without forge-worklet.js the audio engine cannot start", file: "app.html", pattern: "catch[\\s\\S]{0,200}Blob", refuted_if: "found" },
+        { claim: "boot loads a worklet", file: "P/app.html", pattern: "addModule", refuted_if: "not_found" }] }) };
+    }
+    n++;
+    if (n === 1) return { provider: "p", model: "gemini-x", content: '{"tool":"read","args":{"path":"P/app.html"}}' };
+    if (n === 2) return { provider: "p", model: "gemini-x", content: JSON.stringify({ final: "Review of P/app.html: CRITICAL — without forge-worklet.js the audio engine cannot start, so the app is non-functional. Security: the code never uses innerHTML, so there is no injection risk. Overall the structure is simple and readable." }) };
+    fixMsg = req.messages.at(-1).content;
+    return { provider: "p", model: "gemini-x", content: JSON.stringify({ final: "Review of P/app.html: if forge-worklet.js is missing the engine falls back to a built-in copy (P/app.html:4). innerHTML is used (P/app.html:6) — check what goes into rows." }) };
+  } };
+  const r = await runAgent(gw, { goal: "review P/app.html", fs, plan: false, maxSteps: 8 });
+  assert.equal(challengerFamily, "gemini", "the checker avoids the author's family");
+  assert.match(fixMsg, /DISPROVED BY THE FILES/);
+  assert.match(fixMsg, /innerHTML.*found 1×/s);
+  assert.match(fixMsg, /cannot start.*found 1×.*app\.html:4/s);
+  assert.doesNotMatch(fixMsg, /boot loads a worklet/, "an upheld claim is not sent back");
+  assert.match(r.answer, /falls back/);
+  assert.match(r.answer, /2 disproved and corrected/);
+});
+
+test("compare: claimed vs actual between two versions (single files with different names, folders, archives)", async () => {
+  const { compareVersions } = await import("../core/versions.mjs");
+  const { workspaceReader, makeZipFor } = { workspaceReader: (await import("../core/agent.mjs")).workspaceReader };
+  const v1 = "<script>\nfunction total(a) {\n  let s = 0;\n  for (let i = 1; i < a.length; i++) s += a[i];\n  return s;\n}\nfunction save() {\n  localStorage.x = 1;\n}\n</script>";
+  const v2 = "<script>\nfunction total(a) {\n  let s = 0;\n  for (let i = 0; i < a.length; i++) s += a[i];\n  return s;\n}\nfunction exportMp3() {\n  return 1;\n}\n</script>";
+  const fs = memoryFs({ "In/app-v1.html": v1, "In/app-v2.html": v2, "A/app.html": v1, "A/readme.md": "x", "B/app.html": v2, "B/new.css": "a{}" });
+  const r = await compareVersions(workspaceReader(fs), "In/app-v1.html", "In/app-v2.html");
+  assert.match(r.text, /REWRITTEN: function total/);
+  assert.match(r.text, /NEW: function exportMp3/);
+  assert.match(r.text, /REMOVED: function save/);
+  const f = await compareVersions(workspaceReader(fs), "A", "B");
+  assert.deepEqual(f.files.added, ["new.css"]); assert.deepEqual(f.files.removed, ["readme.md"]);
+  assert.match(f.text, /CHANGED app\.html: \+3 −3 lines/);
+  void makeZipFor;
+});

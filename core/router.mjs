@@ -292,7 +292,7 @@ export class Gateway {
   }
 
   /** Rank (provider, model) pairs for a task. */
-  candidates(task, { needTools = false, needVision = false, privateData = false, exclude = [], families = null, limit = 8, lang = "", diverse = false, quality = false } = {}) {
+  candidates(task, { needTools = false, needVision = false, privateData = false, exclude = [], families = null, limit = 8, lang = "", diverse = false, quality = false, avoidFamily = "" } = {}) {
     const now = Date.now(), out = [];
     for (const id of this.enabledProviders()) {
       const p = this.providers[id];
@@ -343,6 +343,7 @@ export class Gateway {
         // tiny models (≤4B) can chat but not work: measured 2026-11-20, a 1.7B free model was picked for the agent and
         // answered in its own tool format; for code, analysis, long and tool work they come last
         if (task !== "fast" && task !== "chat" && /(\b|[-_])(0\.\d+b|1(\.\d)?b|2b|3b|4b|e2b|e4b)\b/i.test(model)) score *= 0.15;
+        if (avoidFamily && family(model) === avoidFamily) score *= 0.05;   // a checker from another family, unless none is left
         out.push({ provider: id, model, score, family: family(model) });
       }
     }
@@ -426,7 +427,7 @@ export class Gateway {
     const lang = /[\u0590-\u05FF]/.test(lastUserText(req.messages)) ? "he" : "";
     const need = estimateTokens(req.messages) + 2000;
     let list = this.candidates(task, { needTools: !!req.tools?.length, needVision: hasImages(req.messages),
-                                       privateData: opt.privateData, exclude: opt.exclude, families: opt.families, lang, quality: opt.quality });
+                                       privateData: opt.privateData, exclude: opt.exclude, families: opt.families, lang, quality: opt.quality, avoidFamily: opt.avoidFamily });
     if (opt.prefer) {
       const [pp, ...mm] = opt.prefer.split(":"), pm = mm.join(":");
       list = [{ provider: pp, model: pm, score: 99, family: family(pm) }, ...list.filter((c) => !(c.provider === pp && c.model === pm))];
