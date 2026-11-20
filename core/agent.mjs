@@ -176,8 +176,14 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   let repeats = 0;
   const steps = [], reads = new Set(), seen = new Map();   // seen: path -> full text of every file it read (for checking its claims)
   let checked = null, repaired = false;
+  const proposed = [];   // changes the model "called" as if they were tools
   let by = "", calls = 0, last = null;
   const runTool = async (name, args = {}) => {
+    if (OPS.includes(name) && args && args.path) {   // models often "call" a change; keep it as a proposed change
+      const { ops: ok } = checkOps([{ op: name, ...args }]);
+      if (ok.length) { proposed.push(ok[0]); return `Noted as a PROPOSED change (applied only after the person approves): ${name} ${ok[0].path}. Continue, or finish with your answer.`; }
+      return `That change is not valid (${name} ${args.path}): check the path and fields.`;
+    }
     if (!avail.includes(name)) return `unknown tool "${name}". Available: ${avail.join(", ")}`;
     try {
       if (name === "tree") {
@@ -279,7 +285,9 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     if (step === maxSteps - 2 || repeats >= 3) msgs.push({ role: "user", content: "Give your final answer now (JSON with \"final\"), from what you have found." });
     else if (step && step % 5 === 4) msgs.push({ role: "user", content: `(${step + 1} of ${maxSteps} steps used. If you already have enough to answer well, answer now; otherwise continue with the most informative next step.)` });
   }
-  const { ops, rejected } = checkOps(last?.ops);
+  const { ops: finalOps, rejected } = checkOps(last?.ops);
+  const ops = [...finalOps];
+  for (const p of proposed) if (!ops.some((o) => o.op === p.op && o.path === p.path)) ops.push(p);
   if (last?.final == null && !signal?.aborted) {
     // out of steps mid-work: one last call, no tools, to write the answer from everything gathered (never raw protocol)
     msgs.push({ role: "user", content: "No more tool calls. Write your final answer now from what you have read, as plain markdown (not JSON). Cite path:line only for lines you actually read." });

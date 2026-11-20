@@ -244,3 +244,13 @@ test("one brain: a normal question streams normally; when the model asks for too
   assert.ok(!shown.includes(TOOL_TOKEN), "the switch token never reaches the screen");
   assert.match(shown, /Your list has milk/);
 });
+
+test("a change 'called' as a tool becomes a proposed change, not an error", async () => {
+  const fs = memoryFs({});
+  const gw = fakeGw([{ tool: "write", args: { path: "notes/todo.md", content: "- milk\n" } }, { final: "Added a list." }]);
+  const r = await runAgent(gw, { plan: false, goal: "make a todo", fs });
+  assert.match(gw.seen[1].messages.at(-1).content, /PROPOSED change/);
+  assert.equal(r.ops.length, 1);
+  assert.equal(r.ops[0].path, "notes/todo.md");
+  assert.equal(await fs.exists("notes/todo.md"), false, "nothing changes before approval");
+});

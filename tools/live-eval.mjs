@@ -115,7 +115,7 @@ await task("make-file", async () => {
   const op = r.ops.find((o) => o.op === "write" && /notes\/todo\.md$/.test(o.path));
   if (!op) return { pass: false, score: 0, by: r.by, detail: "no write op proposed: " + JSON.stringify(r.ops).slice(0, 300) + "\n" + r.answer.slice(0, 300) };
   const j = await apply(wfs, r);
-  const t = await wfs.read("notes/todo.md");
+  const t = await wfs.read(op.path);   // where the agent chose to put it (e.g. inside the project)
   const ok = !j.error && /milk/i.test(t || "") && /eggs/i.test(t || "") && /bread/i.test(t || "");
   return { pass: ok, score: ok ? 1 : 0.5, by: r.by, detail: `file: ${JSON.stringify((t || "").slice(0, 200))} · op content: ${JSON.stringify(String(op.content).slice(0, 200))} · steps: ${r.steps.map((x) => x.tool).join(",")} · error: ${j.error || "none"}` };
 });

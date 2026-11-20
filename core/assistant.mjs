@@ -42,7 +42,9 @@ export async function respond(gw, o) {
       if (h.length >= TOOL_TOKEN.length || !TOOL_TOKEN.startsWith(h)) { decided = true; if (!h.startsWith(TOOL_TOKEN)) onDelta?.(head); }
     },
   });
-  if (fs && String(r.content).trimStart().startsWith(TOOL_TOKEN)) return agent();
+  // the model asked for tools — or gave nothing usable (measured: a reasoning model returned an empty answer to the
+  // decision prompt): look at the files rather than show an empty bubble
+  if (fs && (String(r.content).trimStart().startsWith(TOOL_TOKEN) || !String(r.content).trim())) return agent();
   if (!decided && head && onDelta) onDelta(head);
   return r;
 }
