@@ -70,6 +70,18 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
   assert.match((await (await fetch(u + "/agent/tree?root=0", { headers: H })).json()).tree, /a\.txt/);
   assert.equal((await fetch(u + "/agent/undo", { method: "POST", headers: H, body: JSON.stringify({ id: "latest" }) })).status, 404);
   assert.equal((await fetch(u + "/agent/tree?root=0")).status, 401, "agent API needs the token");
+  // an approved change to an HTML app is measured: the app runs before and after, the error difference is reported
+  const { findBrowser } = await import("../pc/pagecheck.mjs");
+  if (findBrowser()) {
+    fs.writeFileSync(path.join(work, "app.html"), '<!doctype html><title>A</title><button id="b">Load</button><script>\nfunction load() {\n  const d = null;\n  return d.x;\n}\ndocument.getElementById("b").addEventListener("click", load);\n</script>');
+    fs.writeFileSync(path.join(home, "agent", "plan-fix1.json"), JSON.stringify({ id: "fix1", goal: "fix load", root: work, rootIndex: 0, at: Date.now(),
+      ops: [{ op: "edit", path: "app.html", old: "const d = null;", new: "const d = { x: 1 };", why: "d was null" }] }));
+    const jv = await (await fetch(u + "/agent/apply", { method: "POST", headers: H, body: JSON.stringify({ id: "fix1" }) })).json();
+    assert.equal(jv.verify?.[0]?.before, 1, JSON.stringify(jv.verify));
+    assert.equal(jv.verify[0].after, 0);
+    assert.match(jv.verify[0].fixed[0], /reading 'x'/);
+    assert.match(fs.readFileSync(path.join(work, "app.html"), "utf8"), /x: 1/);
+  }
   // phone link: off by default; when on, a separate port serves only the API, only with the token
   const lp = `http://127.0.0.1:${process.env.MYCHAT_LINK_PORT}`;
   await assert.rejects(fetch(lp + "/health"));

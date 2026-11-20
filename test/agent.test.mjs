@@ -333,3 +333,18 @@ test("edit op: an exact unique replacement on a big file, previewed as a small d
   await undo(fs, j);
   assert.equal(await fs.read("P/app.html"), big);
 });
+
+test("skills: the agent can search the library and load a procedure when the host provides it", async () => {
+  const fs = memoryFs({ "a.js": "x" });
+  let n = 0, sysText = "";
+  const gw = { async chat(req) {
+    n++; sysText = sysText || req.messages[0].content;
+    if (n === 1) return { content: '{"tool":"skill_search","args":{"query":"code review"}}', provider: "p", model: "m" };
+    if (n === 2) return { content: '{"tool":"skill_load","args":{"id":"s1"}}', provider: "p", model: "m" };
+    return { content: '{"final":"Reviewed with the checklist."}', provider: "p", model: "m" };
+  } };
+  const skills = { search: () => "s1 · review-checklist (skill)", load: (id) => `SKILL ${id}: check inputs, errors, tests` };
+  const r = await runAgent(gw, { goal: "review a.js", fs, plan: false, maxSteps: 5, skills });
+  assert.match(sysText, /skill_search/);
+  assert.match(r.steps[1].result, /SKILL s1/);
+});

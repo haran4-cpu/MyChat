@@ -24,6 +24,8 @@ import { Ledger } from "../core/ledger.mjs";
 import { Bench } from "./bench.mjs";
 import { nodeFs } from "./agentfs.mjs";
 import { checkPage } from "./pagecheck.mjs";
+import { skillSearch, skillLoad } from "./skills.mjs";
+const SKILLS = { search: (q) => skillSearch(q), load: (id) => skillLoad(id) };
 
 /** run_page for the agent, limited to one root folder (the path must stay inside it). */
 const pageRunner = (rootPath) => async (rel, o = {}) => {
@@ -103,7 +105,7 @@ function agentMemory(root) {
     },
   };
 }
-const hostTools = () => ({ search, evaluate: (e) => evaluate(e).toString(12),
+const hostTools = () => ({ search, skills: SKILLS, evaluate: (e) => evaluate(e).toString(12),
   fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } });
 async function brainRun(oreq, opts) {
   if (oreq.tools?.length || oreq.response_format || settings.oneBrain === false) return run(gw, oreq, opts);
@@ -308,7 +310,7 @@ async function agentRoute(req, res, url) {
   if (url.pathname === "/agent/plan" && req.method === "POST") {
     const root = rootAt(b.root), afs = nodeFs(root.path);
     const p = await agentPlan(gw, { goal: String(b.goal || "").slice(0, 4000), fs: afs, privateData: root.private, history: Array.isArray(b.history) ? b.history.slice(-8) : [], memory: agentMemory(root.path),
-      search, evaluate: (e) => evaluate(e).toString(12), runPage: pageRunner(root.path),
+      search, skills: SKILLS, evaluate: (e) => evaluate(e).toString(12), runPage: pageRunner(root.path),
       fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } });
     p.root = root.path; p.rootIndex = Number(b.root) || 0;
     p.preview = await agentPreview(afs, p.ops);
@@ -319,8 +321,24 @@ async function agentRoute(req, res, url) {
     const p = b.id === "latest" ? latestPlan() : agentLoad("plan", b.id);
     if (!p) return send(res, 404, { error: { message: "plan not found" } });
     if (agentLoad("journal", p.id)) return send(res, 409, { error: { message: "this plan was already applied (use undo first)" } });
-    const j = await agentApply(nodeFs(p.root), p, Array.isArray(b.approve) ? b.approve.map(Number) : null);
+    // Proof around the change: every HTML app that is about to change is run before and after, and the difference in
+    // errors is reported (fixed / still there / new). "Fixed" becomes a measured fact, not the model's word.
+    const pick = Array.isArray(b.approve) ? b.approve.map(Number) : null;
+    const pages = [...new Set((p.ops || []).filter((o, i) => (!pick || pick.includes(i)) && /\.html?$/i.test(o.path) && ["write", "edit"].includes(o.op)).map((o) => o.path))].slice(0, 3);
+    const run = pageRunner(p.root), before = {};
+    if (b.verify !== false) for (const f of pages) before[f] = await run(f, { clicks: 30 }).catch((e) => ({ failed: e.message }));
+    const j = await agentApply(nodeFs(p.root), p, pick);
     j.root = p.root;
+    if (pages.length && b.verify !== false) {
+      j.verify = [];
+      for (const f of pages) {
+        const after = await run(f, { clicks: 30 }).catch((e) => ({ failed: e.message }));
+        const key = (e) => e.text.replace(/127\.0\.0\.1:\d+/g, "localhost") + "@" + e.where;
+        const B = new Set((before[f].errors || []).map(key)), A = new Set((after.errors || []).map(key));
+        j.verify.push({ path: f, before: B.size, after: A.size, fixed: [...B].filter((k) => !A.has(k)).slice(0, 10), still: [...B].filter((k) => A.has(k)).slice(0, 10),
+          new: [...A].filter((k) => !B.has(k)).slice(0, 10), failed: before[f].failed || after.failed || null, shots: after.shots || [] });
+      }
+    }
     agentSave("journal", p.id, j);
     return send(res, 200, j);
   }

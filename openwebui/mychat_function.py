@@ -1,7 +1,7 @@
 """
 title: MyChat
 author: MyChat (multi-model gateway)
-version: 1.8.0
+version: 1.9.0
 required_open_webui_version: 0.6.0
 description: MyChat inside Open WebUI. Cloud and local models combined per task (Auto, Max, Consensus, Verified/Truth Engine, Fast, Private). Starts the MyChat gateway on this PC by itself; accounts and keys are managed from the "MyChat · Accounts" model without leaving Open WebUI.
 """
@@ -281,6 +281,12 @@ class Pipe:
                 if st.get("auto"):
                     continue
                 lines.append(f"- {st['op']} `{st['path']}`" + (f" → `{st['to']}`" if st.get("to") else ""))
+            for v in j.get("verify") or []:   # the app was run before and after the change: measured, not claimed
+                if v.get("failed"):
+                    lines.append(f"\n**Run check {v['path']}:** could not run ({v['failed']})")
+                    continue
+                lines.append(f"\n**Run check `{v['path']}`** (real browser, before → after): errors {v['before']} → {v['after']}")
+                lines += [f"- ✓ fixed: {x}" for x in v.get("fixed", [])[:5]] + [f"- ✗ new: {x}" for x in v.get("new", [])[:5]] + [f"- still: {x}" for x in v.get("still", [])[:3]]
             lines += ["", "Not what you wanted? Reply **/undo** and everything goes back."]
             return "\n".join(lines)
         if t.lower() in ("/folders", "/agent"):

@@ -58,7 +58,7 @@ export async function tree(fs, { maxEntries = 400, maxDepth = 4 } = {}) {
 }
 const fmtSize = (b) => (b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB");
 
-const SYS = `You are MyChat Agent: a senior engineer and careful assistant. You DO have access to the person's MyChat folder (the workspace) through the tools below — never say you cannot see their files; look. Never say something works, runs or is fine unless you ran or checked it (run_page runs HTML apps for real); otherwise say what you saw in the code and that it was not run. For a big file call outline first, then read only the line ranges you need. To study or fix a web app (.html): outline it, run_page it, then read the lines around each error; every finding you report must come from a run result or from lines you read (path:line). You are not one company's model: MyChat routes each step to one of several models (Google Gemini, open models such as gpt-oss, Qwen, Llama, DeepSeek, Kimi, GLM, and a local model on the PC) and has answers reviewed by a different family. Never say you were made by Google, OpenAI or anyone else; if asked which model, say this and that the model that answered is shown under the answer.
+const SYS = `You are MyChat Agent: a senior engineer and careful assistant. You DO have access to the person's MyChat folder (the workspace) through the tools below — never say you cannot see their files; look. Never say something works, runs or is fine unless you ran or checked it (run_page runs HTML apps for real); otherwise say what you saw in the code and that it was not run. For a big file call outline first, then read only the line ranges you need. To study or fix a web app (.html): outline it, run_page it, then read the lines around each error; every finding you report must come from a run result or from lines you read (path:line). To FIX a bug: first reproduce it (run_page, or run_js with the function's code) and show the failing output, then propose the edit; the PC re-runs the app before and after you are approved, so say what result should change. For a kind of task you have a procedure for (code review, debugging, security, testing), skill_search first and follow the best skill. If the person's words don't match a path exactly but one thing clearly matches, say \"I assume you mean X\" and continue; ask only when two or more things match or a wrong guess would change files. You are not one company's model: MyChat routes each step to one of several models (Google Gemini, open models such as gpt-oss, Qwen, Llama, DeepSeek, Kimi, GLM, and a local model on the PC) and has answers reviewed by a different family. Never say you were made by Google, OpenAI or anyone else; if asked which model, say this and that the model that answered is shown under the answer.
 How you work (gather context → act → verify → repeat):
 0. In your first reply, put a short plan in "thought" (2-4 steps), then start. Use the WORKSPACE MAP: it tells you what each project is and where its real code is — go there directly.
 1. Understand what is asked and what "done" looks like.
@@ -104,6 +104,8 @@ export const TOOL_DOCS = {
   fetch: ["{\"url\":\"https://...\"}", "a web page as text"],
   outline: ["{\"path\":\"file\"}", "a parser-built map of a code file: every function/class/method with its exact line range, event handlers, element ids — read this FIRST for big files, then read only the ranges you need"],
   run_page: ["{\"path\":\"app.html\",\"clicks\":25}", "RUNS an HTML app in a real headless browser on the PC: load errors, every error after pressing each reachable button (with file:line), screenshots. The only way to say whether a page works"],
+  skill_search: ["{\"query\":\"what kind of task\"}", "find expert procedures for this kind of task (review, debugging, security, testing, audio…) in a library of ~1,000 open-source skills"],
+  skill_load: ["{\"id\":\"from skill_search\"}", "load one skill's full procedure and follow it where it fits"],
   run_js: ["{\"code\":\"...\"}", "pure computation in a JavaScript sandbox: NO file access, NO network (use read/search for files); returns console output"],
 };
 
@@ -164,9 +166,9 @@ export function workspaceReader(fs) {
  * host = { search?: Search, fetchText?(url), runJs?(code), privateData?, onStep?(step) }
  * Returns { id, goal, answer, summary, ops, rejected, steps, by, calls, reads, at }.
  */
-export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, search, fetchText, runJs, runPage, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
+export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, search, fetchText, runJs, runPage, skills, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
   const reader = workspaceReader(fs);
-  const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate) && (t !== "run_page" || runPage));
+  const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate) && (t !== "run_page" || runPage) && (!t.startsWith("skill_") || skills));
   const sys = SYS.replace("__TOOLS__", avail.map((t) => `  ${t} ${TOOL_DOCS[t][0]} — ${TOOL_DOCS[t][1]}`).join("\n")) + (REVIEW_RX.test(goal) ? REVIEW_GUIDE : "");
   const { workspaceMap } = await import("./projects.mjs");
   const [map, listing] = await Promise.all([workspaceMap(fs).catch(() => ""), tree(fs, { maxEntries: 150, maxDepth: 2 })]);
@@ -228,6 +230,8 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
         reads.add(args.path); seen.set(args.path, t);   // the map is built from the whole file: citations into it are checkable
         return `MAP of ${args.path} (built by a parser from the whole file, not guessed):\n` + outlineText(outline(t, args.path), 400);
       }
+      if (name === "skill_search") return String(skills.search(String(args.query || goal)));
+      if (name === "skill_load") return String(skills.load(String(args.id || "")));
       if (name === "run_page") {
         if (!/\.html?$/i.test(String(args.path || ""))) return "run_page needs an .html file";
         onStep({ kind: "status", text: `Running ${args.path} in a headless browser…` });
