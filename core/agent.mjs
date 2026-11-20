@@ -178,7 +178,8 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   const steps = [], reads = new Set(), seen = new Map();   // seen: path -> full text of every file it read (for checking its claims)
   let checked = null, repaired = false;
   const proposed = [];   // changes the model "called" as if they were tools
-  let by = "", calls = 0, last = null;
+  let by = "", calls = 0, last = null, raw = "";
+  const skip = [];   // models that answered with nothing usable in this task: the next call goes elsewhere
   const runTool = async (name, args = {}) => {
     if (OPS.includes(name) && args && args.path) {   // models often "call" a change; keep it as a proposed change
       const { ops: ok } = checkOps([{ op: name, ...args }]);
@@ -249,9 +250,16 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   for (let step = 0; step < maxSteps; step++) {
     if (signal?.aborted) throw new Error("stopped");
     compact(msgs);
-    const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData });
-    calls++; by = `${r.provider}:${r.model}`;
+    const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData, exclude: skip });
+    calls++; by = `${r.provider}:${r.model}`; raw = String(r.content).slice(0, 300);
     last = parseJson(r.content);
+    // an empty "final" with nothing proposed is not an answer (measured 2026-11-20: a free channel answered every agent
+    // task in 1 s with an empty final). Ask once more, from another model.
+    if (last && last.final != null && !String(last.final).trim() && !(Array.isArray(last.ops) && last.ops.length) && skip.length < 3 && step < maxSteps - 1) {
+      skip.push(by);
+      onStep({ kind: "status", text: `${r.model.split("/").pop()} gave an empty answer — asking another model` });
+      continue;
+    }
     if (!last) {   // models sometimes answer in plain text: accept it as the final answer — unless it is broken protocol JSON
       const protocol = /"(thought|tool|calls|final)"\s*:/.test(r.content);
       if (!protocol && (step > 0 || !/\{/.test(r.content))) { last = { final: r.content }; break; }
@@ -293,13 +301,13 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     // out of steps mid-work: one last call, no tools, to write the answer from everything gathered (never raw protocol)
     msgs.push({ role: "user", content: "No more tool calls. Write your final answer now from what you have read, as plain markdown (not JSON). Cite path:line only for lines you actually read." });
     try {
-      const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData });
-      calls++; by = `${r.provider}:${r.model}`;
+      const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData, exclude: skip });
+      calls++; by = `${r.provider}:${r.model}`; raw = String(r.content).slice(0, 300);
       const j = parseJson(r.content);
       last = { ...(last || {}), final: j?.final ?? (/"(thought|tool|calls)"\s*:/.test(r.content) ? "(The model did not produce a readable answer; please try again.)" : r.content) };
     } catch { /* keep what we have */ }
   }
-  let answer = String(last?.final ?? last?.summary ?? "").trim() || "(no answer)";
+  let answer = String(last?.final ?? last?.summary ?? "").trim() || "No usable answer came back from the models this time (they replied with nothing). Please try again — or connect an account for stronger models.";
   if (last?.final != null && (!checked || repaired)) checked = await checkClaims(answer, seen, reader);
   if (checked && checked.total) answer += `\n\n---\n*Checked against the files: ${checked.total - checked.bad.length} of ${checked.total} citation(s) and code quote(s) found` +
     (checked.bad.length ? ` · not found: ${checked.bad.slice(0, 4).join("; ")}` : "") + "*";
@@ -308,7 +316,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     try { await memory.add(line); } catch { /* memory is best-effort */ }
   }
   if (planBy) steps.unshift({ thought: planText.slice(0, 600), tool: "plan", args: { by: planBy }, result: "" });
-  return { id: newId(), goal, answer, checked, summary: answer.slice(0, 600), ops, rejected, steps, by, calls, reads: [...reads], at: Date.now() };
+  return { id: newId(), goal, answer, raw, checked, summary: answer.slice(0, 600), ops, rejected, steps, by, calls, reads: [...reads], at: Date.now() };
 }
 
 /**

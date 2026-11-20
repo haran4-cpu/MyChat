@@ -107,7 +107,7 @@ await task("access", async () => {
   const r = await runAgent(gw, { goal: "יש לך גישה לקבצים של הפרויקט שלי? מה יש בו?", fs: wfs, maxSteps: 8, ...tools });
   const denies = /(אין לי גישה|don'?t have access|no access|cannot access|can'?t access)/i.test(r.answer);
   const knows = /demo-app|demo-shop/i.test(r.answer) && /(cart|auth|users)\.js|cart|users/i.test(r.answer);
-  return { pass: !denies && knows && !leaks(r.answer), score: (denies ? 0 : 0.5) + (knows ? 0.5 : 0), by: r.by, detail: `steps: ${r.steps.map((s) => s.tool).join(",")}\n${r.answer.slice(0, 600)}` };
+  return { pass: !denies && knows && !leaks(r.answer), score: (denies ? 0 : 0.5) + (knows ? 0.5 : 0), by: r.by, detail: `steps: ${r.steps.map((s) => s.tool).join(",")}\n${r.answer.slice(0, 600)}\nlast raw reply: ${r.raw || ""}` };
 });
 
 await task("one-brain", async () => {   // a plain chat message with no file words: the assistant must decide to look

@@ -261,3 +261,16 @@ test("tool calls written in the Hermes/Qwen XML style are understood (measured o
     { tool: "tree", args: { path: "Projects/demo-app" } });
   assert.deepEqual(parseJsonLoose('<tool_call>{"name":"read","arguments":{"path":"a.js"}}</tool_call>'), { tool: "read", args: { path: "a.js" } });
 });
+
+test("an empty final answer is not accepted: the agent asks another model", async () => {
+  const fs = memoryFs({ "a.txt": "hello" });
+  const seenExclude = [];
+  const gw = { calls: 0, async chat(req, o) {
+    seenExclude.push([...(o.exclude || [])]);
+    const first = !(o.exclude || []).length;
+    return { content: first ? '{"final":""}' : '{"final":"The folder has a.txt (a.txt:1 says hello)."}', provider: first ? "p" : "q", model: first ? "empty-model" : "good-model" };
+  } };
+  const r = await runAgent(gw, { goal: "what is in my folder?", fs, plan: false, maxSteps: 6 });
+  assert.match(r.answer, /a\.txt/);
+  assert.deepEqual(seenExclude.at(-1), ["p:empty-model"]);
+});
