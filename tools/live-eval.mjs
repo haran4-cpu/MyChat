@@ -91,7 +91,7 @@ await task("one-brain", async () => {   // a plain chat message with no file wor
   const looked = r.mode === "agent";
   const right = /(off.by.one|i\s*=\s*1|first item|index 0|items\[0\]|skips? the first)/i.test(r.content);
   return { pass: looked && right && !leaks(r.content), score: (looked ? 0.5 : 0) + (right ? 0.5 : 0), by: (r.trace || []).map((t) => t.by).join(", "),
-    detail: `mode ${r.mode} · memory lines ${mem.lines.length}\n${String(r.content).slice(0, 600)}` };
+    detail: `mode ${r.mode} · memory lines ${mem.lines.length} · content ${String(r.content).length} chars · trace ${JSON.stringify(r.trace || []).slice(0, 300)}\n${String(r.content).slice(0, 600)}` };
 });
 
 await task("review", async () => {
@@ -117,7 +117,7 @@ await task("make-file", async () => {
   const j = await apply(wfs, r);
   const t = await wfs.read("notes/todo.md");
   const ok = !j.error && /milk/i.test(t || "") && /eggs/i.test(t || "") && /bread/i.test(t || "");
-  return { pass: ok, score: ok ? 1 : 0.5, by: r.by, detail: (t || "").slice(0, 200) };
+  return { pass: ok, score: ok ? 1 : 0.5, by: r.by, detail: `file: ${JSON.stringify((t || "").slice(0, 200))} · op content: ${JSON.stringify(String(op.content).slice(0, 200))} · steps: ${r.steps.map((x) => x.tool).join(",")} · error: ${j.error || "none"}` };
 });
 
 await task("apk-unpack", async () => {
