@@ -11,3 +11,6 @@ app/node_modules/
 app/www/core/
 app/android/
 app/www/selftest.html
+__pycache__/
+*.pyc
+.pytest_cache/

@@ -170,6 +170,7 @@ export const MAP = [
 ];
 export function localPathFor(repoPath) {
   if (/(^|\/)(config\.json|keys\.json|token|settings\.json)$/.test(repoPath) || repoPath.includes("..")) return null;
+  if (/(^|\/)(__pycache__|\.pytest_cache|node_modules)\/|\.pyc$/.test(repoPath)) return null;   // build leftovers are never installed
   const m = MAP.find((x) => repoPath.startsWith(x.from));
   return m ? path.join(m.to(), ...repoPath.slice(m.from.length).split("/")) : null;
 }

@@ -49,7 +49,8 @@ test("reloads on new code, but waits while the service is busy", async () => {
 test("update map: code goes to the right folder; settings, keys and paths outside are never touched", () => {
   assert.equal(sup.localPathFor("core/router.mjs"), path.join(path.resolve("."), "core", "router.mjs"));
   assert.match(sup.localPathFor("kestrel/kestrel/llm.py"), /Kestrel[\\/]kestrel[\\/]llm\.py$/);
-  for (const p of ["kestrel/config.json", "README.md", "app/www/main.mjs", "core/../../evil.mjs", ".github/workflows/test.yml"])
+  for (const p of ["kestrel/config.json", "README.md", "app/www/main.mjs", "core/../../evil.mjs", ".github/workflows/test.yml",
+                   "kestrel/kestrel/__pycache__/llm.cpython-313.pyc", "kestrel/tests/__pycache__/x.pyc"])
     assert.equal(sup.localPathFor(p), null, p);
 });
 
