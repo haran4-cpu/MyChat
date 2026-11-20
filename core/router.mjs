@@ -96,6 +96,16 @@ class Stats {
   load(obj) { for (const [k, v] of Object.entries(obj || {})) this.m.set(k, v); }
 }
 
+/** An answer that stopped mid-sentence: no "stop" from the provider and no sentence end. Tool calls are complete by themselves. */
+export function cutOff(r) {
+  if (r.tool_calls?.length) return false;
+  const t = (r.content || "").trimEnd();
+  if (!t) return false;
+  if (r.finish_reason === "length") return true;
+  // even with "stop": an answer that ends on "written by" / "נכתב על ידי" is not an answer
+  return /(?:^|\s)(by|of|the|and|to|is|was|are|a|an|in|with|from|על ידי|של|את|הוא|היא|כי|עם|הם|מאת)$/iu.test(t) || /[,(\-–—:]$/.test(t) && t.length < 400;
+}
+
 /** More Arabic letters than Hebrew ones (the answer to a Hebrew question came back in the wrong script). */
 export function wrongScript(t) {
   const ar = (t.match(/[\u0600-\u06FF]/g) || []).length, he = (t.match(/[\u0590-\u05FF]/g) || []).length;
@@ -383,7 +393,7 @@ export class Gateway {
     }
     if (!list.length) throw new GatewayError("No model available: add a key in Connections, or allow the free no-key channels.", []);
     const attempts = [];
-    let partial = "";
+    let partial = "", kept = null;
     for (const c of list) {
       if (opt.signal?.aborted) break;
       if (this.disabled[c.provider] || this.parked[c.provider]?.until > Date.now()) continue;   // found out during this request
@@ -405,7 +415,13 @@ export class Gateway {
         const r = await this._call(c, { ...req, messages }, opt, sink);
         if (!passed) flush(true);
         attempts.push({ ...c, ok: true, ms: r.ms });
-        return { ...r, content: partial || r.content, provider: c.provider, model: c.model, task, attempts, ms: Date.now() - t0 };
+        const out = { ...r, content: partial || r.content, provider: c.provider, model: c.model, task, attempts, ms: Date.now() - t0 };
+        // Ended without "stop" in the middle of a sentence (measured: "The book was written by" and nothing more):
+        // the next model continues it, like a broken stream. If nobody can, the partial answer is still returned.
+        if (cutOff(out) && list.indexOf(c) < list.length - 1 && !opt.signal?.aborted) {
+          kept = out; this.log(`cut off ${c.provider}:${c.model} (finish ${r.finish_reason || "none"}), continuing with the next model`); continue;
+        }
+        return out;
       } catch (e) {
         if (e.wrongLang) { const st = this.stats.get(c.provider, c.model); st.heWrong = (st.heWrong || 0) + 1; }
         attempts.push({ ...c, ok: false, error: String(e.message || e).slice(0, 200) });
@@ -413,6 +429,7 @@ export class Gateway {
         if (e.fatal) break;
       }
     }
+    if (kept) return { ...kept, content: partial || kept.content, attempts, ms: Date.now() - t0 };
     const short = (e) => String(e).replace(/\s+/g, " ").slice(0, 90);
     throw new GatewayError(attempts.length
       ? `All models failed (${attempts.length} tried). ` + attempts.slice(0, 3).map((a) => `${a.provider}:${a.model} — ${short(a.error)}`).join("; ")

@@ -329,3 +329,18 @@ test("pauses survive a restart; expired ones are dropped", () => {
   b.importState(JSON.parse(JSON.stringify(a.exportState())));
   assert.ok(b.parked.groq && !b.parked.gemini);
 });
+
+test("an answer that stops on 'written by' is continued by the next model", async () => {
+  const { cutOff } = await import("../core/router.mjs");
+  assert.ok(cutOff({ content: "הספר אהבת ציון נכתב על ידי", finish_reason: "stop" }));
+  assert.ok(cutOff({ content: "The novel was written by", finish_reason: "stop" }));
+  assert.ok(cutOff({ content: "Here is a long answer", finish_reason: "length" }));
+  for (const t of ["אוטווה", "Canberra", "365 days.", "את הספר כתב **אברהם מאפו**.", "```js\nx()\n```"]) assert.ok(!cutOff({ content: t, finish_reason: "stop" }), t);
+  assert.ok(!cutOff({ content: "", tool_calls: [{}] }));
+  const w = await mockWorld({ a: { "m1": { text: "The novel was written by" } }, b: { "m2": { text: " Abraham Mapu." } } });
+  const g = only(["a", "b"])(gwFor(w, ["a", "b"]));
+  const r = await g.chat({ messages: [{ role: "user", content: "who wrote Ahavat Zion?" }] }, { prefer: "a:m1" });
+  assert.equal(r.content, "The novel was written by Abraham Mapu.");
+  assert.equal(w.calls[1].messages.at(-1).role, "user", "the second model is asked to continue");
+  w.srv.closeAllConnections(); w.srv.close();
+});
