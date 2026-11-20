@@ -38,4 +38,5 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;p
 .hero{background:linear-gradient(135deg,#1b2440,#16241c);border-color:#2b3657}
 .muted{opacity:.6}
 details summary{cursor:pointer;color:var(--sub);font-size:13px}
-@media (max-width:720px){.top{flex-wrap:wrap}#nav{order:3;width:100%;overflow-x:auto}}
+#nav{scrollbar-width:none}#nav::-webkit-scrollbar{display:none}
+@media (max-width:760px){.top{flex-wrap:wrap;gap:10px;padding:10px 14px}.top .btn.primary{margin-left:auto}#nav{order:3;flex:1 1 100%;overflow-x:auto}main{padding:16px 14px}}

@@ -152,7 +152,7 @@ function describe(o, exists) {
 
 /** Line diff (LCS) as ["  same", "- old", "+ new"], context trimmed to 3 lines around changes. */
 export function lineDiff(a, b, context = 3) {
-  const A = a.split("\n"), B = b.split("\n");
+  const A = a === "" ? [] : a.split("\n"), B = b === "" ? [] : b.split("\n");
   if (A.length * B.length > 4_000_000) return [`~ large file: ${A.length} → ${B.length} lines`];
   const n = A.length, m = B.length, L = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
   for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = A[i] === B[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);

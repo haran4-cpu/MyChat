@@ -95,3 +95,7 @@ test("PC folder adapter: real files, trash, undo, and nothing outside the folder
   await assert.rejects(fs.read("../x"), /outside/);
   assert.equal(await fs.read("missing.txt"), null);
 });
+
+test("a new file's diff shows only added lines", () => {
+  assert.deepEqual(lineDiff("", "a\nb"), ["+ a", "+ b"]);
+});

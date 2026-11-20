@@ -1,7 +1,7 @@
 """
 title: MyChat
 author: MyChat (multi-model gateway)
-version: 1.5.0
+version: 1.5.1
 required_open_webui_version: 0.6.0
 description: MyChat inside Open WebUI. Cloud and local models combined per task (Auto, Max, Consensus, Verified/Truth Engine, Fast, Private). Starts the MyChat gateway on this PC by itself; accounts and keys are managed from the "MyChat · Accounts" model without leaving Open WebUI.
 """
@@ -303,13 +303,14 @@ class Pipe:
             stats = f" (+{o['stats']['added']} −{o['stats']['removed']})" if o.get("stats") else ""
             out.append(f"**{i}. {o['label']}**{stats}" + (f" — {o['why']}" if o.get("why") else ""))
             if o.get("diff"):
-                body = "\n".join(o["diff"][:120]) + ("\n…" if len(o["diff"]) > 120 else "")
-                out += ["<details><summary>show</summary>", "", "```diff", body.replace("```", "``\u200b`"), "```", "</details>", ""]
+                lim = 40 if len(p.get("preview", [])) <= 3 else 12
+                body = "\n".join(o["diff"][:lim]) + (f"\n… {len(o['diff']) - lim} more lines (full view in MyChat → Agent)" if len(o["diff"]) > lim else "")
+                out += ["```diff", body.replace("```", "``\u200b`"), "```", ""]
         if p.get("rejected"):
             out.append(f"_Refused {len(p['rejected'])} unsafe step(s)._")
         out += ["", "Nothing has changed yet. Reply **yes** to apply all, **/approve 1,3** for some, or review it at "
                 f"[MyChat → Agent]({base}/#agent). After applying, **/undo** puts everything back.",
-                f"\n<sub>Planned by {p.get('by', '')}</sub>"]
+                f"\n_Planned by {p.get('by', '')}_"]
         return "\n".join(out)
 
     # ---------------------------------------------------------------- chat
