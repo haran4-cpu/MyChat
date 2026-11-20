@@ -5,7 +5,8 @@ const [url, expr, shot, timeoutMs = "30000"] = process.argv.slice(2);
 const chrome = spawn("google-chrome", ["--headless=new", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--remote-debugging-port=9333", "--window-size=390,844", "about:blank"], { stdio: "ignore" });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let ws;
-for (let i = 0; i < 50; i++) { try { const l = await (await fetch("http://127.0.0.1:9333/json")).json(); const p = l.find((x) => x.type === "page"); if (p) { ws = new WebSocket(p.webSocketDebuggerUrl); break; } } catch {} await sleep(200); }
+for (let i = 0; i < 150; i++) { try { const l = await (await fetch("http://127.0.0.1:9333/json")).json(); const p = l.find((x) => x.type === "page"); if (p) { ws = new WebSocket(p.webSocketDebuggerUrl); break; } } catch {} await sleep(200); }
+if (!ws) { console.error("Chrome did not start within 30 s"); chrome.kill(); process.exit(2); }
 await new Promise((r) => ws.addEventListener("open", r));
 let id = 0; const pend = new Map(); const logs = [];
 ws.addEventListener("message", (m) => { const d = JSON.parse(m.data); if (d.id && pend.has(d.id)) { pend.get(d.id)(d); pend.delete(d.id); }
