@@ -263,7 +263,7 @@ const server = http.createServer(async (req, res) => {
       const b = await body(req);
       bench = bench && bench.gw === gw ? bench : new Bench(gw);
       const st = await bench.start({ truth: b.truth !== false, truthLimit: Number(b.truthLimit) || undefined, truthSet: b.truthSet || "hard",
-        models: b.models !== false,
+        models: b.models !== false, ...(Array.isArray(b.modes) ? { modes: b.modes } : {}),
         onPins: (pins) => { if (b.apply !== false) { settings.pins = pins; writeJson("settings.json", settings); gw.pins = pins; } } });
       return send(res, 200, { running: st.running, total: st.total });
     }

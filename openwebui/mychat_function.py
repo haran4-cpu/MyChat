@@ -1,7 +1,7 @@
 """
 title: MyChat
 author: MyChat (multi-model gateway)
-version: 1.3.0
+version: 1.4.0
 required_open_webui_version: 0.6.0
 description: MyChat inside Open WebUI. Cloud and local models combined per task (Auto, Max, Consensus, Verified/Truth Engine, Fast, Private). Starts the MyChat gateway on this PC by itself; accounts and keys are managed from the "MyChat · Accounts" model without leaving Open WebUI.
 """
@@ -36,6 +36,10 @@ KEY_RX = re.compile(r"\b(AIza[\w-]{30,}|nvapi-[\w-]{20,}|gsk_\w{20,}|sk-or-[\w-]
 ONLY_TOKENS = re.compile(r"^\s*([A-Za-z0-9._-]{24,120}\s*)+$")
 
 
+class _Retry(Exception):
+    pass
+
+
 class Pipe:
     class Valves(BaseModel):
         MYCHAT_DIR: str = Field(default=r"C:\AI-Workspace\MyChat", description="Folder with pc\\server.mjs")
@@ -48,6 +52,7 @@ class Pipe:
         self.type = "manifold"
         self.valves = self.Valves()
         self._start_lock = asyncio.Lock()
+        self._last_status = ""
 
     def pipes(self):
         return [{"id": i, "name": n} for i, n in MODELS]
@@ -296,6 +301,27 @@ class Pipe:
                     req[k] = body[k]
             await self._status(__event_emitter__, "Choosing models…")
             last_status, started = "", time.time()
+            for attempt in range(2):   # the supervisor may be reloading the gateway at this very moment: wait and retry once
+                if attempt:
+                    await self._status(__event_emitter__, "MyChat is reloading an update…")
+                    for _ in range(40):
+                        await asyncio.sleep(0.25)
+                        if await self._healthy(client):
+                            break
+                    token = self._token()
+                try:
+                    async for piece in self._stream(client, req, token, __event_emitter__):
+                        yield piece
+                    break
+                except _Retry:
+                    continue
+            await self._status(__event_emitter__, (self._last_status[:100] + " · " if self._last_status else "") +
+                               f"{time.time() - started:.0f}s", True)
+
+    async def _stream(self, client, req, token, __event_emitter__):
+        self._last_status = ""
+        last_status, got_any = "", False
+        if True:
             try:
                 async with client.stream("POST", self.valves.MYCHAT_URL.rstrip("/") + "/v1/chat/completions", json=req,
                                          headers={"Authorization": "Bearer " + token}) as r:
@@ -323,15 +349,16 @@ class Pipe:
                                 for s in rc.strip().splitlines():
                                     s = s.strip("•- *").strip()
                                     if s and s != last_status:
-                                        last_status = s
+                                        last_status = self._last_status = s
                                         await self._status(__event_emitter__, s[:160])
                             if d.get("content"):
                                 said += d["content"]
+                                got_any = True
                                 yield d["content"]
                     if "All models failed" in said[:300] or "no model" in said[:300].lower():
                         yield ("\n\nNo cloud provider is connected yet. Pick **MyChat · Accounts & keys** in the model list: "
                                "sign in with Google (OpenRouter) or paste a key, then ask again.")
             except httpx.HTTPError as e:
-                yield f"\n\n**MyChat:** connection to the gateway failed ({e})."
-            await self._status(__event_emitter__, (last_status[:100] + " · " if last_status else "") +
-                               f"{time.time() - started:.0f}s", True)
+                if not got_any:
+                    raise _Retry() from e
+                yield f"\n\n**MyChat:** connection to the gateway was lost ({type(e).__name__})."

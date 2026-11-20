@@ -90,7 +90,7 @@ export function pinsFrom(results, minAcc = 0.66) {
 export class Bench {
   constructor(gw) { this.gw = gw; this.state = { running: false }; }
 
-  async start({ truth = true, truthLimit = 999, truthSet = "hard", models = true, onPins = null } = {}) {
+  async start({ truth = true, truthLimit = 999, truthSet = "hard", models = true, modes = ["fast", "auto", "verified"], onPins = null } = {}) {
     const QS = (truthSet === "basic" ? SET : truthSet === "all" ? [...SET, ...SET_HARD] : SET_HARD).slice(0, truthLimit);
     if (this.state.running) return this.state;
     const st = this.state = { running: true, startedAt: Date.now(), phase: "models", done: 0, total: 0, models: [], truth: null, log: [] };
@@ -100,7 +100,7 @@ export class Bench {
         await gw.refreshModels(true);
         const picks = models ? pickModels(gw) : [];
         st.total = Object.values(picks.reduce((a, c) => ((a[c.provider] = c.keep), a), {})).reduce((a, k) => a + k, 0) * PROBES.length
-                   + (truth ? QS.length * 2 : 0);
+                   + (truth ? QS.length * modes.length : 0);
         const byProvider = {};
         for (const c of picks) (byProvider[c.provider] ||= []).push(c);
         // providers in parallel (separate rate limits), models of one provider one after another
@@ -144,23 +144,25 @@ export class Bench {
           st.phase = "truth";
           const rows = [];
           for (const [q, rx, kind] of QS) {
-            for (const mode of ["fast", "verified"]) {
-              const t0 = Date.now();
-              let text = "";
-              try { text = (await run(gw, { messages: [{ role: "user", content: q }] }, { mode })).content; }
+            for (const mode of modes) {
+              const t0 = Date.now(), c0 = gw.calls || 0;
+              let text = "", first = 0;
+              try { text = (await run(gw, { messages: [{ role: "user", content: q }] }, { mode, onDelta: () => { if (!first) first = Date.now() - t0; } })).content; }
               catch (e) { text = "ERROR " + e.message; }
               const body = normAnswer(text.split("\n---\n")[0]);
               const ok = rx.test(body);
-              rows.push({ q, kind, mode, ok, confidentWrong: !ok && !HEDGE.test(body), ms: Date.now() - t0, answer: body.slice(0, 200) });
+              rows.push({ q, kind, mode, ok, confidentWrong: !ok && !HEDGE.test(body), ms: Date.now() - t0, firstMs: first, calls: (gw.calls || 0) - c0, answer: body.slice(0, 200) });
               st.done++;
             }
           }
           const sum = {};
-          for (const mode of ["fast", "verified"]) {
+          for (const mode of modes) {
             const r = rows.filter((x) => x.mode === mode), by = (k) => r.filter((x) => x.kind === k);
+            if (!r.length) continue;
             sum[mode] = { accuracy: +(r.filter((x) => x.ok).length / r.length).toFixed(3), confidentlyWrong: r.filter((x) => x.confidentWrong).length,
               traps: `${by("trap").filter((x) => x.ok).length}/${by("trap").length}`, math: `${by("math").filter((x) => x.ok).length}/${by("math").length}`,
-              facts: `${by("fact").filter((x) => x.ok).length}/${by("fact").length}`, avgSeconds: +(r.reduce((a, x) => a + x.ms, 0) / r.length / 1000).toFixed(1) };
+              facts: `${by("fact").filter((x) => x.ok).length}/${by("fact").length}`, avgSeconds: +(r.reduce((a, x) => a + x.ms, 0) / r.length / 1000).toFixed(1),
+              firstWordSeconds: +(r.reduce((a, x) => a + (x.firstMs || x.ms), 0) / r.length / 1000).toFixed(1), avgCalls: +(r.reduce((a, x) => a + x.calls, 0) / r.length).toFixed(1) };
           }
           st.truth = { summary: sum, rows };
         }
