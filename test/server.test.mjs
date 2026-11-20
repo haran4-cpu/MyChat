@@ -58,6 +58,12 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
   assert.doesNotThrow(() => new Function(js), "app.mjs parses");
   assert.equal((await fetch(u + "/connections", { redirect: "manual" })).headers.get("location"), "/#accounts");
   assert.notEqual((await fetch(u + "/ui/%2e%2e/server.mjs")).status, 200);
+  // installable as a PC app: a manifest and an icon
+  const man = await (await fetch(u + "/manifest.webmanifest")).json();
+  assert.equal(man.display, "standalone");
+  const ic = Buffer.from(await (await fetch(u + "/ui/icon.png")).arrayBuffer());
+  assert.equal(ic.subarray(1, 4).toString(), "PNG");
+  assert.match(app, /rel="manifest"/);
   const cat = await (await fetch(u + "/catalog", { headers: H })).json();
   assert.ok(cat.search.tavily && cat.openrouterStart.includes("/oauth/openrouter/start"));
   const sys = await (await fetch(u + "/system", { headers: H })).json();

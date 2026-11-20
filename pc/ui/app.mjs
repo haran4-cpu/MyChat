@@ -303,6 +303,13 @@ async function system() {
       el("input", { type: "checkbox", checked: link.enabled, onchange: async (e) => { await api("/system/phone-link", { enabled: e.target.checked }); toast(e.target.checked ? "Phone link on. If Windows asks, allow Node.js on private networks." : "Phone link off"); system(); } })),
     link.enabled ? el("div", {}, link.urls.map((u) => el("div", { class: "row" }, el("code", {}, u.url), el("span", { class: "sub" }, u.via)))) : null,
     pair, pairOut));
+  const appBtn = el("button", { class: "btn primary", onclick: () => busy(appBtn, async () => {
+    const r = await api("/system/desktop-app", {});
+    toast(r.ok ? "✓ MyChat is on your Desktop and in the Start menu — opening its window" : "✗ " + r.error, 6000);
+  }) }, "Install the PC app");
+  v.append(el("h2", {}, "PC app"), el("div", { class: "card stack" },
+    el("div", { class: "sub" }, "MyChat in its own window — no tabs, no address bar — with a Desktop and Start-menu icon. It uses Microsoft Edge (already on Windows) and your normal sign-ins."),
+    el("div", { class: "row" }, appBtn)));
   v.append(el("h2", {}, "Phone"), el("div", { class: "card stack" }, el("div", {}, "The Android app is built automatically on every change."),
     el("a", { class: "btn", href: "https://github.com/haran4-cpu/MyChat/releases", target: "_blank", rel: "noopener" }, "Latest APK")));
 }

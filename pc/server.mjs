@@ -26,6 +26,7 @@ import { nodeFs } from "./agentfs.mjs";
 import { checkPage } from "./pagecheck.mjs";
 import { skillSearch, skillLoad } from "./skills.mjs";
 import { captureScreen, askImage } from "./see.mjs";
+import { iconPng, manifest as appManifest, installShortcuts, launch as launchApp } from "./desktopapp.mjs";
 const SKILLS = { search: (q) => skillSearch(q), load: (id) => skillLoad(id) };
 
 /** run_page for the agent, limited to one root folder (the path must stay inside it). */
@@ -377,6 +378,7 @@ async function supervisor(pathname, method = "GET") {
 }
 
 // ---------------------------------------------------------------- the PC app (one page: Home, Agent, Accounts, Models, System)
+let ICON = null;
 const UI_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "ui");
 function serveUi(res, name) {
   const types = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".mjs": "text/javascript; charset=utf-8" };
@@ -436,6 +438,14 @@ const server = http.createServer(async (req, res) => {
     // DNS-rebinding guard: a web page that re-points its own domain at 127.0.0.1 must not reach the Accounts page or the API
     const host = String(req.headers.host || "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
     if (!["127.0.0.1", "localhost", "::1"].includes(host)) return send(res, 403, { error: { message: "forbidden host" } });
+    if (req.method === "GET" && url.pathname === "/manifest.webmanifest") {
+      res.writeHead(200, { "Content-Type": "application/manifest+json", "Cache-Control": "no-store" });
+      return res.end(JSON.stringify(appManifest(`http://127.0.0.1:${PORT}/`)));
+    }
+    if (req.method === "GET" && url.pathname === "/ui/icon.png") {
+      res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "max-age=86400" });
+      return res.end(ICON ||= iconPng(256));
+    }
     if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true, startedAt: STARTED_AT, pid: process.pid });
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/app")) return serveUi(res, "index.html");
     if (req.method === "GET" && /^\/ui\/(app\.css|app\.mjs)$/.test(url.pathname)) return serveUi(res, url.pathname.slice(4));
@@ -524,6 +534,14 @@ const server = http.createServer(async (req, res) => {
       const code = transferCode(), payload = { ...readJson("keys.json", {}) };
       if (b.withPc && settings.phoneLink?.enabled) payload.__pc = { urls: linkUrls().map((u) => u.url), token };
       return send(res, 200, { code, text: await exportKeys(payload, code) });
+    }
+    if (url.pathname === "/system/desktop-app" && req.method === "POST") {
+      const b = await body(req), appUrl = `http://127.0.0.1:${PORT}/`;
+      try {
+        const r = b.launchOnly ? {} : await installShortcuts({ home: HOME, url: appUrl });
+        if (b.launch !== false) launchApp({ home: HOME, url: appUrl });
+        return send(res, 200, { ok: true, ...r });
+      } catch (e) { return send(res, 200, { ok: false, error: e.message }); }
     }
     if (url.pathname === "/system/phone-link") {
       if (req.method === "POST") {
