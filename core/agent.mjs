@@ -176,7 +176,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   const done = new Map();
   let repeats = 0;
   const steps = [], reads = new Set(), seen = new Map();   // seen: path -> full text of every file it read (for checking its claims)
-  let checked = null, repaired = false;
+  let checked = null, repaired = false, unreadAsked = false;
   const proposed = [];   // changes the model "called" as if they were tools
   let by = "", calls = 0, last = null, raw = "";
   const skip = [];   // models that answered with nothing usable in this task: the next call goes elsewhere
@@ -288,6 +288,18 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
       continue;
     }
     if (last.final != null || Array.isArray(last.ops) && !last.tool && !last.calls) {
+      // Describing files it never opened is invention (measured 2026-11-20: a 7-second "deep study" described the
+      // contents of six files — API paths, Django versions, schemas — without reading one).
+      const named = [...new Set((String(last.final ?? "").match(/[\w.-]+\.(?:html?|js|mjs|ts|tsx|jsx|py|json|md|txt|css|java|kt|go|rs|yml|yaml|toml|sql|xml|csv)\b/gi) || []))];
+      const readNames = [...seen.keys()].map((k) => k.split(/[\\/!]/).pop().toLowerCase());
+      const unread = named.filter((n) => !readNames.includes(n.toLowerCase()));
+      if (!unreadAsked && unread.length >= 2 && unread.length > named.length / 2 && step < maxSteps - 2) {
+        unreadAsked = true;
+        onStep({ kind: "status", text: `The answer describes ${unread.length} file(s) it never opened — reading them first` });
+        msgs.push({ role: "assistant", content: r.content }, { role: "user", content: `CHECK FAILED — your answer describes files you never read: ${unread.slice(0, 8).join(", ")}. ` +
+          "Read them now (or drop what you said about them). Describe only what the files you actually read contain." });
+        continue;
+      }
       // proof before it reaches the person: every path:line it cites and every code quote must exist in what it read
       checked = await checkClaims(String(last.final ?? ""), seen, reader);
       if (checked.bad.length && !repaired && step < maxSteps - 1) {

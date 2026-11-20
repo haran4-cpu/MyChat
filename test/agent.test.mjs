@@ -302,3 +302,17 @@ test("a project named without its extension is found: tree/read point at the rea
   assert.match(seen, /DID YOU MEAN: Projects\/DJ-TiTo-23\.8\.html/);
   assert.match(r.answer, /HTML file/);
 });
+
+test("an answer that describes files it never opened is sent back to read them", async () => {
+  const fs = memoryFs({ "P/a.json": '{"x":1}', "P/b.md": "# B", "P/c.txt": "c" });
+  let n = 0, nudged = "";
+  const gw = { async chat(req) {
+    n++;
+    if (n === 1) return { content: '{"final":"a.json defines 12 API paths, b.md documents Django 4.2 and c.txt lists secrets."}', provider: "p", model: "m" };
+    if (n === 2) { nudged = req.messages.at(-1).content; return { content: '{"calls":[{"tool":"read","args":{"path":"P/a.json"}},{"tool":"read","args":{"path":"P/b.md"}},{"tool":"read","args":{"path":"P/c.txt"}}]}', provider: "p", model: "m" }; }
+    return { content: '{"final":"a.json holds {\\"x\\":1}, b.md is a heading, c.txt is one letter."}', provider: "p", model: "m" };
+  } };
+  const r = await runAgent(gw, { goal: "study P", fs, plan: false, maxSteps: 6 });
+  assert.match(nudged, /never read: a\.json, b\.md, c\.txt/);
+  assert.match(r.answer, /one letter/);
+});
