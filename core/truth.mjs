@@ -271,8 +271,17 @@ Reply with JSON only: {"verdicts":[{"claim":<claim number>,"verdict":"supported"
 
 const EXTRACT_ONE_SYS = `You are a meticulous fact auditor. You receive a question and one answer.
 List the checkable factual claims in the answer (names, dates, numbers, places, quantities, causal facts). Skip opinions, advice and filler.
-Reply with JSON only: {"claims":[{"text":"<one self-contained claim>","type":"fact"|"date"|"number"|"math"|"name"|"opinion","importance":1-3,"query":"<short web search query that would confirm or refute it>","expr":"<arithmetic expression if type is math, else omit>","value":<number if math>}]}
+Reply with JSON only: {"claims":[{"text":"<one self-contained claim>","type":"fact"|"date"|"number"|"math"|"days"|"name"|"opinion","importance":1-3,"query":"<short web search query that would confirm or refute it>","expr":"<arithmetic expression if type is math, else omit>","value":<number if math or days>,"from":"YYYY-MM-DD if days","to":"YYYY-MM-DD if days"}]}
+Use type "days" for any claim about the number of days between two dates.
 At most 6 claims, most important first.`;
+
+/** Exact day count between two calendar dates (measured: models said 366 days from 1 Mar 2024 to 1 Mar 2025; it is 365). */
+export function exactDays(c) {
+  const d = (x) => { const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(String(x || "").trim()); return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : NaN; };
+  const a = d(c.from), b = d(c.to);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  return Math.round(Math.abs(b - a) / 86400000);
+}
 
 export async function checkedAnswer(gw, req, o = {}) {
   const status = o.onStatus || (() => {});
@@ -328,6 +337,11 @@ export async function checkedAnswer(gw, req, o = {}) {
     if (s.type === "math" && s.expr && s.value !== undefined) {
       try { const v = evaluate(String(s.expr)); s.status = approxEqual(v, s.value) ? "supported" : "refuted"; s.how = "exact arithmetic";
             if (s.status === "refuted") s.correction = `${s.expr} = ${v.toString(6)}`; } catch { /* not plain arithmetic */ }
+    }
+    if (s.type === "days" && s.value !== undefined) {
+      const days = exactDays(s);
+      if (days != null) { s.status = Number(s.value) === days ? "supported" : "refuted"; s.how = "exact calendar";
+                          if (s.status === "refuted") s.correction = `From ${s.from} to ${s.to} is ${days} days.`; }
     }
   }
 

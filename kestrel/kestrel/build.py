@@ -155,6 +155,13 @@ class LoopGuard:
                 raise Degenerate(f"repetition loop: the same {k} line(s) repeated")
 
 
+def _strip_fence(text: str) -> str:
+    """Models sometimes wrap JSON in ```json fences even in JSON mode."""
+    t = (text or "").strip()
+    m = re.match(r"^```(?:json)?\s*([\s\S]*?)\s*```$", t)
+    return m.group(1) if m else t
+
+
 class JsonLoopGuard:
     """JSON answers are often a single long line, so look for the tail repeating at character level."""
 
@@ -384,6 +391,10 @@ class BuildEngine:
 
     def json_call(self, messages, schema, *, think, label, predict=3000) -> dict:
         last = ""
+        # The separate "think first" pass exists for small local models (their thinking had to be capped). Cloud models
+        # answer directly; measured 2026-11-20: the extra pass wasted a call and ate the test-writing step.
+        if self.router.is_online(self.role):
+            think = False
         if think and self.think_budget > 0:
             notes = self.think_notes(messages, label)
             if notes:
@@ -402,9 +413,15 @@ class BuildEngine:
                 predict = min(predict, 1200)
                 continue
             try:
-                d = json.loads(rep.content)
+                d = json.loads(_strip_fence(rep.content))
+                if isinstance(d, list):
+                    # measured: a cloud model answered a bare [...] where {"tests": [...]} was asked; wrap it
+                    arrays = [k for k, v in (schema or {}).get("properties", {}).items() if v.get("type") == "array"]
+                    if len(arrays) == 1:
+                        d = {arrays[0]: d}
                 if isinstance(d, dict):
                     return d
+                last = "answer was not a JSON object"
             except json.JSONDecodeError:
                 last = "invalid JSON (probably cut off at the length cap)"
                 messages = messages[:-1] + [{"role": "user", "content": messages[-1]["content"] +

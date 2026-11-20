@@ -222,3 +222,14 @@ test("checked answer: streams at once, one batched judgement, corrects only what
   assert.match(r.content, /Checked: 1 claims · 0 proven · 1 corrected/);
   assert.equal(r.calls, 4);
 });
+
+test("exact calendar: day counts are computed, not guessed (the leap day of 2024 is before 1 March 2024)", async () => {
+  const { exactDays } = await import("../core/truth.mjs");
+  assert.equal(exactDays({ from: "2024-03-01", to: "2025-03-01" }), 365);
+  assert.equal(exactDays({ from: "2024-02-01", to: "2024-03-01" }), 29);
+  assert.equal(exactDays({ from: "bad", to: "2024-03-01" }), null);
+  const { SET_HARD, normAnswer } = await import("../core/truthset.mjs");
+  const rx = (q) => SET_HARD.find((x) => x[0].startsWith(q))[1];
+  assert.match(normAnswer("There isn’t an Eiffel Tower in Rome at all."), rx("How tall is the Eiffel Tower in Rome"));
+  assert.match("נכתב על ידי אברהם מפו", rx("מי כתב את הרומן"));
+});

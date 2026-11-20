@@ -1002,3 +1002,25 @@ class CloudBrainTests(unittest.TestCase):
             self.assertIn("500", r.last_fallback)
         finally:
             llm.tls.cloud_ok = False
+
+
+class CloudJsonTests(unittest.TestCase):
+    def test_bare_list_and_fenced_json_are_accepted_and_cloud_skips_the_think_pass(self):
+        from kestrel import build
+        calls = []
+
+        class R:
+            def is_online(self, role):
+                return True
+
+            def chat(self, role, messages, tools, **k):
+                calls.append(k.get("think"))
+                from kestrel.llm import Reply
+                return Reply(content='```json\n[{"name": "t1", "steps": [{"do": "expect", "target": "page", "text_matches": "x"}]}]\n```')
+        eng = build.BuildEngine.__new__(build.BuildEngine)
+        eng.router, eng.role, eng.think_budget, eng.stop = R(), "agent", 3000, threading.Event()
+        eng.stats = {"llm_calls": 0, "seconds": 0.0, "output_tokens": 0}
+        eng.emit = lambda *a, **k: None
+        d = eng.json_call([{"role": "user", "content": "write tests"}], build.TESTS_SCHEMA, think=True, label="tests")
+        self.assertEqual(d["tests"][0]["name"], "t1")
+        self.assertEqual(calls, [False])     # one call, no separate thinking pass

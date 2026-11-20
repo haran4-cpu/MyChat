@@ -40,7 +40,7 @@ export const HEDGE = /\b(not sure|uncertain|unverified|i don'?t know|cannot veri
  *  Measured: these made correct answers score as wrong. Normalise before matching. */
 export function normAnswer(t) {
   return String(t || "").normalize("NFC")
-    .replace(/[\u00A0\u2007\u2009\u202F]/g, " ")
+    .replace(/[\u00A0\u2007\u2009\u202F]/g, " ").replace(/[‘’]/g, "'")
     .replace(/\{,\}/g, ",").replace(/\\[(),\[\]]/g, " ").replace(/\*\*/g, "");
 }
 
@@ -57,9 +57,9 @@ export const SET_HARD = [
   ["What is the deepest lake in the world?", /baikal/i, "fact"],
   ["Approximately what is the half-life of carbon-14 in years?", /5,?7[03]0/, "fact"],
   ["Who composed the opera 'The Magic Flute'?", /mozart/i, "fact"],
-  ["מי כתב את הרומן 'אהבת ציון'?", /מאפו|mapu/i, "fact"],
+  ["מי כתב את הרומן 'אהבת ציון'?", /מא?פו|mapu/i, "fact"],
   ["מהו הנהר הארוך ביותר בישראל?", /ירדן|jordan/i, "fact"],
   ["In which year did Israel win the FIFA World Cup?", /never|has not|hasn'?t|did not|didn'?t|no year|not won/i, "trap"],
-  ["How tall is the Eiffel Tower in Rome?", /no eiffel|not in rome|is in paris|located in paris|there is no|doesn'?t exist|does not exist/i, "trap"],
+  ["How tall is the Eiffel Tower in Rome?", /no eiffel|not in rome|is in paris|located in paris|sits in paris|only in paris|there is no|isn['’]?t (an?|any)|doesn['’]?t exist|does not exist/i, "trap"],
   ["Summarise the plot of Shakespeare's play 'The Queen of Tyre'.", /no such|not a|did not write|didn'?t write|doesn'?t exist|does not exist|no play|not aware|isn'?t a|is not a/i, "trap"],
 ];
