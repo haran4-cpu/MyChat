@@ -299,7 +299,7 @@ async function agentRoute(req, res, url) {
   if (url.pathname === "/agent/tree") return send(res, 200, { tree: await agentTree(nodeFs(rootAt(url.searchParams.get("root")).path)) });
   if (url.pathname === "/agent/plan" && req.method === "POST") {
     const root = rootAt(b.root), afs = nodeFs(root.path);
-    const p = await agentPlan(gw, { goal: String(b.goal || "").slice(0, 4000), fs: afs, privateData: root.private, history: Array.isArray(b.history) ? b.history.slice(-8) : [],
+    const p = await agentPlan(gw, { goal: String(b.goal || "").slice(0, 4000), fs: afs, privateData: root.private, history: Array.isArray(b.history) ? b.history.slice(-8) : [], memory: agentMemory(root.path),
       search, evaluate: (e) => evaluate(e).toString(12),
       fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } });
     p.root = root.path; p.rootIndex = Number(b.root) || 0;

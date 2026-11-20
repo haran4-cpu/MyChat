@@ -1,7 +1,7 @@
 """
 title: MyChat
 author: MyChat (multi-model gateway)
-version: 1.7.0
+version: 1.8.0
 required_open_webui_version: 0.6.0
 description: MyChat inside Open WebUI. Cloud and local models combined per task (Auto, Max, Consensus, Verified/Truth Engine, Fast, Private). Starts the MyChat gateway on this PC by itself; accounts and keys are managed from the "MyChat · Accounts" model without leaving Open WebUI.
 """
@@ -358,9 +358,8 @@ class Pipe:
                            ("\n\nServices reload by themselves (Kestrel waits until it is idle). Backup: `" + u.get("backup", "") + "`" if u.get("installed") else ""))
                 return
             low = last.strip().lower()
-            # one assistant: questions about the user's own files/projects are answered by looking (Agent tools)
-            if model in ("auto", "fast", "max") and not low.startswith("/") and WORKSPACE_RX.search(last) and len(last) < 2000:
-                model = "agent"
+            # one assistant: the gateway itself decides when to look at your files (core/assistant.mjs), so normal
+            # models stream through it; the Agent model and /agent stay as the explicit "work on my files" entry
             if model == "agent" or low.startswith("/agent") or low.startswith("/approve") or low == "/undo" or low == "/folders":
                 goal = re.sub(r"^\s*/agent\b\s*", "", last) if low.startswith("/agent") and len(low) > 7 else last
                 try:
