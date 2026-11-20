@@ -18,6 +18,25 @@ export function repairJson(s) {
   return out;
 }
 
+/** A Python-style dict ({'tool': 'read', 'ok': True}) as JSON (measured on the PC: a model answered the agent in
+ *  Python repr and the raw dict reached the person). Strings swap quote style; True/False/None become JSON. */
+export function pyToJson(s) {
+  let out = "", q = null;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (q) {
+      if (c === "\\") { const n = s[i + 1]; out += n === "'" ? "'" : c + n; i++; continue; }
+      if (c === q) { out += '"'; q = null; continue; }
+      if (c === '"') { out += '\\"'; continue; }
+      if (c === "\n") { out += "\\n"; continue; }
+      out += c; continue;
+    }
+    if (c === "'" || c === '"') { q = c; out += '"'; continue; }
+    out += c;
+  }
+  return out.replace(/\bTrue\b/g, "true").replace(/\bFalse\b/g, "false").replace(/\bNone\b/g, "null");
+}
+
 export function parseJsonLoose(t) {
   const raw = String(t || "");
   const cands = [];
@@ -25,7 +44,7 @@ export function parseJsonLoose(t) {
   if (a >= 0 && b > a) cands.push(raw.slice(a, b + 1));
   const fence = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/i.exec(raw);
   if (fence) cands.push(fence[1]);
-  for (const c of cands) for (const x of [c, repairJson(c)]) { try { const v = JSON.parse(x); if (v && typeof v === "object") return v.name && (v.arguments || v.parameters) && !v.tool && !v.final ? { tool: v.name, args: v.arguments || v.parameters } : v; } catch { /* next */ } }
+  for (const c of cands) for (const x of [c, repairJson(c), pyToJson(c)]) { try { const v = JSON.parse(x); if (v && typeof v === "object") return v.name && (v.arguments || v.parameters) && !v.tool && !v.final ? { tool: v.name, args: v.arguments || v.parameters } : v; } catch { /* next */ } }
   // Hermes/Qwen-style tool calls (measured 2026-11-20 on a free 1.7B model: "<tool_call> <function=tree>
   // <parameter=path> Projects/demo-app </parameter> </function> </tool_call>" instead of our JSON)
   const calls = [...raw.matchAll(/<function=([\w.-]+)>([\s\S]*?)<\/function>/g)].map(([, tool, body]) => ({

@@ -321,7 +321,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
       continue;
     }
     if (!last) {   // models sometimes answer in plain text: accept it as the final answer — unless it is broken protocol JSON
-      const protocol = /"(thought|tool|calls|final)"\s*:/.test(r.content);
+      const protocol = /["'](thought|tool|calls|final)["']\s*:/.test(r.content);
       if (!protocol && (step > 0 || !/\{/.test(r.content))) { last = { final: r.content }; break; }
       msgs.push({ role: "assistant", content: r.content }, { role: "user", content: "Reply with one JSON object as described (tool call or final)." });
       continue;
@@ -399,7 +399,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
       const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData, exclude: skip, quality: true });
       calls++; by = `${r.provider}:${r.model}`; raw = String(r.content).slice(0, 300);
       const j = parseJson(r.content);
-      last = { ...(last || {}), final: j?.final ?? (/"(thought|tool|calls)"\s*:/.test(r.content) ? "(The model did not produce a readable answer; please try again.)" : r.content) };
+      last = { ...(last || {}), final: j?.final ?? (/["'](thought|tool|calls)["']\s*:/.test(r.content) ? "(The model did not produce a readable answer; please try again.)" : r.content) };
     } catch { /* keep what we have */ }
   }
   let answer = String(last?.final ?? last?.summary ?? "").trim() || "No usable answer came back from the models this time (they replied with nothing). Please try again — or connect an account for stronger models.";

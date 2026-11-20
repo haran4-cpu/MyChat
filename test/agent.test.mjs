@@ -402,3 +402,9 @@ test("citation check: inline code spans are read correctly and line ranges are c
   const r = await checkClaims("Uses `innerHTML` for dynamic UI updates. Evidence at `P/a.html:8`, listeners at `P/a.html:9-10`.", seen, { text: async () => null });
   assert.deepEqual(r.bad, []);
 });
+
+test("a reply in Python dict style is still understood as a tool call (measured on the PC)", async () => {
+  const { parseJsonLoose } = await import("../core/json.mjs");
+  assert.deepEqual(parseJsonLoose("{'thought': \"it's the review skill\", 'tool': 'skill_load', 'args': {'id': '83de42fe51', 'deep': True}}"),
+    { thought: "it's the review skill", tool: "skill_load", args: { id: "83de42fe51", deep: true } });
+});
