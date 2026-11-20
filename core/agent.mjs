@@ -85,7 +85,7 @@ const REVIEW_RX = /(review|audit|bugs?|security|vulnerab|באגים|ביקורת
 
 export const TOOL_DOCS = {
   tree: ["{\"path\":\"optional sub-folder or archive\"}", "the folder (or an archive) as an indented listing"],
-  read: ["{\"path\":\"file or archive!/inner/file\",\"from\":1,\"to\":400}", "a text file with line numbers (lines optional)"],
+  read: ["{\"path\":\"file or archive!/inner/file\",\"from\":1,\"to\":1500}", "a text file with line numbers; without from/to the whole file (up to 1,500 lines)"],
   search: ["{\"pattern\":\"regex\",\"path\":\"optional folder or archive\"}", "matching lines (path:line: text) across text files"],
   study: ["{\"question\":\"...\",\"path\":\"folder or archive\"}", "deep read of many files by several models; returns verified findings"],
   calc: ["{\"expression\":\"(17.5/100)*2480\"}", "exact arithmetic"],
@@ -94,8 +94,8 @@ export const TOOL_DOCS = {
   run_js: ["{\"code\":\"...\"}", "pure computation in a JavaScript sandbox: NO file access, NO network (use read/search for files); returns console output"],
 };
 
-const MAX_OBS = 12000;
-const trimObs = (t) => (t.length > MAX_OBS ? t.slice(0, MAX_OBS) + `\n…(cut at ${MAX_OBS} characters; read a smaller range for more)` : t);
+const MAX_OBS = 40000;   // was 12,000: a 400-line file was cut in half and the model talked about the half it never saw
+const trimObs = (t) => (t.length > MAX_OBS ? t.slice(0, MAX_OBS) + `\n…(CUT at ${MAX_OBS} characters — you have NOT seen the rest. Read the remaining lines with from/to before saying anything about them.)` : t);
 
 /** Read access to the workspace and to archives inside it ("a.zip!/inner/path"). */
 export function workspaceReader(fs) {
@@ -161,7 +161,8 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     { role: "user", content: `WORKSPACE MAP:\n${map}\n\nTOP LEVELS:\n${listing}\n\nREQUEST:\n${goal}` }];
   const done = new Map();
   let repeats = 0;
-  const steps = [], reads = new Set();
+  const steps = [], reads = new Set(), seen = new Map();   // seen: path -> full text of every file it read (for checking its claims)
+  let checked = null, repaired = false;
   let by = "", calls = 0, last = null;
   const runTool = async (name, args = {}) => {
     if (!avail.includes(name)) return `unknown tool "${name}". Available: ${avail.join(", ")}`;
@@ -175,8 +176,8 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
       if (name === "read") {
         const t = await reader.text(args.path);
         if (t == null) return `${args.path}: not found or not a text file`;
-        reads.add(args.path);
-        const lines = t.split("\n"), from = Math.max(1, Number(args.from) || 1), to = Math.min(lines.length, Number(args.to) || from + 399);
+        reads.add(args.path); seen.set(args.path, t);
+        const lines = t.split("\n"), from = Math.max(1, Number(args.from) || 1), to = Math.min(lines.length, Number(args.to) || from + 1499);
         return `${args.path} — lines ${from}-${to} of ${lines.length}\n` + lines.slice(from - 1, to).map((l, i) => `${from + i}| ${l}`).join("\n");
       }
       if (name === "search") {
@@ -218,7 +219,18 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
       msgs.push({ role: "assistant", content: r.content }, { role: "user", content: "Reply with one JSON object as described (tool call or final)." });
       continue;
     }
-    if (last.final != null || Array.isArray(last.ops) && !last.tool && !last.calls) break;
+    if (last.final != null || Array.isArray(last.ops) && !last.tool && !last.calls) {
+      // proof before it reaches the person: every path:line it cites and every code quote must exist in what it read
+      checked = await checkClaims(String(last.final ?? ""), seen, reader);
+      if (checked.bad.length && !repaired && step < maxSteps - 1) {
+        repaired = true;
+        onStep({ kind: "status", text: `Checking the answer: ${checked.bad.length} citation(s) not found in the files — asking for a correction` });
+        msgs.push({ role: "assistant", content: r.content }, { role: "user", content: "CHECK FAILED — these are not in the files you read:\n" + checked.bad.map((b) => "- " + b).join("\n") +
+          "\nRe-read the exact lines (read with from/to) and give the corrected final answer. Cite only what you actually read." });
+        continue;
+      }
+      break;
+    }
     const list = Array.isArray(last.calls) ? last.calls.slice(0, 4) : last.tool ? [{ tool: last.tool, args: last.args }] : [];
     if (!list.length) { last = { final: last.thought || r.content }; break; }
     if (last.thought) onStep({ kind: "thought", text: String(last.thought).slice(0, 400) });
@@ -236,16 +248,58 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     else if (step && step % 5 === 4) msgs.push({ role: "user", content: `(${step + 1} of ${maxSteps} steps used. If you already have enough to answer well, answer now; otherwise continue with the most informative next step.)` });
   }
   const { ops, rejected } = checkOps(last?.ops);
-  const answer = String(last?.final ?? last?.summary ?? "").trim() || "(no answer)";
-  return { id: newId(), goal, answer, summary: answer.slice(0, 600), ops, rejected, steps, by, calls, reads: [...reads], at: Date.now() };
+  let answer = String(last?.final ?? last?.summary ?? "").trim() || "(no answer)";
+  if (last?.final != null && (!checked || repaired)) checked = await checkClaims(answer, seen, reader);
+  if (checked && checked.total) answer += `\n\n---\n*Checked against the files: ${checked.total - checked.bad.length} of ${checked.total} citation(s) and code quote(s) found` +
+    (checked.bad.length ? ` · not found: ${checked.bad.slice(0, 4).join("; ")}` : "") + "*";
+  return { id: newId(), goal, answer, checked, summary: answer.slice(0, 600), ops, rejected, steps, by, calls, reads: [...reads], at: Date.now() };
+}
+
+/**
+ * Check what an answer claims about files: "path:line" citations must point at a real line, and `code quotes` of
+ * 12+ characters must appear in a file it read. Returns { total, bad: [descriptions] }.
+ */
+export async function checkClaims(answer, seen, reader) {
+  const bad = [];
+  let total = 0;
+  const squash = (x) => String(x).replace(/\s+/g, " ").trim();
+  const find = async (p) => {
+    if (seen.has(p)) return seen.get(p);
+    const k = [...seen.keys()].find((x) => x.endsWith("/" + p) || p.endsWith("/" + x));
+    if (k) return seen.get(k);
+    try { return await reader.text(p); } catch { return null; }
+  };
+  for (const m of answer.matchAll(/([\w./!-]+\.[A-Za-z0-9]{1,6}):(\d+)(?:[-–](\d+))?/g)) {
+    total++;
+    const t = await find(m[1]);
+    if (t == null) bad.push(`${m[1]}:${m[2]} (no such file)`);
+    else if (Number(m[2]) > t.split("\n").length || Number(m[2]) < 1) bad.push(`${m[1]}:${m[2]} (the file has ${t.split("\n").length} lines)`);
+  }
+  // code quoted on the same line as a citation is a claim about the file (a fix suggested elsewhere is not)
+  const all = squash([...seen.values()].join("\n"));
+  if (seen.size) for (const line of answer.split("\n")) {
+    if (!/[\w./!-]+\.[A-Za-z0-9]{1,6}:\d+/.test(line)) continue;
+    for (const m of line.matchAll(/`([^`]{12,200})`/g)) {
+      if (/^[\w./!-]+\.[A-Za-z0-9]{1,6}(:\d+)?$/.test(m[1]) || /\b(should|use|replace|change to|instead|fix)\b/i.test(line.slice(0, m.index).split(/[.;]/).pop())) continue;
+      total++;
+      if (!all.includes(squash(m[1]))) bad.push(`\`${m[1].slice(0, 60)}\` (quote not in the files read)`);
+    }
+  }
+  return { total, bad };
 }
 
 /** Keep the conversation inside a sane size: old tool results are shortened (they can be read again). */
-function compact(msgs, max = 110_000) {
+function compact(msgs, max = 360_000) {
+  // ~90K tokens: within the window of the models the agent runs on (128K–1M). Older tool results are shortened only
+  // past that, newest kept whole, and the model is told exactly what was shortened so it re-reads instead of guessing.
   let total = msgs.reduce((a, m) => a + m.content.length, 0);
-  for (let i = 2; i < msgs.length - 4 && total > max; i++) {
+  for (let i = 2; i < msgs.length - 6 && total > max; i++) {
     const m = msgs[i];
-    if (m.role === "user" && m.content.startsWith("RESULT") && m.content.length > 600) { total -= m.content.length - 400; m.content = m.content.slice(0, 400) + "\n…(older result shortened; use the tool again if needed)"; }
+    if (m.role === "user" && m.content.startsWith("RESULT") && m.content.length > 3000) {
+      const head = m.content.slice(0, m.content.indexOf("\n") > 0 ? m.content.indexOf("\n") : 200);
+      const short = m.content.slice(0, 2500) + `\n…(SHORTENED to save space: this was "${head.slice(0, 160)}". Do not rely on memory for the rest — read it again if you need it.)`;
+      total -= m.content.length - short.length; m.content = short;
+    }
   }
 }
 function subFs(fs, base) {

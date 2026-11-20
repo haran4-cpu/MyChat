@@ -193,3 +193,18 @@ test("loose JSON from models: raw newlines, code blocks inside the answer, text 
   assert.equal(parseJsonLoose('{"thought":"x","final":"line1\\nline2 with \\"quote\\"", "ops": [ {"op": "mkdir"').final, 'line1\nline2 with "quote"');
   assert.equal(parseJsonLoose("plain text"), null);
 });
+
+test("the agent's answer is checked against the files it read; a wrong citation gets one correction round", async () => {
+  const fs = memoryFs({ "src/a.js": "function add(a, b) {\n  return a - b;\n}\n" });
+  const gw = fakeGw([
+    { tool: "read", args: { path: "src/a.js" } },
+    { final: "Bug at src/a.js:9: `return a + b;` is wrong." },
+    { tool: "read", args: { path: "src/a.js", from: 1, to: 3 } },
+    { final: "Bug at src/a.js:2: `return a - b;` subtracts; it should use `return a + b;` instead." },
+  ]);
+  const r = await runAgent(gw, { goal: "find the bug", fs });
+  assert.match(gw.seen[2].messages.at(-1).content, /CHECK FAILED[\s\S]*src\/a\.js:9[\s\S]*return a \+ b/);
+  assert.match(r.answer, /src\/a\.js:2/);
+  assert.match(r.answer, /Checked against the files: 2 of 2/);
+  assert.deepEqual(r.checked.bad, []);
+});

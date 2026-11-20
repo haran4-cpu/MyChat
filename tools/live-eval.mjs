@@ -30,6 +30,14 @@ const files = {
   "Projects/demo-app/src/users.js": "import { db } from \"./db.js\";\n// Find users by name for the admin search box\nexport async function findUser(name) {\n  const sql = \"SELECT * FROM users WHERE name = '\" + name + \"'\";\n  return db.query(sql);\n}\n",
   "Projects/demo-app/src/db.js": "export const db = { query: async (sql) => [] };\n",
 };
+// a realistic size: 14 correct helper modules + one long file whose bug sits past line 900 (tests reading depth)
+for (let i = 1; i <= 14; i++) files[`Projects/demo-app/src/lib/util${i}.js`] = `// helper ${i}\nexport function clamp${i}(v, lo, hi) {\n  return Math.min(hi, Math.max(lo, v));\n}\nexport const NAME${i} = "util${i}";\n`;
+{
+  const lines = ["// Monthly report: formatting helpers and access checks"];
+  for (let i = 0; i < 300; i++) lines.push(`export function fmt${i}(n) {`, `  return Number(n).toFixed(2) + " (#${i})";`, "}");
+  lines.push("export function canSeeReport(user) {", "  if (user.role = \"admin\") {", "    return true;", "  }", "  return false;", "}");
+  files["Projects/demo-app/src/report.js"] = lines.join("\n") + "\n";
+}
 for (const [p, t] of Object.entries(files)) { await fs.mkdir(path.dirname(path.join(root, p)), { recursive: true }); await fs.writeFile(path.join(root, p), t); }
 const wfs = nodeFs(root);
 const tools = { search, evaluate: (e) => evaluate(e).toString(12) };
@@ -48,6 +56,7 @@ const BUGS = [
   ["off-by-one in cart total (skips the first item)", /(off.by.one|i\s*=\s*1|first item|index 0|skips? the first|items\[0\])/i, "src/cart.js"],
   ["API key stored in plain localStorage", /(localStorage)[\s\S]{0,300}(plain|unencrypt|xss|secur|exposed|steal|readable)|(plain|unencrypt|xss|insecure)[\s\S]{0,300}localStorage/i, "src/auth.js"],
   ["SQL injection in user search", /sql.?injection|injection|parameteri[sz]ed|prepared statement/i, "src/users.js"],
+  ["assignment instead of comparison in canSeeReport (line 902: everyone is admin)", /(canSeeReport|report\.js)[\s\S]{0,400}(assign|single =|= "admin"|=\s*\\?"admin|always (true|admin)|===)|(assign|always true)[\s\S]{0,300}(canSeeReport|report\.js)/i, "src/report.js"],
 ];
 const citedOk = async (text) => {   // every path:line it cites must exist and the line must be in range
   const cites = [...String(text).matchAll(/([\w./-]+\.(?:js|json|md)):(\d+)/g)];
@@ -77,18 +86,18 @@ await task("access", async () => {
 });
 
 await task("review", async () => {
-  const r = await runAgent(gw, { goal: "Review the project in Projects/demo-app like a senior engineer. List the real bugs, most serious first, each with path:line and the fix.", fs: wfs, maxSteps: 12, ...tools });
+  const r = await runAgent(gw, { goal: "Review the project in Projects/demo-app like a senior engineer. List the real bugs, most serious first, each with path:line and the fix.", fs: wfs, maxSteps: 16, ...tools });
   const found = BUGS.filter(([, rx]) => rx.test(r.answer));
   const c = await citedOk(r.answer);
-  return { pass: found.length >= 2 && c.bad === 0 && !leaks(r.answer), score: found.length / BUGS.length, by: r.by,
-    detail: `found ${found.length}/3: ${found.map((b) => b[0]).join("; ")} · citations ${c.cites} (${c.bad} wrong) · steps: ${r.steps.map((s) => s.tool).join(",")}\n${r.answer.slice(0, 900)}` };
+  return { pass: found.length >= 3 && c.bad === 0 && !leaks(r.answer), score: found.length / BUGS.length, by: r.by,
+    detail: `found ${found.length}/${BUGS.length}: ${found.map((b) => b[0]).join("; ")} · citations ${c.cites} (${c.bad} wrong) · steps: ${r.steps.map((s) => s.tool).join(",")}\n${r.answer.slice(0, 900)}` };
 });
 
 await task("deep-read", async () => {
   const list = Object.entries(files).filter(([p]) => p.endsWith(".js")).map(([p, text]) => ({ path: p, text }));
-  const r = await study(gw, { question: "What are the real bugs in this code? Most serious first.", files: list, partSize: 400, retryDelayMs: 5000 });
+  const r = await study(gw, { question: "What are the real bugs in this code? Most serious first.", files: list, partSize: 30000, retryDelayMs: 5000 });
   const found = BUGS.filter(([, rx]) => rx.test(r.answer + "\n" + r.notes.map((n) => n.note).join("\n")));
-  return { pass: found.length >= 2 && r.notes.length >= 1, score: found.length / BUGS.length, by: r.by,
+  return { pass: found.length >= 3 && r.notes.length >= 1, score: found.length / BUGS.length, by: r.by,
     detail: `${r.parts} parts · ${r.notes.length} verified notes · ${r.dropped} unproven dropped · ${r.unread} unread\n${r.answer.slice(0, 600)}` };
 });
 

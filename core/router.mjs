@@ -195,6 +195,7 @@ export class Gateway {
     this.disabled = {};        // provider -> reason (bad key etc.)
     this.parked = {};          // provider -> { until, reason } (no credit / balance): retried after a while, shown on Accounts
     this.limits = {};          // provider -> { remaining, resetAt } from rate-limit headers
+    this.ctx = {};             // provider -> model -> context window in tokens (when the provider lists it)
     this.quotaHits = {};       // provider -> [{ model, at }] recent 429s (several models of one account in a row = the account is out)
     this.quotaStrikes = {};    // provider -> how many times it was paused today (pause doubles: 15 min, 30, 60, 120)
     this.requests = 0;
@@ -244,6 +245,10 @@ export class Gateway {
         if (r.status === 401 || r.status === 403) { this.disabled[id] = `key rejected (${r.status})`; return; }
         if (!r.ok) throw new Error("HTTP " + r.status);
         const j = await r.json();
+        for (const m of j.data || j.models || []) {   // context window when the provider tells it (OpenRouter, Groq, Gemini, Kilo…)
+          const n = m.context_length || m.context_window || m.inputTokenLimit || m.max_context_length || m.top_provider?.context_length;
+          if (n) (this.ctx[id] ||= {})[(m.id || m.name || "").replace(/^models\//, "")] = Number(n);
+        }
         const list = (j.data || j.models || []).filter((m) => !m.supportedGenerationMethods || m.supportedGenerationMethods.includes("generateContent"))
           .map((m) => (m.id || m.name || "").replace(/^models\//, "")).filter(Boolean);
         this.models[id] = list.filter((m) => !NOT_CHAT.test(m) && (!/:free$/.test(m) || id === "openrouter" || p.freeOnly));
@@ -378,6 +383,7 @@ export class Gateway {
     const task = opt.task || classify(req.messages);
     this.pickExplore(task);
     const lang = /[\u0590-\u05FF]/.test(lastUserText(req.messages)) ? "he" : "";
+    const need = estimateTokens(req.messages) + 2000;
     let list = this.candidates(task, { needTools: !!req.tools?.length, needVision: hasImages(req.messages),
                                        privateData: opt.privateData, exclude: opt.exclude, families: opt.families, lang });
     if (opt.prefer) {
@@ -396,6 +402,8 @@ export class Gateway {
     let partial = "", kept = null;
     for (const c of list) {
       if (opt.signal?.aborted) break;
+      const win = this.ctx[c.provider]?.[c.model];
+      if (win && need > win * 0.92) { attempts.push({ ...c, ok: false, error: `too long for this model (${need} > ${win} tokens)` }); continue; }
       if (this.disabled[c.provider] || this.parked[c.provider]?.until > Date.now()) continue;   // found out during this request
       const messages = partial
         ? [...req.messages, { role: "assistant", content: partial },
@@ -480,6 +488,8 @@ export class Gateway {
         this.stats.failure(c.provider, c.model, "not on this plan: " + txt, 24 * 3600e3);   // e.g. Pro models on a free Gemini key
       } else if (res.status === 429) { this.stats.failure(c.provider, c.model, "429 " + txt, Math.max(ra * 1000, 60000)); this.noteQuota(c.provider, c.model); }
       else if (res.status === 401 || res.status === 403) { this.disabled[c.provider] = `key rejected (${res.status})`; this.stats.failure(c.provider, c.model, txt); }
+      else if ((res.status === 400 || res.status === 413) && /context|too long|too many tokens|maximum.{0,20}(length|tokens)|request too large|payload too large/i.test(txt))
+        this.stats.failure(c.provider, c.model, "too long: " + txt, 0);   // this request was too big for it; the model is fine
       else if (res.status === 404 || res.status === 400) this.stats.failure(c.provider, c.model, txt, 6 * 3600e3); // model gone / unsupported params
       else this.stats.failure(c.provider, c.model, txt, 20000);
       throw new Error(`HTTP ${res.status} ${txt}`);
