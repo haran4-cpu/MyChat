@@ -325,3 +325,15 @@ async function route() {
 }
 addEventListener("hashchange", route);
 route();
+
+// After an update the gateway restarts with new pages, but an open tab keeps running the old ones (measured: the
+// Accounts page still showed the previous version after "Install update"). When the gateway's start time changes,
+// reload — unless you are typing.
+let bootedAt = null;
+setInterval(async () => {
+  try {
+    const h = await (await fetch("/health", { cache: "no-store" })).json();
+    if (bootedAt == null) { bootedAt = h.startedAt; return; }
+    if (h.startedAt !== bootedAt && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) location.reload();
+  } catch { /* restarting */ }
+}, 15000);
