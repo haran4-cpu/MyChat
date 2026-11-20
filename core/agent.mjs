@@ -192,7 +192,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   const done = new Map();
   let repeats = 0;
   const steps = [], reads = new Set(), seen = new Map();   // seen: path -> full text of every file it read (for checking its claims)
-  let checked = null, repaired = false, unreadAsked = false, challenged = null, runAsked = false;
+  let checked = null, repaired = false, unreadAsked = false, challenged = null, runAsked = false, langAsked = false, namedAsked = false;
   const observed = new Set();   // names that came from a real run (run_page): not 'described without reading'
   const proposed = [];   // changes the model "called" as if they were tools
   let by = "", calls = 0, last = null, raw = "";
@@ -339,6 +339,31 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
           "Read them now (or drop what you said about them). Describe only what the files you actually read contain. " +
           "Then give your COMPLETE final answer again — the person sees only that last answer, never earlier drafts." });
         continue;
+      }
+      // the answer must be in the person's language (measured on the PC: an English request got a review in Chinese
+      // mixed with Korean after the model loaded a skill)
+      const fin = String(last.final ?? ""), count = (re) => (fin.match(re) || []).length;
+      const foreign = count(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0400-\u04ff\u0600-\u06ff]/g), letters = count(/\p{L}/gu) || 1;
+      const goalForeign = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0400-\u04ff\u0600-\u06ff]/.test(goal);
+      if (!langAsked && !goalForeign && foreign / letters > 0.15 && step < maxSteps - 1) {
+        langAsked = true;
+        msgs.push({ role: "assistant", content: r.content }, { role: "user", content: `Your answer is in the wrong language. Write the COMPLETE final answer again in the language of the request (${/[\u0590-\u05FF]/.test(goal) ? "Hebrew" : "English"}).` });
+        continue;
+      }
+      // the person named a file: an answer about it without opening it is invention (same run: a "review" after
+      // loading a skill and reading nothing)
+      if (!namedAsked && step < maxSteps - 2 && !(Array.isArray(last.ops) && last.ops.length)) {   // (moving/deleting a file needs no reading)
+        const named = [...new Set(goal.match(/[\w./-]+\.(?:html?|m?js|ts|tsx|py|json|md|css|txt)\b/gi) || [])];
+        const unopened = [];
+        for (const n of named.slice(0, 5)) if (![...seen.keys()].some((k) => k === n || k.endsWith("/" + n) || n.endsWith("/" + k) || k.split("/").pop() === n.split("/").pop())) {
+          if ((await reader.text(n).catch(() => null)) != null) unopened.push(n);
+        }
+        if (unopened.length) {
+          namedAsked = true;
+          onStep({ kind: "status", text: `The answer is about ${unopened.join(", ")} but it was never opened — opening it first` });
+          msgs.push({ role: "assistant", content: r.content }, { role: "user", content: `You have not opened ${unopened.join(", ")}. Open it first (outline, then read the relevant ranges${runPage ? "; run_page for a web app" : ""}), then give the COMPLETE final answer with evidence (path:line).` });
+          continue;
+        }
       }
       // a verdict on a web app without running it is an opinion (measured on the PC: "PASS, production-grade" after
       // reading 2 slices of a 12,000-line app): run it once first

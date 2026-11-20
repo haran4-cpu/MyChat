@@ -408,3 +408,19 @@ test("a reply in Python dict style is still understood as a tool call (measured 
   assert.deepEqual(parseJsonLoose("{'thought': \"it's the review skill\", 'tool': 'skill_load', 'args': {'id': '83de42fe51', 'deep': True}}"),
     { thought: "it's the review skill", tool: "skill_load", args: { id: "83de42fe51", deep: true } });
 });
+
+test("an answer about a named file it never opened, or in the wrong language, is sent back", async () => {
+  const fs = memoryFs({ "P/app.html": "<script>\nfunction f() {\n  return 1;\n}\n</script>" });
+  let n = 0; const asks = [];
+  const gw = { async chat(req) {
+    n++; if (n > 1) asks.push(req.messages.at(-1).content);
+    if (n === 1) return { provider: "p", model: "m", content: JSON.stringify({ final: "由于文件很大，审查结果：存在多个严重问题，建议重构。" }) };
+    if (n === 2) return { provider: "p", model: "m", content: JSON.stringify({ final: "Review: the app has serious problems and should be split into modules." }) };
+    if (n === 3) return { provider: "p", model: "m", content: '{"tool":"read","args":{"path":"P/app.html"}}' };
+    return { provider: "p", model: "m", content: JSON.stringify({ final: "P/app.html has one function f (P/app.html:2) that returns 1." }) };
+  } };
+  const r = await runAgent(gw, { goal: "review P/app.html", fs, plan: false, maxSteps: 8, noChallenge: true });
+  assert.match(asks[0], /wrong language/);
+  assert.match(asks[1], /not opened P\/app\.html/);
+  assert.match(r.answer, /function f/);
+});
