@@ -377,7 +377,7 @@ test("claims are attacked by another family and settled by a program on the file
   assert.match(fixMsg, /cannot start.*found 1×.*app\.html:4/s);
   assert.doesNotMatch(fixMsg, /boot loads a worklet/, "an upheld claim is not sent back");
   assert.match(r.answer, /falls back/);
-  assert.match(r.answer, /2 disproved and corrected/);
+  assert.match(r.answer, /2 disproved:/); assert.match(r.answer, /✗ "the code never uses innerHTML"/);
 });
 
 test("compare: claimed vs actual between two versions (single files with different names, folders, archives)", async () => {

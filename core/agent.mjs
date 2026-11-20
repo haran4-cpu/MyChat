@@ -192,7 +192,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   const done = new Map();
   let repeats = 0;
   const steps = [], reads = new Set(), seen = new Map();   // seen: path -> full text of every file it read (for checking its claims)
-  let checked = null, repaired = false, unreadAsked = false, challenged = null, runAsked = false, langAsked = false, namedAsked = false;
+  let checked = null, repaired = false, unreadAsked = false, challenged = null, challengeRounds = 0, disproved = [], runAsked = false, langAsked = false, namedAsked = false;
   const observed = new Set();   // names that came from a real run (run_page): not 'described without reading'
   const proposed = [];   // changes the model "called" as if they were tools
   let by = "", calls = 0, last = null, raw = "";
@@ -390,9 +390,17 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
         continue;
       }
       // another family attacks the claims; the program runs the checks on the real files
-      if (!challenged && seen.size && String(last.final ?? "").length > 150 && step < maxSteps - 1 && !noChallenge) {
+      // up to two rounds: the corrected answer is attacked again (measured on the PC: the rewrite dropped the two
+      // disproved claims but kept two other wrong ones the first checker had not picked)
+      if (challengeRounds < 2 && (!challenged || challenged.refuted.length) && seen.size && String(last.final ?? "").length > 150 && step < maxSteps - 1 && !noChallenge) {
+        challengeRounds++;
         onStep({ kind: "status", text: "Another model is trying to disprove the answer — the PC runs its checks" });
+        const prev = challenged;
         challenged = await challenge(gw, { answer: String(last.final), files: seen, by, signal, privateData }).catch(() => ({ tried: 0, refuted: [], upheld: [] }));
+        if (prev) challenged = { ...challenged, tried: challenged.tried + prev.tried, refutedBefore: prev.refuted.length + (prev.refutedBefore || 0) };
+        // a claim already sent back once is not sent back again (no loop); only new disproved claims trigger a rewrite
+        challenged.refuted = challenged.refuted.filter((x) => !disproved.some((d) => d.claim === x.claim));
+        disproved.push(...challenged.refuted);
         if (challenged.refuted.length) {
           onStep({ kind: "status", text: `${challenged.refuted.length} claim(s) disproved by the files — correcting` });
           msgs.push({ role: "assistant", content: r.content }, { role: "user", content: "DISPROVED BY THE FILES (a program ran these checks):\n" +
@@ -435,7 +443,11 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   let answer = String(last?.final ?? last?.summary ?? "").trim() || "No usable answer came back from the models this time (they replied with nothing). Please try again — or connect an account for stronger models.";
   if (last?.final != null && (!checked || repaired)) checked = await checkClaims(answer, seen, reader);
   if (challenged && !challenged.tried && challenged.note) answer += `\n\n*Challenge step: no claim could be checked (${challenged.note}).*`;
-  if (challenged?.tried) answer += `\n\n*Challenged by another model: ${challenged.tried} claim check(s) run on the files${challenged.refuted.length ? ` — ${challenged.refuted.length} disproved and corrected` : " — none disproved"}.*`;
+  if (challenged?.tried) {
+    // the evidence is shown, not just a count: if the rewrite still says something disproved, the person sees it
+    answer += `\n\n*Challenged by other models: ${challenged.tried} claim check(s) run on the files in ${challengeRounds} round(s)${disproved.length ? ` — ${disproved.length} disproved:*` : " — none disproved.*"}`;
+    for (const d of disproved.slice(0, 8)) answer += `\n- ✗ "${d.claim}" — ${d.evidence.slice(0, 220)}`;
+  }
   if (checked && checked.total) answer += `\n\n---\n*Checked against the files: ${checked.total - checked.bad.length} of ${checked.total} citation(s) and code quote(s) found` +
     (checked.bad.length ? ` · not found: ${checked.bad.slice(0, 4).join("; ")}` : "") + "*";
   if (memory && last?.final != null && !(checked && checked.bad.length)) {
