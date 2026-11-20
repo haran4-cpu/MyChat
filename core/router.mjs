@@ -466,7 +466,10 @@ export class Gateway {
       const txt = (await res.text().catch(() => "")).slice(0, 300);
       const ra = Number(res.headers.get?.("retry-after")) || 0;
       this.noteLimits(c.provider, res.headers);
-      if (res.status === 402 || BILLING_RX.test(txt)) {
+      if ((res.status === 402 || BILLING_RX.test(txt)) && this.providers[c.provider]?.freeModels && !this.providers[c.provider].freeModels.test(c.model)) {
+        // no credit, but this account also has free models (Z.ai's GLM Flash): only the paid model is set aside
+        this.stats.failure(c.provider, c.model, "paid model, no credit: " + txt, 24 * 3600e3);
+      } else if (res.status === 402 || BILLING_RX.test(txt)) {
         // the account itself has no credit: park the whole provider instead of trying its models one by one
         this.parked[c.provider] = { until: Date.now() + 6 * 3600e3, reason: "no credit or balance on this account" };
         this.stats.failure(c.provider, c.model, txt, 6 * 3600e3);

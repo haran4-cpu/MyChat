@@ -344,3 +344,13 @@ test("an answer that stops on 'written by' is continued by the next model", asyn
   assert.equal(w.calls[1].messages.at(-1).role, "user", "the second model is asked to continue");
   w.srv.closeAllConnections(); w.srv.close();
 });
+
+test("no credit on an account that also has free models parks only the paid model (Z.ai GLM Flash stays usable)", async () => {
+  const w = await mockWorld({ a: { "glm-5.3": { status: 402, text: '{"error":{"message":"Insufficient balance"}}' }, "glm-4.7-flash": { text: "ok" } } });
+  const g = only(["a"])(gwFor(w, ["a"]));
+  g.providers.a.freeModels = /flash/i;
+  const r = await g.chat({ messages: [{ role: "user", content: "hi" }] }, { prefer: "a:glm-5.3" });
+  assert.equal(r.model, "glm-4.7-flash");
+  assert.ok(!g.parked.a, "account not parked");
+  w.srv.closeAllConnections(); w.srv.close();
+});

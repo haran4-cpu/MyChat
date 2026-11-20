@@ -58,8 +58,15 @@ export function safeEntry(name) {
 }
 
 /** Extract everything into fs under `to` (text as text, binary as base64 when the fs supports it). Returns a summary. */
-export async function extractZip(bytes, fs, to, { onProgress } = {}) {
-  const entries = zipEntries(bytes);
+// In an APK only assets/ is readable app content (for a web-based app like MyChat: assets/public = its code);
+// classes.dex, kotlin/, META-INF/, res/ (binary XML) and lib/*.so are machine data that only confuse readers.
+export const APK_KEEP = (name) => /^assets\//.test(name);
+export async function extractZip(bytes, fs, to, { onProgress, filter, apk } = {}) {
+  let entries = zipEntries(bytes);
+  if (apk == null) apk = entries.some((e) => e.name === "classes.dex" || e.name === "AndroidManifest.xml");
+  const keep = filter || (apk ? APK_KEEP : null);
+  const all = entries.length;
+  if (keep) entries = entries.filter((e) => keep(e.name));
   const total = entries.reduce((a, e) => a + e.size, 0);
   if (total > ZIP_LIMITS.totalBytes) throw new Error(`the archive unpacks to ${Math.round(total / 1048576)} MB, over the ${ZIP_LIMITS.totalBytes / 1048576} MB limit`);
   let files = 0, skipped = 0, k = 0;
@@ -79,7 +86,7 @@ export async function extractZip(bytes, fs, to, { onProgress } = {}) {
     files++;
     if (onProgress && k % 25 === 0) onProgress(k, entries.length);
   }
-  return { files, skipped, entries: entries.length, bytes: total };
+  return { files, skipped, entries: entries.length, left: all - entries.length, apk: !!apk, bytes: total };
 }
 
 /** Heuristic: no NUL bytes in the first 8 KB and it decodes as UTF-8. */

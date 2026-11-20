@@ -3,7 +3,7 @@
 // each returning notes WITH exact quotes, then CHECK every quote against the real file (a note whose quote is not in
 // the file is dropped — no proof, no claim), then one model writes the answer only from the verified notes.
 
-const SKIP_PATH = /(^|\/)(node_modules|\.git|dist|build|out|\.next|\.gradle|__pycache__|\.venv|vendor|coverage|\.mychat-trash)(\/|$)|(\.min\.(js|css)|\.map|package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/i;
+const SKIP_PATH = /(^|\/)(node_modules|\.git|dist|build|out|\.next|\.gradle|__pycache__|\.venv|vendor|coverage|\.mychat-trash|META-INF|kotlin)(\/|$)|(\.min\.(js|css)|\.map|package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/i;
 const PRIORITY = [/readme/i, /package\.json$|pyproject\.toml$|requirements\.txt$|capacitor\.config|AndroidManifest\.xml$|\.gradle$/i,
   /(^|\/)(src|app|lib|core|server|pc|www)\//i, /\.(m?js|ts|tsx|jsx|py|kt|java|go|rs|cs|swift|dart)$/i, /\.(html|css|json|ya?ml|toml|md)$/i];
 const rank = (p) => { const i = PRIORITY.findIndex((rx) => rx.test(p)); return i < 0 ? PRIORITY.length : i; };

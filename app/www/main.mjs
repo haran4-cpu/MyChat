@@ -4,7 +4,8 @@ import { detectKeys, validateKey, identifyPlainKey, pkcePair, openRouterAuthUrl,
 import { SEARCH_PROVIDERS, Search } from "./core/search.mjs";
 import { agentView, filesView, hostTools } from "./agentui.mjs";
 import { workspace, importFiles } from "./files.mjs";
-import { workspaceReader } from "./core/agent.mjs";
+import { workspaceReader, runAgent, preview as previewOps, apply as applyOps, undo as undoOps } from "./core/agent.mjs";
+import { WORKSPACE_RX } from "./core/projects.mjs";
 import { study } from "./core/digest.mjs";
 
 const $ = (s) => document.querySelector(s);
@@ -89,6 +90,28 @@ function whoLine(meta) {
   return uniq.length ? el("div", { class: "who" }, `${meta.mode || ""} · ${uniq.slice(0, 3).join(", ")}${secs}`) : null;
 }
 
+/** Changes the assistant proposed from the chat: approve here, undo here (same engine as the Agent tab). */
+function chatOps(o) {
+  const wrap = el("div", { class: "card opsbox" }, el("b", {}, "Proposed changes"));
+  if (o.journal) {
+    wrap.append(el("p", {}, `${o.journal.undone ? "Undone" : "Applied"}: ${o.journal.steps.length} change(s)${o.journal.error ? " — stopped at: " + o.journal.error : ""}`));
+    if (!o.journal.undone) wrap.append(el("button", { class: "btn ghost", type: "button", onclick: async () => { const r = await undoOps(await workspace(), o.journal); o.journal.undone = Date.now(); saveChats(); renderChat(); toast(r.ok ? "Undone" : r.problems.join("; ")); } }, "Undo"));
+    return wrap;
+  }
+  const boxes = (o.preview || o.ops).map((p, i) => {
+    const cb = el("input", { type: "checkbox", checked: !p.unchanged });
+    wrap.append(el("label", { class: "row" }, cb, el("span", { class: "grow", dir: "auto" }, `${i + 1}. ${p.label || p.op + " " + p.path}${p.stats ? `  +${p.stats.added} −${p.stats.removed}` : ""}`)));
+    return cb;
+  });
+  wrap.append(el("div", { class: "actions" }, el("button", { class: "btn", type: "button", onclick: async () => {
+    const pick = boxes.map((b, i) => (b.checked ? i : -1)).filter((i) => i >= 0);
+    if (!pick.length) return toast("Nothing selected");
+    o.journal = await applyOps(await workspace(), { id: o.id, goal: o.goal, ops: o.ops }, pick);
+    saveChats(); renderChat();
+  } }, "Approve and apply")));
+  return wrap;
+}
+
 function renderChat() {
   const box = $("#messages"); box.replaceChildren();
   $("#viewSub").textContent = current.title || "";
@@ -103,6 +126,8 @@ function renderChat() {
       const meta = current.meta[i] || {};
       const w = whoLine(meta); if (w) box.append(w);
       box.append(botBubble(m.content, meta));
+      if (meta.steps?.length) box.append(el("details", { class: "steps-box" }, el("summary", {}, `🔧 ${meta.steps.length} steps — looked at your files`), el("div", { class: "steps" }, meta.steps.map((x) => el("div", { class: "step tool" }, x)))));
+      if (meta.ops) box.append(chatOps(meta.ops));
       box.append(el("div", { class: "actions" },
         el("button", { type: "button", onclick: () => { navigator.clipboard?.writeText(m.content.split("\n\n---\n")[0]).then(() => toast("Copied")); } }, "Copy"),
         i === current.messages.length - 1 ? el("button", { type: "button", onclick: retry }, "Try again") : null));
@@ -171,6 +196,7 @@ const keepAlive = {
   async start(text) { const K = plugin("KeepAlive"); if (!K || this.on) return; try { await K.start({ text }); this.on = true; } catch { /* still runs in the foreground */ } },
   async end(text) { const K = plugin("KeepAlive"); if (!K || !this.on) return; this.on = false; try { await K.done({ text, notify: document.visibilityState === "hidden" }); } catch { /* ignore */ } },
 };
+const IDENTITY = `You are MyChat, the user's own assistant (Android app + PC). The app has the user's MyChat folder (Files tab: Inbox, Projects) and an Agent with tools; when the user asks about their files, the app reads them for you — so never claim you have no access to their files. Answer in the user's language, directly and specifically; say plainly when you are unsure.`;
 const modelKeys = () => Object.keys(state.keys).filter((k) => state.gw.providers[k] && !state.gw.providers[k].keyless);
 
 async function send(text) {
@@ -195,6 +221,21 @@ async function send(text) {
   const noKeys = !modelKeys().length;
   try {
     const apiMsgs = current.messages.map(({ role, content, files: fl }) => ({ role, content: fl?.length ? content + `\n(attached: ${fl.join(", ")})` : content }));
+    // one assistant: a question about the user's own files/projects is answered by looking (agent tools), not guessing
+    const prevAgentic = current.meta[current.messages.length - 2]?.mode === "agent";
+    if (!files.length && (WORKSPACE_RX.test(text) || (prevAgentic && text.length < 400))) {
+      keepAlive.start("Looking at your files…");
+      const fs = await workspace(), gw = await brain(), steps = [];
+      const history = current.messages.slice(0, -1).slice(-8).map(({ role, content }) => ({ role, content: String(content).slice(0, 4000) }));
+      const r = await runAgent(gw, { goal: text, fs, history, signal: running.signal, ...hostTools({ search: state.search, fetch: smartFetch }),
+        onStep: (st) => { if (st.kind !== "status") steps.push(st); status.textContent = st.kind === "tool" ? `🔧 ${st.tool} ${JSON.stringify(st.args || {}).slice(0, 70)}` : String(st.text || "").slice(0, 120); } });
+      current.messages.push({ role: "assistant", content: r.answer });
+      const k = current.messages.length - 1;
+      current.meta[k] = { mode: "agent", trace: [{ by: r.by }], ms: Date.now() - t0, steps: steps.filter((x) => x.kind === "tool").map((x) => `${x.tool} ${JSON.stringify(x.args || {}).slice(0, 100)}`) };
+      if (r.ops.length) current.meta[k].ops = { id: r.id, goal: text, ops: r.ops, preview: await previewOps(fs, r.ops) };
+      return;
+    }
+    apiMsgs.unshift({ role: "system", content: IDENTITY });
     if (files.length) {
       status.textContent = "Reading the attached files…";
       const ctx = await filesContext(files, text, (t) => (status.textContent = t), running.signal);

@@ -8,7 +8,7 @@
 //               move(from, to), exists(rel) -> bool, rmdirEmpty(rel) }.
 
 export const TRASH = ".mychat-trash";
-const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv", TRASH, ".gradle", "build", "dist"]);
+const SKIP_DIRS = new Set([".git", "node_modules", "__pycache__", ".venv", "venv", TRASH, ".gradle", "build", "dist", "META-INF", "kotlin"]);
 const PROTECTED = /(^|\/)(keys\.json|token|\.env(\..*)?|id_rsa.*|.*\.pem|.*\.keystore)$/i;
 const TEXT_EXT = /\.(txt|md|markdown|json|jsonl|csv|tsv|ya?ml|toml|ini|cfg|conf|xml|html?|css|scss|js|mjs|cjs|ts|tsx|jsx|py|rb|go|rs|java|kt|c|h|cpp|hpp|cs|php|sh|ps1|bat|sql|svg|log|env\.example|gitignore)$/i;
 export const OPS = ["write", "append", "mkdir", "move", "delete", "extract"];
@@ -48,8 +48,9 @@ export async function tree(fs, { maxEntries = 400, maxDepth = 4 } = {}) {
 }
 const fmtSize = (b) => (b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB");
 
-const SYS = `You are MyChat Agent: a senior engineer and careful assistant working inside ONE folder (the workspace) with tools.
+const SYS = `You are MyChat Agent: a senior engineer and careful assistant. You DO have access to the person's MyChat folder (the workspace) through the tools below — never say you cannot see their files; look.
 How you work (gather context → act → verify → repeat):
+0. In your first reply, put a short plan in "thought" (2-4 steps), then start. Use the WORKSPACE MAP: it tells you what each project is and where its real code is — go there directly.
 1. Understand what is asked and what "done" looks like.
 2. Gather evidence with tools before concluding. Never guess what a file contains: read it. Archives (.zip/.apk) can be listed and read in place with paths like "Inbox/app.zip!/src/main.js".
 3. For anything big (a whole project, many files, a code review) use "study": several models read it in parallel and every finding is checked against the real file.
@@ -68,7 +69,7 @@ OPS (proposed changes, applied only after approval):
   {"op":"move","path":"old.txt","to":"new/old.txt","why":"..."}
   {"op":"delete","path":"a/old.txt","why":"..."}   (goes to trash; undo restores)
   {"op":"extract","path":"Inbox/app.zip","to":"Projects/app","why":"..."}   (unpack an archive)
-Be direct and specific, no filler. If something cannot be done, say exactly why and what would make it possible.`;
+Never repeat a tool call with the same arguments. Be direct and specific, no filler. If something cannot be done, say exactly why and what would make it possible.`;
 
 export const TOOL_DOCS = {
   tree: ["{\"path\":\"optional sub-folder or archive\"}", "the folder (or an archive) as an indented listing"],
@@ -78,7 +79,7 @@ export const TOOL_DOCS = {
   calc: ["{\"expression\":\"(17.5/100)*2480\"}", "exact arithmetic"],
   web_search: ["{\"query\":\"...\"}", "web results with excerpts"],
   fetch: ["{\"url\":\"https://...\"}", "a web page as text"],
-  run_js: ["{\"code\":\"...\"}", "run JavaScript in a sandbox (no files, no network); returns console output"],
+  run_js: ["{\"code\":\"...\"}", "pure computation in a JavaScript sandbox: NO file access, NO network (use read/search for files); returns console output"],
 };
 
 const MAX_OBS = 12000;
@@ -138,13 +139,16 @@ export function workspaceReader(fs) {
  * host = { search?: Search, fetchText?(url), runJs?(code), privateData?, onStep?(step) }
  * Returns { id, goal, answer, summary, ops, rejected, steps, by, calls, reads, at }.
  */
-export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 14, privateData = false, search, fetchText, runJs, onStep = () => {}, evaluate }) {
+export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, search, fetchText, runJs, onStep = () => {}, evaluate }) {
   const reader = workspaceReader(fs);
   const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate));
   const sys = SYS.replace("__TOOLS__", avail.map((t) => `  ${t} ${TOOL_DOCS[t][0]} — ${TOOL_DOCS[t][1]}`).join("\n"));
-  const listing = await tree(fs, { maxEntries: 250, maxDepth: 3 });
+  const { workspaceMap } = await import("./projects.mjs");
+  const [map, listing] = await Promise.all([workspaceMap(fs).catch(() => ""), tree(fs, { maxEntries: 150, maxDepth: 2 })]);
   const msgs = [{ role: "system", content: sys }, ...history.slice(-8),
-    { role: "user", content: `WORKSPACE (top levels):\n${listing}\n\nREQUEST:\n${goal}` }];
+    { role: "user", content: `WORKSPACE MAP:\n${map}\n\nTOP LEVELS:\n${listing}\n\nREQUEST:\n${goal}` }];
+  const done = new Map();
+  let repeats = 0;
   const steps = [], reads = new Set();
   let by = "", calls = 0, last = null;
   const runTool = async (name, args = {}) => {
@@ -207,13 +211,17 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     if (!list.length) { last = { final: last.thought || r.content }; break; }
     if (last.thought) onStep({ kind: "thought", text: String(last.thought).slice(0, 400) });
     const results = await Promise.all(list.map(async (c) => {
+      const key = c.tool + JSON.stringify(c.args || {});
+      if (done.has(key)) { repeats++; return `RESULT of ${c.tool}: (you already ran exactly this — its result is above. Do something else, or answer.)`; }
       onStep({ kind: "tool", tool: c.tool, args: c.args });
       const out = trimObs(String(await runTool(c.tool, c.args || {})));
+      done.set(key, true);
       steps.push({ thought: last.thought || "", tool: c.tool, args: c.args, result: out.slice(0, 600) });
       return `RESULT of ${c.tool} ${JSON.stringify(c.args || {}).slice(0, 200)}:\n${out}`;
     }));
     msgs.push({ role: "assistant", content: JSON.stringify({ thought: last.thought, calls: list }) }, { role: "user", content: results.join("\n\n") });
-    if (step === maxSteps - 2) msgs.push({ role: "user", content: "One step left: give your final answer now (JSON with \"final\")." });
+    if (step === maxSteps - 2 || repeats >= 3) msgs.push({ role: "user", content: "Give your final answer now (JSON with \"final\"), from what you have found." });
+    else if (step && step % 5 === 4) msgs.push({ role: "user", content: `(${step + 1} of ${maxSteps} steps used. If you already have enough to answer well, answer now; otherwise continue with the most informative next step.)` });
   }
   const { ops, rejected } = checkOps(last?.ops);
   const answer = String(last?.final ?? last?.summary ?? "").trim() || "(no answer)";

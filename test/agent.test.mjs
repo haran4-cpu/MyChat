@@ -166,3 +166,20 @@ test("study: the same file twice is read once, and a part that fails is retried 
   assert.equal(r.unread, 0, "the failed part was retried");
   assert.equal(r.notes.length, 1);
 });
+
+test("workspace map says what each project is and where its code is; the agent starts from it and never repeats a call", async () => {
+  const { workspaceMap, WORKSPACE_RX } = await import("../core/projects.mjs");
+  const fs = memoryFs({ "Projects/MyChat-17/assets/public/main.mjs": "x", "Projects/MyChat-17/assets/public/core/agent.mjs": "y",
+    "Projects/MyChat-17/assets/capacitor.config.json": JSON.stringify({ appId: "il.mychat", appName: "MyChat" }),
+    "Projects/MyChat-17/kotlin/collections/a.kotlin_builtins": "z", "Projects/shop/package.json": JSON.stringify({ name: "shop", scripts: { start: "x" } }) });
+  const map = await workspaceMap(fs);
+  assert.match(map, /MyChat-17 — Android app \(unpacked APK, web-based\); code in Projects\/MyChat-17\/assets\/public; app id il\.mychat/);
+  assert.match(map, /shop — JavaScript\/Node project/);
+  for (const q of ["יש לך גישה לקבצים של הפרויקט שלי?", "review my app", "what's in Projects/shop"]) assert.ok(WORKSPACE_RX.test(q), q);
+  for (const q of ["מהי בירת קנדה?", "write a poem about rain"]) assert.ok(!WORKSPACE_RX.test(q), q);
+  const gw = fakeGw([{ tool: "tree", args: { path: "Projects" } }, { tool: "tree", args: { path: "Projects" } }, { final: "done" }]);
+  const r = await runAgent(gw, { goal: "look", fs });
+  assert.match(gw.seen[0].messages.at(-1).content, /WORKSPACE MAP:[\s\S]*assets\/public/);
+  assert.match(gw.seen[2].messages.at(-1).content, /already ran exactly this/);
+  assert.equal(r.steps.length, 1);
+});

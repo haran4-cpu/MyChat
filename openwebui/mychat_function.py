@@ -1,7 +1,7 @@
 """
 title: MyChat
 author: MyChat (multi-model gateway)
-version: 1.6.0
+version: 1.7.0
 required_open_webui_version: 0.6.0
 description: MyChat inside Open WebUI. Cloud and local models combined per task (Auto, Max, Consensus, Verified/Truth Engine, Fast, Private). Starts the MyChat gateway on this PC by itself; accounts and keys are managed from the "MyChat · Accounts" model without leaving Open WebUI.
 """
@@ -31,6 +31,7 @@ MODELS = [
     ("accounts", "MyChat · Accounts & keys"),
 ]
 APPROVE_RX = re.compile(r"^\s*(/approve|/apply|yes|y|ok|approve|apply|כן|אשר|אישור|תבצע|בצע)\b[\s:,]*([\d ,]*)\s*[.!]?\s*$", re.I)
+WORKSPACE_RX = re.compile(r"(קובץ|קבצים|תיקי|פרויקט|פרוייקט|הקוד|קוד שלי|אפליקציה שלי|האפליקציה|ריפו|zip|apk|\bfiles?\b|\bfolders?\b|\bproject|\brepo\b|\bmy (code|app)\b|\bthe (code|app)\b|Projects/)", re.I)
 UNDO_RX = re.compile(r"^\s*(/undo|undo|בטל|ביטול|תבטל)\s*[.!]?\s*$", re.I)
 
 # Shapes of real API keys. A message made only of such tokens is treated as "connect this key", never sent to a model.
@@ -357,6 +358,9 @@ class Pipe:
                            ("\n\nServices reload by themselves (Kestrel waits until it is idle). Backup: `" + u.get("backup", "") + "`" if u.get("installed") else ""))
                 return
             low = last.strip().lower()
+            # one assistant: questions about the user's own files/projects are answered by looking (Agent tools)
+            if model in ("auto", "fast", "max") and not low.startswith("/") and WORKSPACE_RX.search(last) and len(last) < 2000:
+                model = "agent"
             if model == "agent" or low.startswith("/agent") or low.startswith("/approve") or low == "/undo" or low == "/folders":
                 goal = re.sub(r"^\s*/agent\b\s*", "", last) if low.startswith("/agent") and len(low) > 7 else last
                 try:

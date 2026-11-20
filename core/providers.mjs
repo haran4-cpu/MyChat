@@ -75,7 +75,8 @@ export const PROVIDERS = {
     baseUrl: "https://api.z.ai/api/paas/v4",
     keyUrl: "https://z.ai/manage-apikey/apikey-list",
     signIn: "Google account",
-    free: "Paid: GLM-5.3 $1.40/$4.40 per M tokens; GLM-5.3-Flash much cheaper",
+    free: "GLM Flash models free (e.g. GLM-4.7-Flash); GLM-5.3 pay per use",
+    freeModels: /flash(?!x)/i,
     strengths: ["code", "reason", "long"],
   },
   cerebras: {
@@ -166,7 +167,24 @@ export const PROVIDERS = {
     free: "Pay per use (small starter credit)",
     strengths: ["chat", "code", "fast"],
   },
+  ollamacloud: {
+    name: "Ollama Cloud",
+    baseUrl: "https://ollama.com/v1",
+    keyUrl: "https://ollama.com/settings/keys",
+    signIn: "Google or GitHub account",
+    free: "Small free monthly usage on starter models; pay per token beyond (Kimi, GLM, DeepSeek, gpt-oss 120B)",
+    strengths: ["code", "reason", "chat"],
+  },
   // keyless public gateways: always available, lowest priority, never get private context by default
+  ovh: {
+    name: "OVHcloud AI Endpoints (no key)",
+    baseUrl: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+    keyUrl: "https://www.ovhcloud.com/en/public-cloud/ai-endpoints/",
+    keyless: true,
+    optionalKey: true,   // works anonymously (2 requests/min per model); with a key 400/min
+    free: "No key: 2 requests/min per model (large models: Qwen3.5 397B, gpt-oss 120B, Llama 3.3 70B); EU-hosted",
+    strengths: ["chat", "code", "reason"],
+  },
   kilo: {
     name: "Kilo Gateway (no key)",
     baseUrl: "https://api.kilo.ai/api/gateway",
@@ -237,4 +255,4 @@ export function priorFor(model) {
 }
 
 // Models that obviously are not chat models (embeddings, image, audio, guard...) are never routed to.
-export const NOT_CHAT = /(embed|rerank|whisper|tts|speech|audio|image|flux|stable-diffusion|sdxl|guard|moderation|clip|ocr|parse|retriev|vision-encoder|orpheus|playai|voice|transcrib|nano-banana|computer-use|imagen|veo-|lyria|robotics|native-audio|-live\b|aqa\b)/i;
+export const NOT_CHAT = /(embed|rerank|whisper|tts|speech|audio|image|flux|stable-diffusion|sdxl|guard|moderation|clip|ocr|parse|retriev|vision-encoder|orpheus|playai|voice|transcrib|nano-banana|computer-use|imagen|veo-|lyria|robotics|native-audio|-live\b|aqa\b|bge-|multilingual-e5|xtts|nvr-tts|diffusion)/i;
