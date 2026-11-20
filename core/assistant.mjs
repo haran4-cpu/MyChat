@@ -29,7 +29,9 @@ export async function respond(gw, o) {
     if (onDelta) for (let i = 0; i < out.content.length; i += 400) onDelta(out.content.slice(i, i + 400));   // shows like a stream
     return out;
   };
-  if (fs && (o.mode === "agent" || (text.length < 2000 && WORKSPACE_RX.test(text)))) return agent();
+  // the screen is a tool too (measured on the PC: "look at my screen" was answered with "please send a screenshot")
+  const SCREEN_RX = /\b(my|the) (screen|desktop|display)\b|screenshot|המסך|מסך שלי|צילום מסך|שולחן העבודה/i;
+  if (fs && (o.mode === "agent" || (text.length < 2000 && (WORKSPACE_RX.test(text) || (o.tools?.see && SCREEN_RX.test(text)))))) return agent();
   // let the model decide: hold back the first characters until we know whether it asked for tools
   let head = "", decided = !fs;
   const sys = { role: "system", content: IDENTITY + (fs ? DECIDE : "") };
