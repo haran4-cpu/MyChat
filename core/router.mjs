@@ -302,6 +302,8 @@ export class Gateway {
           else if ((this.pins.heBad || []).includes(id + ":" + model)) score *= 0.1;
         }
         if (lang === "he" && st.heWrong && !(this.pins.he || []).includes(id + ":" + model)) score *= 0.05;   // caught answering in Arabic
+        // small models are weak in Hebrew (measured: a 7B "mini" model got "capital of Canada?" wrong) unless measured good
+        if (lang === "he" && /(\b|[-_])(1b|3b|7b|8b|a1b|a3b|mini|nano|tiny|small|lite)\b/i.test(model) && !(this.pins.he || []).includes(id + ":" + model)) score *= 0.35;
         out.push({ provider: id, model, score, family: family(model) });
       }
     }

@@ -354,3 +354,11 @@ test("no credit on an account that also has free models parks only the paid mode
   assert.ok(!g.parked.a, "account not parked");
   w.srv.closeAllConnections(); w.srv.close();
 });
+
+test("Hebrew questions avoid small models unless they were measured good in Hebrew", () => {
+  const gw = new Gateway({ keys: { a: "k" }, allowKeyless: false, allowLocal: false, extraProviders: { a: { name: "a", baseUrl: "http://x" } } });
+  gw.models = { a: ["Olala-v1.0-mini-7A1B", "gpt-oss-120b"] };
+  assert.equal(gw.candidates("chat", { lang: "he" })[0].model, "gpt-oss-120b");
+  gw.pins = { he: ["a:Olala-v1.0-mini-7A1B"] };
+  assert.ok(gw.candidates("chat", { lang: "he" }).some((c) => c.model === "Olala-v1.0-mini-7A1B"));
+});
