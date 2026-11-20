@@ -50,6 +50,9 @@ export const KEY_SHAPES = [
   ["huggingface", /\bhf_[A-Za-z0-9]{30,}\b/],
   ["github", /\b(github_pat_[A-Za-z0-9_]{60,}|gh[pousr]_[A-Za-z0-9]{36,})\b/],
   ["cerebras", /\bcsk-[A-Za-z0-9]{40,}\b/],
+  ["xai", /\bxai-[A-Za-z0-9]{40,}\b/],
+  ["openai", /\bsk-(proj|svcacct|admin)-[A-Za-z0-9_-]{40,}\b/],
+  ["fireworks", /\bfw_[A-Za-z0-9]{20,}\b/],
   ["tavily", /\btvly-[A-Za-z0-9_-]{20,}\b/],
   ["jina", /\bjina_[A-Za-z0-9_-]{40,}\b/],
   ["brave", /\bBSA[A-Za-z0-9_-]{20,}\b/],
@@ -102,7 +105,8 @@ export async function validateKey(provider, key, providers, fetchImpl = fetch) {
   }
 }
 
-export async function identifyPlainKey(key, providers, candidates = ["mistral", "zai", "sambanova"], fetchImpl = fetch) {
+export const PLAIN_KEY_PROVIDERS = ["mistral", "zai", "sambanova", "cohere", "siliconflow", "deepseek", "moonshot", "together"];
+export async function identifyPlainKey(key, providers, candidates = PLAIN_KEY_PROVIDERS, fetchImpl = fetch) {
   for (const c of candidates) {
     const v = await validateKey(c, key, providers, fetchImpl);
     if (v.ok) return { provider: c, ...v };
@@ -121,4 +125,6 @@ export const CONNECT = {
   mistral: { how: "guided", note: "Google account · free plan credits" },
   huggingface: { how: "guided", note: "Token with 'Make calls to Inference Providers'" },
   zai: { how: "guided", note: "GLM-5.3 · pay per use" },
+  cohere: { how: "guided", note: "Google account · free trial key" },
+  siliconflow: { how: "guided", note: "Google account · some models free" },
 };

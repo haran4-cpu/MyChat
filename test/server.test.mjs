@@ -32,7 +32,7 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
   const rebound = await new Promise((ok) => http.get({ host: "127.0.0.1", port: server.address().port, path: "/connections",
     headers: { Host: "evil.example:" + server.address().port } }, (res) => { res.resume(); ok(res.statusCode); }));
   assert.equal(rebound, 403);
-  const html = await (await fetch(u + "/connections")).text();
+  const html = await (await fetch(u + "/connections?classic=1")).text();
   assert.match(html, /Use MyChat inside Open WebUI/);
   // the page's own script must at least parse (template-literal escaping bugs show up here)
   for (const [, js] of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new Function(js.replace(/\bawait\b/g, "")), js.slice(0, 80));
@@ -48,7 +48,26 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
   assert.match(reasoning, /Drafting/);
   assert.match(reasoning, /review/i);
   assert.ok(txt.trim().endsWith("data: [DONE]"));
-  const page = await (await fetch(u + "/connections")).text();
+  const page = await (await fetch(u + "/connections?classic=1")).text();
   assert.match(page, /aistudio\.google\.com\/apikey/);    // sign-up links for each provider
+  // the new one-page app: token injected, script parses, old Accounts link redirects to it
+  const app = await (await fetch(u + "/")).text();
+  assert.match(app, new RegExp('content="' + token + '"'));
+  const js = await (await fetch(u + "/ui/app.mjs")).text();
+  assert.doesNotThrow(() => new Function(js), "app.mjs parses");
+  assert.equal((await fetch(u + "/connections", { redirect: "manual" })).headers.get("location"), "/#accounts");
+  assert.notEqual((await fetch(u + "/ui/%2e%2e/server.mjs")).status, 200);
+  const cat = await (await fetch(u + "/catalog", { headers: H })).json();
+  assert.ok(cat.search.tavily && cat.openrouterStart.includes("/oauth/openrouter/start"));
+  const sys = await (await fetch(u + "/system", { headers: H })).json();
+  assert.ok(sys.gateway.pid);
+  // Agent mode over HTTP: folders, listing, refusing a folder that does not exist
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "mychat-work-"));
+  fs.writeFileSync(path.join(work, "a.txt"), "hi");
+  const roots = await (await fetch(u + "/agent/roots", { method: "POST", headers: H, body: JSON.stringify({ roots: [{ path: work }, { path: work + "-missing" }] }) })).json();
+  assert.equal(roots.roots.length, 1);
+  assert.match((await (await fetch(u + "/agent/tree?root=0", { headers: H })).json()).tree, /a\.txt/);
+  assert.equal((await fetch(u + "/agent/undo", { method: "POST", headers: H, body: JSON.stringify({ id: "latest" }) })).status, 404);
+  assert.equal((await fetch(u + "/agent/tree?root=0")).status, 401, "agent API needs the token");
   server.closeAllConnections(); server.close(); mock.closeAllConnections(); mock.close();
 });

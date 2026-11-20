@@ -90,11 +90,32 @@ mark("sent");
 for (let i = 0; i < 60 && !document.querySelector(".actions"); i++) await wait(100);
 mark("answered");
 await wait(800);
+// Agent mode on the phone's folder (browser storage here, Documents/MyChat on the phone): plan → apply → undo
+let agent = { ok: false };
+try {
+  const { workspace } = await import("./files.mjs");
+  const A = await import("./core/agent.mjs");
+  const fs = await workspace();
+  await fs.write("notes.md", "- milk\n");
+  const fake = { chat: async () => ({ provider: "t", model: "t", content: JSON.stringify({ summary: "add eggs, new folder", ops: [
+    { op: "write", path: "notes.md", content: "- milk\n- eggs\n" }, { op: "write", path: "trip/plan.md", content: "# Trip" }, { op: "delete", path: "notes.md" }] }) }) };
+  const p = await A.plan(fake, { goal: "test", fs });
+  const j = await A.apply(fs, p, [0, 1]);
+  const afterApply = (await fs.read("notes.md")) === "- milk\n- eggs\n" && (await fs.read("trip/plan.md")) === "# Trip";
+  const u = await A.undo(fs, j);
+  agent = { ok: afterApply && u.ok && (await fs.read("notes.md")) === "- milk\n" && !(await fs.exists("trip/plan.md")), kind: fs.kind };
+  document.querySelector('.tabs button[data-view="files"]').click();
+  for (let i = 0; i < 40 && !document.querySelector("#view-files .row.file"); i++) await wait(100);
+  agent.filesTab = [...document.querySelectorAll("#view-files .row.file")].some((r) => r.textContent.includes("notes.md"));
+  document.querySelector('.tabs button[data-view="agent"]').click();
+  for (let i = 0; i < 40 && !document.querySelector("#view-agent .goal"); i++) await wait(100);
+  agent.agentTab = !!document.querySelector("#view-agent .goal");
+} catch (e) { agent = { ok: false, error: String(e.message || e) }; }
 const saved = JSON.parse(localStorage.getItem("mychat.chats") || "[]");
 const vault = localStorage.getItem("mychat.keys.v1") || "";
 document.body.setAttribute("data-selftest", JSON.stringify({
   bot: document.querySelector(".msg.bot")?.innerText || "", bold: !!document.querySelector(".msg.bot b"), code: !!document.querySelector(".msg.bot pre code"),
-  saved: saved.length, messages: saved[0]?.messages?.length || 0, keyInPlaintext: vault.includes("gsk_"), vaultEncrypted: /^[A-Za-z0-9+/=]+\.[A-Za-z0-9+/=]+$/.test(vault) }));
+  agent, saved: saved.length, messages: saved[0]?.messages?.length || 0, keyInPlaintext: vault.includes("gsk_"), vaultEncrypted: /^[A-Za-z0-9+/=]+\.[A-Za-z0-9+/=]+$/.test(vault) }));
 </script>
 
 </body>

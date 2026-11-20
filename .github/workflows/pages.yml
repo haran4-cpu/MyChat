@@ -1,0 +1,28 @@
+name: Pages (sign-in return page)
+
+# The phone app's OpenRouter sign-in returns through https://haran4-cpu.github.io/MyChat/oauth/.
+# Pages serves the gh-pages branch; this keeps it equal to docs/ on main.
+on:
+  push:
+    branches: [main]
+    paths: ["docs/**", ".github/workflows/pages.yml"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish docs/ to gh-pages
+        run: |
+          cp -r docs /tmp/site
+          cd /tmp/site
+          git init -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -qm "Pages from ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" gh-pages

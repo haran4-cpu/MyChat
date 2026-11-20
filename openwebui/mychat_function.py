@@ -1,7 +1,7 @@
 """
 title: MyChat
 author: MyChat (multi-model gateway)
-version: 1.4.0
+version: 1.5.0
 required_open_webui_version: 0.6.0
 description: MyChat inside Open WebUI. Cloud and local models combined per task (Auto, Max, Consensus, Verified/Truth Engine, Fast, Private). Starts the MyChat gateway on this PC by itself; accounts and keys are managed from the "MyChat · Accounts" model without leaving Open WebUI.
 """
@@ -27,8 +27,11 @@ MODELS = [
     ("consensus", "MyChat Consensus (3 model families)"),
     ("fast", "MyChat Fast"),
     ("private", "MyChat Private (this PC only)"),
+    ("agent", "MyChat Agent (files & folders · you approve · undo)"),
     ("accounts", "MyChat · Accounts & keys"),
 ]
+APPROVE_RX = re.compile(r"^\s*(/approve|/apply|yes|y|ok|approve|apply|כן|אשר|אישור|תבצע|בצע)\b[\s:,]*([\d ,]*)\s*[.!]?\s*$", re.I)
+UNDO_RX = re.compile(r"^\s*(/undo|undo|בטל|ביטול|תבטל)\s*[.!]?\s*$", re.I)
 
 # Shapes of real API keys. A message made only of such tokens is treated as "connect this key", never sent to a model.
 KEY_RX = re.compile(r"\b(AIza[\w-]{30,}|nvapi-[\w-]{20,}|gsk_\w{20,}|sk-or-[\w-]{20,}|sk-ant-[\w-]{20,}|hf_\w{20,}|"
@@ -222,7 +225,8 @@ class Pipe:
                f"**[Sign in with Google → OpenRouter]({signin})** — one sign-in opens Claude, GPT, Gemini, GLM, Kimi, DeepSeek and more "
                "(it opens in a new tab and brings you back here).", "",
                "| Provider | State | Models | Free tier / key |", "|---|---|---|---|"]
-        order = ["openrouter", "gemini", "nvidia", "groq", "anthropic", "mistral", "huggingface", "zai", "cerebras", "sambanova", "github", "ollama"]
+        order = ["openrouter", "gemini", "nvidia", "groq", "mistral", "cohere", "siliconflow", "huggingface", "github", "cerebras", "sambanova",
+                 "anthropic", "openai", "deepseek", "xai", "moonshot", "zai", "together", "fireworks", "ollama"]
         for pid in order + [p for p in prov if p not in order]:
             p = prov.get(pid)
             if not p or (p.get("keyless") and pid != "ollama"):
@@ -249,7 +253,63 @@ class Pipe:
                 out.append(f"| {sv.get('name')} | {st} |")
             out += ["", "Type **/update** here to install the latest tested version from GitHub (backup first)."]
         out += ["", "**To add a key, paste it as a message in this chat** (several at once is fine). It is checked live, stored only "
-                "on this PC, and never sent to a model."]
+                "on this PC, and never sent to a model.", "",
+                f"Everything else — Agent, models, services, updates — in one place: **[MyChat on this PC]({base}/)**"]
+        return "\n".join(out)
+
+    # ---------------------------------------------------------------- Agent mode (plan → you approve → apply → undo)
+    async def _agent(self, client, token: str, text: str, emitter) -> str:
+        base = self.valves.MYCHAT_URL.rstrip("/")
+        H = {"Authorization": "Bearer " + token}
+        t = text.strip()
+        if UNDO_RX.match(t):
+            r = await client.post(base + "/agent/undo", json={"id": "latest"}, headers=H, timeout=120)
+            j = r.json()
+            if r.status_code != 200:
+                return "✗ " + (j.get("error", {}) or {}).get("message", "nothing to undo")
+            return f"↩ Undone: *{j.get('goal', '')}*" + ("" if j.get("ok") else "\n\nNotes:\n" + "\n".join("- " + x for x in j.get("problems", [])))
+        m = APPROVE_RX.match(t)
+        if m:
+            nums = [int(x) - 1 for x in re.findall(r"\d+", m.group(2) or "")]
+            r = await client.post(base + "/agent/apply", json={"id": "latest", **({"approve": nums} if nums else {})}, headers=H, timeout=300)
+            j = r.json()
+            if r.status_code != 200:
+                return "✗ " + (j.get("error", {}) or {}).get("message", "could not apply")
+            lines = [f"✓ Done: {len(j.get('steps', []))} change(s) made." if not j.get("error") else f"⚠ Partly done: {j['error']}"]
+            for st in j.get("steps", []):
+                if st.get("auto"):
+                    continue
+                lines.append(f"- {st['op']} `{st['path']}`" + (f" → `{st['to']}`" if st.get("to") else ""))
+            lines += ["", "Not what you wanted? Reply **/undo** and everything goes back."]
+            return "\n".join(lines)
+        if t.lower() in ("/folders", "/agent"):
+            roots = (await client.get(base + "/agent/roots", headers=H, timeout=20)).json().get("roots", [])
+            return "### Folders the agent may use\n\n" + "\n".join(f"{i + 1}. `{r['path']}`" + (" — private (local models only)" if r.get("private") else "") for i, r in enumerate(roots)) + \
+                   f"\n\nAdd or change folders at [MyChat → Agent]({base}/#agent). Start a message with **#2** to use folder 2."
+        root = 0
+        mm = re.match(r"^\s*#(\d+)\s+", t)
+        if mm:
+            root, t = int(mm.group(1)) - 1, t[mm.end():]
+        await self._status(emitter, "Looking at the folder and planning… (nothing changes yet)")
+        r = await client.post(base + "/agent/plan", json={"goal": t, "root": root}, headers=H, timeout=600)
+        p = r.json()
+        await self._status(emitter, "Plan ready", True)
+        if r.status_code != 200:
+            return "✗ " + (p.get("error", {}) or {}).get("message", "planning failed")
+        out = [f"### Plan for `{p.get('root')}`", "", p.get("summary") or "", ""]
+        if not p.get("ops"):
+            return "\n".join(out + ["No changes proposed."])
+        for i, o in enumerate(p.get("preview", []), 1):
+            stats = f" (+{o['stats']['added']} −{o['stats']['removed']})" if o.get("stats") else ""
+            out.append(f"**{i}. {o['label']}**{stats}" + (f" — {o['why']}" if o.get("why") else ""))
+            if o.get("diff"):
+                body = "\n".join(o["diff"][:120]) + ("\n…" if len(o["diff"]) > 120 else "")
+                out += ["<details><summary>show</summary>", "", "```diff", body.replace("```", "``\u200b`"), "```", "</details>", ""]
+        if p.get("rejected"):
+            out.append(f"_Refused {len(p['rejected'])} unsafe step(s)._")
+        out += ["", "Nothing has changed yet. Reply **yes** to apply all, **/approve 1,3** for some, or review it at "
+                f"[MyChat → Agent]({base}/#agent). After applying, **/undo** puts everything back.",
+                f"\n<sub>Planned by {p.get('by', '')}</sub>"]
         return "\n".join(out)
 
     # ---------------------------------------------------------------- chat
@@ -290,6 +350,14 @@ class Pipe:
                     yield (f"✓ Update {verb}: commit {u['commit'][:7]}, {len(u['changed'])} files.\n\n" +
                            "\n".join("- " + c for c in u["changed"][:30]) +
                            ("\n\nServices reload by themselves (Kestrel waits until it is idle). Backup: `" + u.get("backup", "") + "`" if u.get("installed") else ""))
+                return
+            low = last.strip().lower()
+            if model == "agent" or low.startswith("/agent") or low.startswith("/approve") or low == "/undo" or low == "/folders":
+                goal = re.sub(r"^\s*/agent\b\s*", "", last) if low.startswith("/agent") and len(low) > 7 else last
+                try:
+                    yield await self._agent(client, token, goal, __event_emitter__)
+                except Exception as e:
+                    yield f"✗ Agent: {e}"
                 return
             if model == "accounts" or last.strip().lower() in ("/keys", "/accounts", "/connect"):
                 yield await self._accounts_table(client, token)

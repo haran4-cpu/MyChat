@@ -19,6 +19,8 @@ import { pkcePair, openRouterAuthUrl, openRouterExchange, detectKeys, validateKe
 import { Search, SEARCH_PROVIDERS } from "../core/search.mjs";
 import { Ledger } from "../core/ledger.mjs";
 import { Bench } from "./bench.mjs";
+import { nodeFs } from "./agentfs.mjs";
+import { plan as agentPlan, preview as agentPreview, apply as agentApply, undo as agentUndo, tree as agentTree } from "../core/agent.mjs";
 
 const HOME = process.env.MYCHAT_HOME || path.join(process.env.APPDATA || path.join(os.homedir(), ".config"), "MyChat");
 const PORT = Number(process.env.MYCHAT_PORT || 11500);
@@ -209,6 +211,90 @@ bpoll();
 async function opt(){await fetch('/connections',{method:'POST',headers:H,body:JSON.stringify({allowKeyless:kl.checked})})}</script>`;
 }
 
+// ---------------------------------------------------------------- Agent mode (files and folders, approve + undo)
+const AGENT_DIR = F("agent");
+fs.mkdirSync(AGENT_DIR, { recursive: true });
+function agentRoots() {
+  if (Array.isArray(settings.agentRoots) && settings.agentRoots.length) return settings.agentRoots;
+  const d = [];
+  for (const p of ["C:\\AI-Workspace\\Projects", path.join(os.homedir(), "Documents", "MyChat")]) if (fs.existsSync(p)) d.push({ path: p, private: false });
+  if (!d.length) { const p = path.join(os.homedir(), "Documents", "MyChat"); fs.mkdirSync(p, { recursive: true }); d.push({ path: p, private: false }); }
+  return d;
+}
+const rootAt = (i) => { const r = agentRoots()[Number(i) || 0]; if (!r) throw new Error("no such folder"); return r; };
+const agentFile = (kind, id) => path.join(AGENT_DIR, `${kind}-${String(id).replace(/[^\w-]/g, "")}.json`);
+const agentSave = (kind, id, v) => fs.writeFileSync(agentFile(kind, id), JSON.stringify(v));
+const agentLoad = (kind, id) => { try { return JSON.parse(fs.readFileSync(agentFile(kind, id), "utf8")); } catch { return null; } };
+function agentHistory(n = 30) {
+  return fs.readdirSync(AGENT_DIR).filter((f) => f.startsWith("journal-")).map((f) => { try { return JSON.parse(fs.readFileSync(path.join(AGENT_DIR, f), "utf8")); } catch { return null; } })
+    .filter(Boolean).sort((a, b) => b.at - a.at).slice(0, n)
+    .map((j) => ({ id: j.id, goal: j.goal, summary: j.summary, at: j.at, root: j.root, steps: j.steps.length, error: j.error, undone: !!j.undone }));
+}
+async function agentRoute(req, res, url) {
+  const b = req.method === "POST" ? await body(req) : {};
+  if (url.pathname === "/agent/roots") {
+    if (req.method === "POST") {
+      const roots = (b.roots || []).map((r) => ({ path: path.resolve(String(r.path || r)), private: !!r.private })).filter((r) => fs.existsSync(r.path));
+      settings.agentRoots = roots; writeJson("settings.json", settings);
+    }
+    return send(res, 200, { roots: agentRoots() });
+  }
+  if (url.pathname === "/agent/tree") return send(res, 200, { tree: await agentTree(nodeFs(rootAt(url.searchParams.get("root")).path)) });
+  if (url.pathname === "/agent/plan" && req.method === "POST") {
+    const root = rootAt(b.root), afs = nodeFs(root.path);
+    const p = await agentPlan(gw, { goal: String(b.goal || "").slice(0, 4000), fs: afs, privateData: root.private });
+    p.root = root.path; p.rootIndex = Number(b.root) || 0;
+    p.preview = await agentPreview(afs, p.ops);
+    agentSave("plan", p.id, p);
+    return send(res, 200, p);
+  }
+  if (url.pathname === "/agent/apply" && req.method === "POST") {
+    const p = b.id === "latest" ? latestPlan() : agentLoad("plan", b.id);
+    if (!p) return send(res, 404, { error: { message: "plan not found" } });
+    if (agentLoad("journal", p.id)) return send(res, 409, { error: { message: "this plan was already applied (use undo first)" } });
+    const j = await agentApply(nodeFs(p.root), p, Array.isArray(b.approve) ? b.approve.map(Number) : null);
+    j.root = p.root;
+    agentSave("journal", p.id, j);
+    return send(res, 200, j);
+  }
+  if (url.pathname === "/agent/undo" && req.method === "POST") {
+    const id = b.id === "latest" ? agentHistory(50).find((h) => !h.undone)?.id : b.id;
+    const j = id && agentLoad("journal", id);
+    if (!j) return send(res, 404, { error: { message: "nothing to undo" } });
+    if (j.undone) return send(res, 409, { error: { message: "already undone" } });
+    const r = await agentUndo(nodeFs(j.root), j);
+    j.undone = Date.now(); agentSave("journal", j.id, j);
+    return send(res, 200, { ...r, id: j.id, goal: j.goal });
+  }
+  if (url.pathname === "/agent/history") return send(res, 200, { history: agentHistory() });
+  if (url.pathname === "/agent/plan" && req.method === "GET") return send(res, 200, agentLoad("plan", url.searchParams.get("id")) || {});
+  return send(res, 404, { error: { message: "not found" } });
+}
+function latestPlan() {
+  const f = fs.readdirSync(AGENT_DIR).filter((x) => x.startsWith("plan-")).map((x) => ({ x, t: fs.statSync(path.join(AGENT_DIR, x)).mtimeMs })).sort((a, b) => b.t - a.t)[0];
+  return f ? JSON.parse(fs.readFileSync(path.join(AGENT_DIR, f.x), "utf8")) : null;
+}
+
+// ---------------------------------------------------------------- System: services and updates (through the supervisor)
+async function supervisor(pathname, method = "GET") {
+  try {
+    const r = await fetch("http://127.0.0.1:11510" + pathname, { method, headers: { Authorization: "Bearer " + token }, signal: AbortSignal.timeout(method === "POST" ? 120000 : 3000) });
+    return await r.json();
+  } catch (e) { return { error: "supervisor not reachable (" + e.message + ")" }; }
+}
+
+// ---------------------------------------------------------------- the PC app (one page: Home, Agent, Accounts, Models, System)
+const UI_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "ui");
+function serveUi(res, name) {
+  const types = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".mjs": "text/javascript; charset=utf-8" };
+  let data;
+  try { data = fs.readFileSync(path.join(UI_DIR, name), "utf8"); } catch { return send(res, 404, { error: { message: "not found" } }); }
+  if (name === "index.html") data = data.replace("__MYCHAT_TOKEN__", token);
+  res.writeHead(200, { "Content-Type": types[path.extname(name)], "X-Frame-Options": "DENY", "Cache-Control": "no-store",
+    "Content-Security-Policy": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'" });
+  res.end(data);
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://x");
@@ -216,6 +302,12 @@ const server = http.createServer(async (req, res) => {
     const host = String(req.headers.host || "").replace(/:\d+$/, "").replace(/^\[|\]$/g, "");
     if (!["127.0.0.1", "localhost", "::1"].includes(host)) return send(res, 403, { error: { message: "forbidden host" } });
     if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true, startedAt: STARTED_AT, pid: process.pid });
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/app")) return serveUi(res, "index.html");
+    if (req.method === "GET" && /^\/ui\/(app\.css|app\.mjs)$/.test(url.pathname)) return serveUi(res, url.pathname.slice(4));
+    if (req.method === "GET" && url.pathname === "/connections" && !url.searchParams.has("classic")) {
+      res.writeHead(302, { Location: "/" + (url.searchParams.get("connected") ? "?connected=openrouter" : "") + "#accounts" });
+      return res.end();
+    }
     if (req.method === "GET" && url.pathname === "/connections") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "X-Frame-Options": "DENY", "Cache-Control": "no-store" });
       return res.end(connectionsPage(url.searchParams.get("connected") ? "✓ OpenRouter connected — Claude, GPT, Gemini, GLM and more are now available." : ""));
@@ -246,7 +338,7 @@ const server = http.createServer(async (req, res) => {
 <h2>✓ OpenRouter connected</h2><p>Claude, GPT, Gemini, GLM and more are now available in MyChat.</p>
 <p><a style="color:#7aa7ff" href="${p.back.replace(/"/g, "&quot;")}">Back to the chat</a></p><script>setTimeout(()=>{try{window.close()}catch(e){};location.href=${JSON.stringify(p.back)}},1500)</script>`);
         }
-        res.writeHead(302, { Location: "/connections?connected=openrouter" });
+        res.writeHead(302, { Location: "/?connected=openrouter#accounts" });
         return res.end();
       } catch (e) {
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -270,6 +362,15 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { running: st.running, total: st.total });
     }
     if (req.method === "POST" && url.pathname === "/bench/stop") return send(res, 200, bench ? bench.stop() : { running: false });
+    if (url.pathname.startsWith("/agent/")) return await agentRoute(req, res, url);
+    if (req.method === "GET" && url.pathname === "/catalog") {
+      const keys = readJson("keys.json", {});
+      return send(res, 200, { connect: CONNECT, allowKeyless: settings.allowKeyless,
+        search: Object.fromEntries(Object.entries(SEARCH_PROVIDERS).map(([id, p]) => [id, { ...p, hasKey: !!keys[id] }])),
+        openrouterStart: "/oauth/openrouter/start?t=" + encodeURIComponent(token) + "&back=" + encodeURIComponent("http://127.0.0.1:" + PORT + "/#accounts") });
+    }
+    if (req.method === "GET" && url.pathname === "/system") return send(res, 200, { gateway: { startedAt: STARTED_AT, pid: process.pid }, supervisor: await supervisor("/status") });
+    if (req.method === "POST" && url.pathname === "/system/update") return send(res, 200, await supervisor("/update" + (url.searchParams.get("check") ? "?check=1" : ""), "POST"));
     if (req.method === "GET" && url.pathname === "/diag") return send(res, 200, await search.diagnose());
     if (req.method === "GET" && url.pathname === "/bench") return send(res, 200, bench ? bench.state : { running: false });
     if (req.method === "POST" && url.pathname === "/admin/shutdown") {   // used by the Open WebUI function to reload updated code
@@ -282,7 +383,7 @@ const server = http.createServer(async (req, res) => {
       const b = await body(req);
       const found = detectKeys(b.text);
       const plain = String(b.text || "").trim();
-      if (!found.length && /^[A-Za-z0-9._-]{24,80}$/.test(plain)) {   // a key without a recognisable prefix (Mistral, Z.ai…)
+      if (!found.length && /^[A-Za-z0-9._-]{24,120}$/.test(plain)) {   // a key without a recognisable prefix (Mistral, Z.ai…)
         const id = await identifyPlainKey(plain, gw.providers);
         if (id) found.push({ provider: id.provider, key: plain });
       }

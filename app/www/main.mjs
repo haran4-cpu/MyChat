@@ -2,6 +2,7 @@
 import { init, state, ask, setKey, settings, saveSettings, smartFetch } from "./engine.mjs";
 import { detectKeys, validateKey, identifyPlainKey, pkcePair, openRouterAuthUrl, openRouterExchange, CONNECT, SEARCH_KEYS } from "./core/accounts.mjs";
 import { SEARCH_PROVIDERS, Search } from "./core/search.mjs";
+import { agentView, filesView } from "./agentui.mjs";
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, attrs = {}, ...kids) => {
@@ -188,7 +189,7 @@ async function pasteKeys(text, out) {
   const found = detectKeys(text);
   const plain = text.trim();
   if (!found.length && /^[A-Za-z0-9._-]{24,120}$/.test(plain)) {
-    const id = await identifyPlainKey(plain, state.gw.providers, ["mistral", "zai", "sambanova"], smartFetch);
+    const id = await identifyPlainKey(plain, state.gw.providers, undefined, smartFetch);
     if (id) found.push({ provider: id.provider, key: plain });
   }
   if (!found.length) { out.textContent = "✗ No API key recognised. Nothing was saved."; return; }
@@ -215,6 +216,9 @@ function renderAccounts() {
   const st = state.gw.status().providers;
   const connected = Object.values(st).filter((p) => p.hasKey).length;
   $("#viewSub").textContent = `${connected} connected`;
+  if (update) pad.append(el("section", { class: "card hero" }, el("h3", {}, `Update available — build ${update.build}`),
+    el("p", {}, `You have build ${update.current}. Download it, open it, and Android installs it over this version (your chats and keys stay).`),
+    el("button", { class: "btn white", type: "button", onclick: () => openExternal(update.url) }, "Download the update")));
   pad.append(el("section", { class: "card hero" },
     el("h3", {}, "One sign-in, many models"),
     el("p", {}, "OpenRouter with your Google account: Claude, GPT, Gemini, GLM, Kimi, DeepSeek. Opens in your browser and comes back here."),
@@ -229,18 +233,23 @@ function renderAccounts() {
     el("button", { type: "button", onclick: () => pasteKeys(ta.value, out) }, "Check and add")), out);
   pad.append(paste);
 
-  const list = el("section", { class: "card" }, el("h3", {}, "Model accounts"));
-  const order = ["openrouter", "gemini", "groq", "nvidia", "anthropic", "mistral", "huggingface", "zai", "cerebras", "sambanova", "github"];
-  for (const id of order) {
-    const p = st[id], def = state.gw.providers[id]; if (!p || !def) continue;
-    const stateTxt = p.disabled ? "✗ " + p.disabled : p.hasKey ? `✓ ${p.models || 0} models` : "not connected";
-    list.append(el("div", { class: "row" },
+  const FREE = ["openrouter", "gemini", "groq", "nvidia", "mistral", "cohere", "siliconflow", "github", "huggingface", "sambanova", "cerebras"];
+  const PAID = ["anthropic", "openai", "deepseek", "xai", "moonshot", "zai", "together", "fireworks"];
+  const row = (id) => {
+    const p = st[id], def = state.gw.providers[id]; if (!p || !def) return null;
+    const stateTxt = p.disabled ? "paused: " + p.disabled : p.hasKey ? `✓ ${p.models || 0} models` : "";
+    return el("div", { class: "row" },
       el("div", { class: "grow" }, el("span", {}, p.name), el("small", {}, CONNECT[id]?.note || p.free || "")),
-      el("span", { class: "state " + (p.disabled ? "bad" : p.hasKey ? "on" : "") }, stateTxt),
+      stateTxt ? el("span", { class: "state " + (p.disabled ? "bad" : "on") }, stateTxt) : null,
       p.hasKey ? el("button", { class: "mini", type: "button", onclick: async () => { await setKey(id, null); renderAccounts(); } }, "Remove")
-               : def.keyUrl ? el("button", { class: "mini", type: "button", onclick: () => openExternal(def.keyUrl) }, "Get key") : null));
-  }
-  pad.append(list);
+               : def.keyUrl ? el("button", { class: "mini", type: "button", onclick: () => openExternal(def.keyUrl) }, "Get key") : null);
+  };
+  const ids = Object.keys(st).filter((id) => !state.gw.providers[id]?.keyless);
+  const mine = ids.filter((id) => st[id].hasKey);
+  if (mine.length) pad.append(el("section", { class: "card" }, el("h3", {}, "Connected"), mine.map(row)));
+  pad.append(el("section", { class: "card" }, el("h3", {}, "Free to add"), FREE.filter((id) => !st[id]?.hasKey).map(row)));
+  pad.append(el("section", { class: "card" }, el("h3", {}, "Pay per use"), PAID.filter((id) => !st[id]?.hasKey).map(row),
+    ids.filter((id) => !FREE.includes(id) && !PAID.includes(id) && !st[id].hasKey).map(row)));
 
   const web = el("section", { class: "card" }, el("h3", {}, "Web evidence for the Truth Engine"), el("p", {}, "Wikipedia is always on. Each search key adds fresher evidence."));
   for (const [id, p] of Object.entries(SEARCH_PROVIDERS)) {
@@ -258,10 +267,6 @@ function renderAccounts() {
   v.append(pad);
 }
 
-function renderSoon(id, title, text) {
-  const v = $("#view-" + id); v.replaceChildren();
-  v.append(el("div", { class: "pad" }, el("section", { class: "card" }, el("h3", {}, title), el("p", {}, text))));
-}
 
 // ---------------------------------------------------------------- navigation
 let view = "chat";
@@ -271,10 +276,11 @@ function show(name) {
   for (const b of document.querySelectorAll(".tabs button")) b.classList.toggle("on", b.dataset.view === name);
   $("#viewTitle").textContent = { chat: "MyChat", accounts: "Accounts", agent: "Agent", files: "Files" }[name];
   $("#newChat").hidden = name !== "chat";
+  if (name !== "chat") $("#viewSub").textContent = "";
   if (name === "chat") renderChat();
   if (name === "accounts") renderAccounts();
-  if (name === "agent") renderSoon("agent", "Agent — next step", "Multi-step tasks with tools: web search, the hunter, exact calculator, files and your PC — every change on the PC asks you first.");
-  if (name === "files") renderSoon("files", "Files & PC link — next step", "Ask about files on this phone, share files into MyChat, and pair with your PC by QR code to use its local models and folders.");
+  if (name === "agent") agentView($("#view-agent"), { el, toast, gw: () => state.gw });
+  if (name === "files") filesView($("#view-files"), { el, toast, onAsk: (text) => { show("agent"); setTimeout(() => { const g = document.querySelector("#view-agent .goal"); if (g) { g.value = text; g.focus(); } }, 300); } });
 }
 
 function renderDrawer() {
@@ -315,6 +321,29 @@ function wire() {
   }
 }
 
+// ---------------------------------------------------------------- updates (GitHub Releases; the APK is built by CI on every change)
+let update = null;
+async function checkUpdate(force = false) {
+  try {
+    const me = await (await fetch("build.json")).json().catch(() => null);
+    if (!me?.build) return null;
+    const last = Number(localStorage.getItem("mychat.updateCheck") || 0);
+    if (!force && Date.now() - last < 6 * 3600e3) {
+      const u = JSON.parse(localStorage.getItem("mychat.update") || "null");
+      update = u && u.build > me.build ? { ...u, current: me.build } : null;
+      return update;
+    }
+    const rel = await (await fetch("https://api.github.com/repos/haran4-cpu/MyChat/releases?per_page=5", { headers: { Accept: "application/vnd.github+json" } })).json();
+    const best = (Array.isArray(rel) ? rel : []).map((r) => ({ build: Number(/build-(\d+)/.exec(r.tag_name)?.[1] || 0), url: r.assets?.find((a) => a.name.endsWith(".apk"))?.browser_download_url }))
+      .filter((r) => r.url).sort((a, b) => b.build - a.build)[0];
+    update = best && best.build > me.build ? { ...best, current: me.build } : null;
+    localStorage.setItem("mychat.updateCheck", String(Date.now()));
+    localStorage.setItem("mychat.update", JSON.stringify(update));
+    if (update && update.build > me.build) toast(`Update available (build ${update.build}) — see Accounts`, 4000);
+  } catch { /* offline: try next time */ }
+  return update;
+}
+
 (async function main() {
   wire();
   renderModes();
@@ -322,4 +351,5 @@ function wire() {
   await init();
   const n = Object.keys(state.keys).length;
   if (!n) { show("accounts"); toast("Connect an account to start — free options included"); }
+  checkUpdate();
 })();

@@ -1,0 +1,21 @@
+name: Keep the app signing key
+
+# The APK signing key lives in the Actions cache until a MYCHAT_KEYSTORE_B64 secret exists. A cache entry that is not
+# used for 7 days is deleted, and a new key would make the next APK refuse to install over the old one.
+# Reading it once a week keeps it.
+on:
+  schedule:
+    - cron: "17 3 * * 1,4"
+  workflow_dispatch: {}
+
+jobs:
+  touch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache/restore@v4
+        id: key
+        with:
+          path: ~/.android/debug.keystore
+          key: mychat-signing-key-v1
+      - run: |
+          if [ "${{ steps.key.outputs.cache-hit }}" = "true" ]; then echo "signing key kept"; else echo "::warning::signing key not found in the cache"; fi
