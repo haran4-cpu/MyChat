@@ -442,3 +442,13 @@ test("tiny models come last for real work, and an empty candidate list still get
   assert.equal(r.model, "qwen3-coder-30b");
   w.srv.close();
 });
+
+test("Max tries a strong untried model before the only proven lite one", async () => {
+  const w = await mockWorld({ a: { "gemini-flash-lite-latest": { text: "lite" }, "gemini-3-pro": { text: "pro" } } });
+  const g = only(["a"])(gwFor(w, ["a"]));
+  await g.refreshModels();
+  g.stats.success("a", "gemini-flash-lite-latest", 300, 100);
+  assert.equal(g.candidates("code")[0].model, "gemini-flash-lite-latest");          // normal: proven pool
+  assert.equal(g.candidates("code", { quality: true })[0].model, "gemini-3-pro");   // Max: strength first
+  w.srv.close();
+});

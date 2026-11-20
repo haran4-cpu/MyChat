@@ -308,9 +308,13 @@ export class Gateway {
         // asked for other families or to avoid models (Truth Engine judge, Max reviewer): diversity beats the pool
         const pool = diverse || families || exclude.length ? null : this.pool(id);
         const pinned = Object.values(this.pins).some((l) => Array.isArray(l) && l.includes(id + ":" + model));
-        if (pool && !pool.has(model) && !pinned && !(this.explore && this.explore.provider === id && this.explore.model === model)) continue;
         const prior = priorFor(model);
         let q = prior[task] ?? prior.chat;
+        // Max: a strong model this account has not proven yet still gets a chance (measured on the PC: Max drafted with
+        // gemini-flash-lite because it was the only Gemini model that had answered before)
+        const strongUntried = quality && q >= 0.8 && !st.fail;
+        if (pool && !pool.has(model) && !pinned && !strongUntried && !(this.explore && this.explore.provider === id && this.explore.model === model)) continue;
+        if (quality && /(\b|[-_])(lite|mini|nano|tiny|small|8b|7b|3b|1b)(\b|[-_])/i.test(model)) q *= 0.6;
         if (needVision && !(prior.vision > 0)) continue;
         if (needTools && p.noTools) continue;
         if (needTools && p.keyless && !p.local) q *= 0.5;
