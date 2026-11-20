@@ -235,3 +235,23 @@ test("offline: when every cloud model fails, the local model still answers (it i
     assert.equal(r.content, "local answer");
   } finally { w.srv.closeAllConnections(); w.srv.close(); }
 });
+
+test("working pool: once an account has models that answer, the rest are skipped (with rare exploration); dead models drop out; stats stay small", async () => {
+  const { Gateway, parseResetMs } = await import("../core/router.mjs");
+  const gw = new Gateway({ keys: { x: "k" }, allowKeyless: false, extraProviders: { x: { name: "x", baseUrl: "http://127.0.0.1:9/v1" } } });
+  for (const id of Object.keys(gw.providers)) if (id !== "x") gw.disabled[id] = "off";
+  gw.models.x = ["good", "untried-1", "untried-2", "dead"];
+  assert.equal(gw.candidates("chat").length, 4, "cold start: everything open");
+  gw.stats.success("x", "good", 300, 50);
+  for (let i = 0; i < 3; i++) gw.stats.failure("x", "dead", "500");
+  assert.deepEqual(gw.candidates("chat").map((c) => c.model), ["good"]);
+  assert.ok(gw.candidates("chat", { families: ["untried"] }).length >= 0);   // diversity requests are not limited by the pool
+  gw.requests = 14; gw.pickExplore("chat");
+  assert.ok(gw.explore && gw.explore.model.startsWith("untried"));
+  assert.equal(gw.candidates("chat").length, 2, "the explored model joins for this request");
+  assert.deepEqual(Object.keys(gw.stats.toJSON()).sort(), ["x|dead", "x|good"], "never-used models are not saved");
+  // rate-limit headers: an account with 1 request left is tried after others
+  gw.noteLimits("x", new Headers({ "x-ratelimit-remaining-requests": "1", "x-ratelimit-reset-requests": "2m59.56s" }));
+  assert.ok(gw.limits.x.resetAt - Date.now() > 170e3);
+  assert.equal(parseResetMs("7.66s"), 7660); assert.equal(parseResetMs("120ms"), 120); assert.equal(parseResetMs("30"), 30000);
+});

@@ -51,6 +51,8 @@ export function family(model) {
   return m.split("/").pop().split(/[-:]/)[0];
 }
 
+const EMPTY_STAT = Object.freeze({ ok: 0, fail: 0, ttft: null, tps: null, cooldownUntil: 0, lastError: "", day: "", today: 0 });
+
 class Stats {
   constructor() { this.m = new Map(); }
   key(p, model) { return p + "|" + model; }
@@ -61,13 +63,13 @@ class Stats {
   }
   success(p, model, ttftMs, tps) {
     const s = this.get(p, model);
-    s.ok++;
+    s.ok++; s.at = Date.now();
     s.ttft = s.ttft == null ? ttftMs : s.ttft * 0.7 + ttftMs * 0.3;
     if (tps) s.tps = s.tps == null ? tps : s.tps * 0.7 + tps * 0.3;
   }
   failure(p, model, err, cooldownMs) {
     const s = this.get(p, model);
-    s.fail++;
+    s.fail++; s.at = Date.now();
     s.lastError = String(err).slice(0, 200);
     if (cooldownMs) s.cooldownUntil = Math.max(s.cooldownUntil, Date.now() + cooldownMs);
   }
@@ -76,11 +78,21 @@ class Stats {
     if (s.day !== d) { s.day = d; s.today = 0; }
     s.today++;
   }
+  peek(p, model) { return this.m.get(this.key(p, model)) || EMPTY_STAT; }   // reading never creates an entry
   reliability(p, model) {
-    const s = this.get(p, model);
+    const s = this.peek(p, model);
     return (s.ok + 1) / (s.ok + s.fail + 2); // Laplace: unknown = 0.5, earns trust with use
   }
-  toJSON() { return Object.fromEntries(this.m); }
+  /** Saved file keeps only models that were actually used (measured: 771 entries, ~6 working, 138 KB). */
+  toJSON() {
+    const now = Date.now(), out = {};
+    for (const [k, v] of this.m) {
+      if (!v.ok && !v.fail) continue;
+      if (!v.ok && (v.at || 0) < now - 14 * 86400e3) continue;   // failures older than two weeks are forgotten
+      out[k] = v;
+    }
+    return out;
+  }
   load(obj) { for (const [k, v] of Object.entries(obj || {})) this.m.set(k, v); }
 }
 
@@ -89,6 +101,15 @@ class Stats {
 const BILLING_RX = /insufficient.{0,12}(balance|credit|funds)|purchase pre-?paid credits|payment required|out of credits|exceeded your monthly included credits/i;
 // A free daily allowance is used up: park until it resets (OpenRouter free models reset at 00:00 UTC).
 const DAILY_RX = /free-models-per-day|per.?day.{0,30}(limit|exceeded)|daily (limit|quota)/i;
+/** "2m59.56s", "7.66s", "120ms", "30" (seconds) or an epoch -> milliseconds from now. */
+export function parseResetMs(v) {
+  if (v == null || v === "") return 60e3;
+  const s = String(v).trim();
+  if (/^\d+(\.\d+)?$/.test(s)) { const n = Number(s); return n > 1e12 ? Math.max(0, n - Date.now()) : n > 1e9 ? Math.max(0, n * 1000 - Date.now()) : n * 1000; }
+  let ms = 0;
+  for (const [, n, u] of s.matchAll(/(\d+(?:\.\d+)?)(ms|h|m|s)/g)) ms += Number(n) * { ms: 1, s: 1e3, m: 60e3, h: 3600e3 }[u];
+  return ms || 60e3;
+}
 const nextUtcMidnight = () => { const d = new Date(); d.setUTCHours(24, 0, 30, 0); return d.getTime(); };
 
 export function toGemini(req) {
@@ -157,6 +178,9 @@ export class Gateway {
     this.modelsAt = {};
     this.disabled = {};        // provider -> reason (bad key etc.)
     this.parked = {};          // provider -> { until, reason } (no credit / balance): retried after a while, shown on Accounts
+    this.limits = {};          // provider -> { remaining, resetAt } from rate-limit headers
+    this.requests = 0;
+    this.explore = null;
     this.log = o.log || (() => {});
     this.firstTokenTimeoutMs = o.firstTokenTimeoutMs || 45000;
     this.pins = o.pins || {};  // task -> ["provider:model", ...] preferred order (from evals)
@@ -216,7 +240,7 @@ export class Gateway {
   }
 
   /** Rank (provider, model) pairs for a task. */
-  candidates(task, { needTools = false, needVision = false, privateData = false, exclude = [], families = null, limit = 8, lang = "" } = {}) {
+  candidates(task, { needTools = false, needVision = false, privateData = false, exclude = [], families = null, limit = 8, lang = "", diverse = false } = {}) {
     const now = Date.now(), out = [];
     for (const id of this.enabledProviders()) {
       const p = this.providers[id];
@@ -224,8 +248,13 @@ export class Gateway {
       for (const model of this.models[id] || []) {
         if (exclude.includes(id + ":" + model)) continue;
         if (families && !families.includes(family(model))) continue;
-        const st = this.stats.get(id, model);
+        const st = this.stats.peek(id, model);
         if (st.cooldownUntil > now) continue;
+        if (!st.ok && st.fail >= 3) continue;             // never answered after 3 tries: dead on this account
+        // asked for other families or to avoid models (Truth Engine judge, Max reviewer): diversity beats the pool
+        const pool = diverse || families || exclude.length ? null : this.pool(id);
+        const pinned = Object.values(this.pins).some((l) => Array.isArray(l) && l.includes(id + ":" + model));
+        if (pool && !pool.has(model) && !pinned && !(this.explore && this.explore.provider === id && this.explore.model === model)) continue;
         const prior = priorFor(model);
         let q = prior[task] ?? prior.chat;
         if (needVision && !(prior.vision > 0)) continue;
@@ -235,9 +264,12 @@ export class Gateway {
         let speed = 1;
         if (st.ttft != null) speed = task === "fast" ? Math.max(0.3, 1 - st.ttft / 8000) : Math.max(0.6, 1 - st.ttft / 30000);
         let score = q * (0.4 + 0.6 * rel) * speed;
+        if (diverse && st.ok > 0) score *= 1.5;             // other families: proven models first, untried ones still possible
         if (p.keyless && !p.local) score *= 0.6;          // public gateways: last resort
         if (p.local) score *= task === "fast" ? 0.2 : 0.35; // this CPU is slow; local is for private/offline
         if (/:free$/.test(model)) score *= 0.95;
+        const lim = this.limits[id];                        // provider says it is nearly out of requests: go elsewhere first
+        if (lim && lim.resetAt > now && lim.remaining <= 2) score *= 0.25;
         const pin = (this.pins[task] || []).indexOf(id + ":" + model);
         if (pin >= 0) score += 1 - pin * 0.05;            // measured winners first
         if (lang === "he" && this.pins.he) {               // measured: some fast models answer Hebrew with gibberish or in Arabic
@@ -252,6 +284,40 @@ export class Gateway {
     return out.slice(0, limit);
   }
 
+  /** The models of one account that have actually answered. null = nothing proven yet (cold start: everything is open).
+   *  Measured: 771 models listed, ~6 answered; trying the rest cost seconds on every request. */
+  pool(id) {
+    const ok = (this.models[id] || []).filter((m) => this.stats.peek(id, m).ok > 0);
+    return ok.length ? new Set(ok) : null;
+  }
+
+  /** Once in a while, give one untried model of a proven account a chance (new models appear; pools must not fossilise). */
+  pickExplore(task) {
+    this.explore = null;
+    if (++this.requests % 15 !== 0) return;
+    const now = Date.now();
+    const options = [];
+    for (const id of this.enabledProviders()) {
+      const p = this.providers[id];
+      if (p.local || p.keyless || this.parked[id]?.until > now || !this.pool(id)) continue;
+      for (const m of this.models[id] || []) {
+        const st = this.stats.peek(id, m);
+        if (!st.ok && !st.fail && !NOT_CHAT.test(m)) options.push({ provider: id, model: m, q: priorFor(m)[task] ?? 0 });
+      }
+    }
+    options.sort((a, b) => b.q - a.q);
+    if (options.length) this.explore = options[0];
+  }
+
+  /** Read rate-limit headers (Groq, OpenRouter and others send them) so the next request can avoid an exhausted account. */
+  noteLimits(id, headers) {
+    const g = (n) => headers?.get?.(n);
+    const rem = g("x-ratelimit-remaining-requests") ?? g("x-ratelimit-remaining");
+    if (rem == null) return;
+    const reset = g("x-ratelimit-reset-requests") ?? g("x-ratelimit-reset");
+    this.limits[id] = { remaining: Number(rem), resetAt: Date.now() + parseResetMs(reset) };
+  }
+
   /**
    * Routed chat completion with failover.
    * req: OpenAI-style { messages, tools?, temperature?, max_tokens?, response_format? }
@@ -262,6 +328,7 @@ export class Gateway {
     const t0 = Date.now();
     if (!Object.keys(this.models).length) await this.refreshModels();
     const task = opt.task || classify(req.messages);
+    this.pickExplore(task);
     let list = this.candidates(task, { needTools: !!req.tools?.length, needVision: hasImages(req.messages),
                                        privateData: opt.privateData, exclude: opt.exclude, families: opt.families,
                                        lang: /[\u0590-\u05FF]/.test(lastUserText(req.messages)) ? "he" : "" });
@@ -303,6 +370,7 @@ export class Gateway {
   }
 
   async _call(c, req, opt, onDelta) {
+    this.calls = (this.calls || 0) + 1;
     const p = this.providers[c.provider];
     const body = { model: c.model, messages: req.messages, stream: true };
     for (const k of ["temperature", "top_p", "max_tokens", "tools", "tool_choice", "response_format", "stop", "seed"]) {
@@ -330,6 +398,7 @@ export class Gateway {
       clearTimeout(firstTimer);
       const txt = (await res.text().catch(() => "")).slice(0, 300);
       const ra = Number(res.headers.get?.("retry-after")) || 0;
+      this.noteLimits(c.provider, res.headers);
       if (res.status === 402 || BILLING_RX.test(txt)) {
         // the account itself has no credit: park the whole provider instead of trying its models one by one
         this.parked[c.provider] = { until: Date.now() + 6 * 3600e3, reason: "no credit or balance on this account" };
@@ -345,6 +414,7 @@ export class Gateway {
       else this.stats.failure(c.provider, c.model, txt, 20000);
       throw new Error(`HTTP ${res.status} ${txt}`);
     }
+    this.noteLimits(c.provider, res.headers);
     let content = "", ttft = 0, usage = null, finish = null;
     const tool = {}; // index -> {id, name, arguments}
     const ct = res.headers.get?.("content-type") || "";

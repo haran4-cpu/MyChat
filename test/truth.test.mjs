@@ -143,10 +143,10 @@ test("Dawid–Skene: learns which model is reliable, even from unlabelled votes"
 test("auto mode hands factual questions to the Truth Engine and leaves chit-chat alone", async () => {
   const { g, calls } = world({ draft: () => "1889.", extract: () => claim({ oppose: [] }), judge: () => JSON.stringify({ verdict: "supported", source: 1, quote: "completed in March 1889" }), synth: () => "1889 [1]." });
   const r1 = await run(g, { messages: Q }, { mode: "auto", truth: { search: wikiSearch(), ledger: new Ledger() } });
-  assert.equal(r1.mode, "verified");
+  assert.equal(r1.mode, "checked");                                    // factual question: instant answer + check
   const before = calls.length;
   const r2 = await run(g, { messages: [{ role: "user", content: "hi" }] }, { mode: "auto", truth: { search: wikiSearch(), ledger: new Ledger() } });
-  assert.notEqual(r2.mode, "verified");
+  assert.ok(!["verified", "checked"].includes(r2.mode));
   assert.equal(calls.length - before, 1);
 });
 
@@ -193,4 +193,32 @@ test("premise check: a title no encyclopedia page connects to the named author m
   const real = { wikipedia: async () => [{ title: "Hamlet", text: "Hamlet is a tragedy by William Shakespeare." }], evidence: async () => [] };
   await verifiedAnswer(gw, { messages: [{ role: "user", content: "Summarise Shakespeare's play 'Hamlet'." }] }, { search: real, drafts: 1 });
   assert.ok(!seenSystem.some((s) => s.startsWith("Premise check")));
+});
+
+test("checked answer: streams at once, one batched judgement, corrects only what is wrong, few calls", async () => {
+  const { checkedAnswer } = await import("../core/truth.mjs");
+  const seen = { roles: [], streamed: [] };
+  const fetchImpl = async (url, init = {}) => {
+    if (url.endsWith("/models")) return new Response(JSON.stringify({ data: [{ id: "z-ai/glm-5.3" }, { id: "moonshotai/kimi-k2.6" }] }), { status: 200 });
+    const b = JSON.parse(init.body);
+    const sys = b.messages[0].role === "system" ? b.messages[0].content : "";
+    const role = sys.includes("You are a meticulous fact auditor. You receive a question and one answer") ? "extract"
+      : sys.includes("several claims against evidence") ? "judge" : sys.includes("final answer for the user") ? "synth" : "draft";
+    seen.roles.push(role);
+    const out = { draft: "It was completed in 1899.",
+      extract: JSON.stringify({ claims: [{ text: "The Eiffel Tower was completed in 1899.", type: "date", importance: 3, query: "Eiffel Tower completed" }] }),
+      judge: JSON.stringify({ verdicts: [{ claim: 1, verdict: "refuted", source: 1, quote: "completed in March 1889", correction: "It was completed in March 1889." }] }),
+      synth: "The Eiffel Tower was completed in March 1889 [1]." }[role];
+    return new Response("data: " + JSON.stringify({ choices: [{ delta: { content: out } }] }) + "\n\ndata: [DONE]\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+  };
+  const g = new Gateway({ keys: { p: "k" }, allowKeyless: false, fetch: fetchImpl, extraProviders: { p: { name: "p", baseUrl: "http://fake/v1" } } });
+  for (const id of Object.keys(g.providers)) if (id !== "p") delete g.providers[id];
+  const r = await checkedAnswer(g, { messages: Q }, { search: wikiSearch(), ledger: new Ledger(), onDelta: (t) => seen.streamed.push(t) });
+  assert.equal(seen.streamed[0], "It was completed in 1899.");                         // the person sees the answer first
+  assert.deepEqual(seen.roles, ["draft", "extract", "judge", "synth"]);                // 4 calls, 1 judgement for all claims
+  assert.equal(r.claims[0].status, "refuted");
+  assert.match(r.content, /Correction:.*1899.*→.*March 1889/);
+  assert.match(r.content, /Corrected answer:[\s\S]*March 1889 \[1\]/);
+  assert.match(r.content, /Checked: 1 claims · 0 proven · 1 corrected/);
+  assert.equal(r.calls, 4);
 });

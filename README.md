@@ -46,3 +46,14 @@ State (keys, token, stats) lives in `%APPDATA%\MyChat`.
 in Open WebUI's model list, the gateway is started automatically on first use, and **MyChat · Accounts & keys** shows
 every provider, a "Sign in with Google → OpenRouter" link that returns to the chat, and a dialog for pasting keys.
 A message that is only an API key is connected, never sent to a model.
+
+## Runs by itself (supervisor)
+
+`pc/supervisor.mjs` keeps Ollama, Open WebUI, the MyChat gateway and Kestrel running: it starts what is down, checks
+health every 20 s, restarts with back-off, and reloads MyChat/Kestrel when their code changes (Kestrel only when idle).
+The Open WebUI function starts it on first use. Status: http://127.0.0.1:11510/status, also in "MyChat · Accounts".
+`/update` in that chat installs the newest commit from this repo **only if its CI passed**, verifies every file and
+backs up what it replaces. Settings, keys, state and logs are never touched.
+
+Repo layout: `core/` engine (shared by PC and phone) · `pc/` gateway, supervisor, benchmark · `openwebui/` function ·
+`app/` Android · `kestrel/` PC agent (Python) · `docs/` sign-in return page.

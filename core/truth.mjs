@@ -118,7 +118,7 @@ export async function verifiedAnswer(gw, req, o = {}) {
 
   // 1. independent drafts from different families
   status("Independent drafts from different model families…");
-  const pool = gw.candidates(classify(req.messages) === "fast" ? "chat" : classify(req.messages), { privateData: o.privateData, limit: 30 });
+  const pool = gw.candidates(classify(req.messages) === "fast" ? "chat" : classify(req.messages), { privateData: o.privateData, limit: 30, diverse: true });
   const picks = [];
   for (const c of pool) if (!picks.some((p) => p.family === c.family)) { picks.push(c); if (picks.length === (o.drafts || 2)) break; }
   const drafts = (await Promise.allSettled((picks.length ? picks : [null]).map((c) =>
@@ -128,7 +128,7 @@ export async function verifiedAnswer(gw, req, o = {}) {
   drafts.forEach((d, i) => trace.push({ step: `draft ${i + 1}`, by: `${d.provider}:${d.model}` }));
   const draftModel = drafts.map((d) => `${d.provider}:${d.model}`);
   const used = new Set(drafts.map((d) => family(d.model)));
-  const other = (task) => gw.candidates(task, { privateData: o.privateData }).find((c) => !used.has(c.family));
+  const other = (task) => gw.candidates(task, { privateData: o.privateData, diverse: true }).find((c) => !used.has(c.family));
 
   // 2. claim ledger for this answer
   status("Extracting claims…");
@@ -257,4 +257,129 @@ export async function verifiedAnswer(gw, req, o = {}) {
   content += footer;
   o.onDelta?.(content);
   return { content, provider: best.provider, model: best.model, task: tri.kind, mode: "verified", trace, claims: settled, sources, slop: lint(content).score };
+}
+
+// ============================================================================ checked answers (instant + background check)
+// Measured 2026-11-20: full Verified = 93.8% on the hard set but ~11.5 s and 8–15 model calls per question, and it pushed
+// Groq into rate limits. Here the person reads the answer from the first second; the check runs right after it with
+// ~3 calls: one claim extraction, ONE batched judgement against evidence fetched in parallel, and a correction only
+// when something was actually wrong.
+
+const JUDGE_BATCH_SYS = `You check several claims against evidence excerpts from web pages. Use ONLY the excerpts, not your memory.
+Reply with JSON only: {"verdicts":[{"claim":<claim number>,"verdict":"supported"|"refuted"|"insufficient","source":<excerpt number>,"quote":"<exact words copied from that excerpt>","correction":"<the correct statement if refuted>"}]}
+"supported"/"refuted" need a quote copied character-for-character from the excerpt. If the excerpts do not settle a claim, say "insufficient".`;
+
+const EXTRACT_ONE_SYS = `You are a meticulous fact auditor. You receive a question and one answer.
+List the checkable factual claims in the answer (names, dates, numbers, places, quantities, causal facts). Skip opinions, advice and filler.
+Reply with JSON only: {"claims":[{"text":"<one self-contained claim>","type":"fact"|"date"|"number"|"math"|"name"|"opinion","importance":1-3,"query":"<short web search query that would confirm or refute it>","expr":"<arithmetic expression if type is math, else omit>","value":<number if math>}]}
+At most 6 claims, most important first.`;
+
+export async function checkedAnswer(gw, req, o = {}) {
+  const status = o.onStatus || (() => {});
+  const onDelta = o.onDelta || (() => {});
+  const q = lastUserText(req.messages);
+  const trace = [];
+  if (!Object.keys(gw.models).length) await gw.refreshModels();
+  const call = (r, extra = {}) => gw.chat(r, { signal: o.signal, privateData: o.privateData, ...extra });
+  const calls0 = gw.calls || 0;
+
+  // evidence for the question itself starts now, while the answer is being written (no model call)
+  const evidenceP = o.search && !o.privateData ? o.search.evidence(q).catch(() => []) : Promise.resolve([]);
+
+  // premise check for a quoted title (wiki lookup only), as in verifiedAnswer
+  let draftReq = req;
+  const title = /(?:^|[^\p{L}])['"“”«»‘’`״]([^'"“”«»‘’`״]{3,60})['"“”«»‘’`״](?!\p{L})/u.exec(q)?.[1];
+  if (title && o.search && !o.privateData) {
+    try {
+      const hits = await o.search.wikipedia(title, 3);
+      const phrase = norm(title);
+      const names = (q.replace(title, " ").match(/\b[A-Z][a-z]{2,}/g) || []).map((n) => norm(n).replace(/s$/, "")).filter((n) => !/^(what|who|when|where|which|how|the|summarise|summarize|tell|explain|describe|write)$/.test(n));
+      if (!hits.some((h) => { const t = norm(h.title + " " + (h.text || "")); return t.includes(phrase) && names.every((n) => t.includes(n)); })) {
+        trace.push({ step: "premise check", title, found: false });
+        draftReq = { ...req, messages: [{ role: "system", content: `Premise check: no encyclopedia entry mentions "${title}". It may not exist, or may be misattributed. ` +
+          "If you do not know it for certain, say plainly that you cannot find such a work and do not describe its content." }, ...req.messages] };
+      }
+    } catch { /* draft normally */ }
+  }
+
+  // 1. the answer, streamed to the person immediately
+  const draft = await call(draftReq, { onDelta });
+  trace.push({ step: "answer", by: `${draft.provider}:${draft.model}` });
+  let content = draft.content;
+
+  // 2. claims in that answer
+  status("Checking the facts in this answer…");
+  let claims = [];
+  try {
+    const ex = await call({ temperature: 0, messages: [{ role: "system", content: EXTRACT_ONE_SYS },
+      { role: "user", content: `QUESTION:\n${q}\n\nANSWER:\n${content}` }] }, { task: "fast", exclude: [`${draft.provider}:${draft.model}`] });
+    claims = (parseJson(ex.content)?.claims || []).filter((c) => c && c.text && c.type !== "opinion").slice(0, 6);
+    trace.push({ step: "claims", by: `${ex.provider}:${ex.model}`, n: claims.length });
+  } catch (e) { trace.push({ step: "claim extraction failed", error: String(e.message).slice(0, 120) }); }
+
+  const settled = claims.map((c) => ({ ...c, status: "unchecked" }));
+  const sources = [];
+  const srcIndex = (url, t) => { let i = sources.findIndex((s) => s.url === url); if (i < 0) { sources.push({ url, title: t }); i = sources.length - 1; } return i + 1; };
+
+  // 3a. memory and exact arithmetic (no model calls)
+  for (const s of settled) {
+    const known = o.ledger?.lookup(s.text);
+    if (known) { s.status = known.verdict; s.how = "memory"; continue; }
+    if (s.type === "math" && s.expr && s.value !== undefined) {
+      try { const v = evaluate(String(s.expr)); s.status = approxEqual(v, s.value) ? "supported" : "refuted"; s.how = "exact arithmetic";
+            if (s.status === "refuted") s.correction = `${s.expr} = ${v.toString(6)}`; } catch { /* not plain arithmetic */ }
+    }
+  }
+
+  // 3b. one batched judgement against evidence: the question's evidence plus a search per claim that still needs it
+  const open = settled.map((s, i) => ({ s, i })).filter(({ s }) => s.status === "unchecked");
+  if (open.length && o.search && !o.privateData) {
+    let results = await evidenceP;
+    const extra = await Promise.all(open.slice(0, 3).filter(({ s }) => s.query).map(({ s }) => o.search.evidence(s.query).catch(() => [])));
+    results = [...results, ...extra.flat()].filter((r, k, a) => r.url && a.findIndex((x) => x.url === r.url) === k).slice(0, 6);
+    const ev = excerpts(results, open.map(({ s }) => s.query || s.text).join(" "), 1600);
+    if (ev.length) {
+      try {
+        const jr = await call({ temperature: 0, messages: [{ role: "system", content: JUDGE_BATCH_SYS }, { role: "user", content:
+          "CLAIMS:\n" + open.map(({ s }, k) => `${k + 1}. ${s.text}`).join("\n") + "\n\n" +
+          ev.map((e, k) => `EXCERPT ${k + 1} (${e.url}):\n${e.text}`).join("\n\n") }] },
+          { task: "reason", exclude: [`${draft.provider}:${draft.model}`] });
+        for (const v of parseJson(jr.content)?.verdicts || []) {
+          const item = open[(Number(v.claim) || 0) - 1], src = ev[(Number(v.source) || 1) - 1];
+          if (!item || !src || !["supported", "refuted"].includes(v.verdict)) continue;
+          if (!v.quote || !quoteFound(v.quote, src.text)) { item.s.note = "quote not found on the page"; continue; }   // invented quotes prove nothing
+          Object.assign(item.s, { status: v.verdict, how: "evidence", quote: v.quote, src: srcIndex(src.url, src.title) });
+          if (v.verdict === "refuted") item.s.correction = v.correction || "";
+        }
+        trace.push({ step: "judged", by: `${jr.provider}:${jr.model}`, excerpts: ev.length });
+      } catch (e) { trace.push({ step: "judging failed", error: String(e.message).slice(0, 120) }); }
+    }
+  }
+  for (const s of settled) if (s.how === "evidence" || s.how === "exact arithmetic")
+    o.ledger?.record({ text: s.text, verdict: s.status, supporters: [`${draft.provider}:${draft.model}`], opposers: [], domain: s.type === "math" ? "math" : "fact" });
+
+  // 4. corrections only when something was wrong: a short corrected answer, streamed after the original
+  const wrong = settled.filter((s) => s.status === "refuted");
+  if (wrong.length) {
+    status("Correcting…");
+    const fix = wrong.map((s) => `> ↻ **Correction:** ${s.text} → ${s.correction || "not supported by the source"}${s.src ? ` [${s.src}]` : ""}`).join("\n");
+    let add = "\n\n" + fix;
+    try {
+      const table = settled.map((s, i) => `${i + 1}. [${s.status.toUpperCase()}] ${s.text}${s.correction ? " → CORRECTION: " + s.correction : ""}`).join("\n");
+      const syn = await call({ temperature: 0.2, messages: [{ role: "system", content: SYNTH_SYS },
+        { role: "user", content: `QUESTION:\n${q}\n\nAUDITED CLAIMS:\n${table}\n\nSOURCES:\n${sources.map((s, i) => `[${i + 1}] ${s.title || ""} ${s.url}`).join("\n")}\n\nORIGINAL ANSWER (contains errors listed above):\n${content}` }] },
+        { task: "reason" });
+      add += "\n\n**Corrected answer:**\n\n" + syn.content;
+      trace.push({ step: "corrected", by: `${syn.provider}:${syn.model}` });
+    } catch { /* the correction lines alone are still shown */ }
+    onDelta(add);
+    content += add;
+  }
+  const n = (st) => settled.filter((s) => s.status === st).length;
+  const footer = settled.length
+    ? `\n\n---\n*Checked: ${settled.length} claims · ${n("supported")} proven · ${n("refuted")} corrected · ${settled.length - n("supported") - n("refuted")} unverified*` +
+      (sources.length ? "\n" + sources.map((s, i) => `[${i + 1}] ${s.url}`).join("\n") : "")
+    : "";
+  if (footer) { onDelta(footer); content += footer; }
+  return { content, provider: draft.provider, model: draft.model, mode: "checked", trace, claims: settled, sources, calls: (gw.calls || 0) - calls0 };
 }

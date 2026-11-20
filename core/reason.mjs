@@ -9,11 +9,11 @@
 //  consensus  3 drafts from 3 different families in parallel, then an aggregator that sees all of them and
 //             their disagreements (mixture-of-agents + self-consistency). For facts, math, decisions.
 import { classify, family, lastUserText } from "./router.mjs";
-import { verifiedAnswer, triage } from "./truth.mjs";
+import { verifiedAnswer, checkedAnswer, triage } from "./truth.mjs";
 
 export const MODES = {
   fast: "Fastest capable model",
-  auto: "Best model for the task, automatic failover",
+  auto: "Best model for the task; factual answers stream at once and are checked right after",
   max: "Draft, cross-family review, revise (code and analysis)",
   consensus: "Three model families answer, an aggregator reconciles them",
   verified: "Truth Engine: claims checked against evidence, exact math and independent models",
@@ -49,8 +49,12 @@ export async function run(gw, req, o = {}) {
   if (!Object.keys(gw.models).length) await gw.refreshModels();  // strategies pick models before the first call
 
   // Truth Engine: always in "verified"; automatically in "auto"/"max" for factual, current and numeric questions.
-  if (!req.tools?.length && (mode === "verified" || ((mode === "auto" || mode === "max") && o.truth && triage(req.messages).verify))) {
-    return verifiedAnswer(gw, req, { ...(o.truth || {}), onStatus: o.onStatus, onDelta: o.onDelta, signal: o.signal, privateData: o.privateData });
+  const tOpt = { ...(o.truth || {}), onStatus: o.onStatus, onDelta: o.onDelta, signal: o.signal, privateData: o.privateData };
+  // Verified: the full audit (several drafts, every claim judged). Auto/Max on a factual question: the answer streams at
+  // once and is checked right after it (measured on the hard set: same accuracy goal, ~3 calls instead of 8–15).
+  if (!req.tools?.length && mode === "verified") return verifiedAnswer(gw, req, tOpt);
+  if (!req.tools?.length && (mode === "auto" || mode === "max" || mode === "checked") && o.truth && (mode === "checked" || triage(req.messages).verify)) {
+    return checkedAnswer(gw, req, tOpt);
   }
   // Tool calls and very short chit-chat need one direct pass: orchestration would only add latency.
   if (mode === "fast" || req.tools?.length || (mode !== "consensus" && task === "fast")) {
@@ -67,7 +71,7 @@ export async function run(gw, req, o = {}) {
     const draft = await gw.chat(req, { task, signal: o.signal, privateData: o.privateData });
     trace.push({ step: "draft", by: `${draft.provider}:${draft.model}` });
     const fam = family(draft.model);
-    const reviewers = gw.candidates(task, { privateData: o.privateData }).filter((c) => c.family !== fam);
+    const reviewers = gw.candidates(task, { privateData: o.privateData, diverse: true }).filter((c) => c.family !== fam);
     if (!reviewers.length) {
       o.onDelta?.(draft.content);
       trace.push({ step: "review skipped: no second model family available" });
@@ -100,7 +104,7 @@ export async function run(gw, req, o = {}) {
 
   // consensus
   status("Asking three model families…");
-  const pool = gw.candidates(task === "fast" ? "chat" : task, { privateData: o.privateData, limit: 30 });
+  const pool = gw.candidates(task === "fast" ? "chat" : task, { privateData: o.privateData, limit: 30, diverse: true });
   const picks = [];
   for (const c of pool) if (!picks.some((p) => p.family === c.family)) { picks.push(c); if (picks.length === 3) break; }
   if (picks.length < 2) {
@@ -115,8 +119,8 @@ export async function run(gw, req, o = {}) {
   if (!drafts.length) throw new Error("all proposers failed");
   status(`Reconciling ${drafts.length} answers…`);
   const used = new Set(drafts.map((d) => family(d.model)));
-  const agg = gw.candidates("reason", { privateData: o.privateData }).find((c) => !used.has(c.family)) ||
-              gw.candidates("reason", { privateData: o.privateData })[0];
+  const agg = gw.candidates("reason", { privateData: o.privateData, diverse: true }).find((c) => !used.has(c.family)) ||
+              gw.candidates("reason", { privateData: o.privateData, diverse: true })[0];
   const r = await gw.chat({ messages: [{ role: "system", content: AGG_SYS },
     { role: "user", content: `QUESTION:\n${lastUserText(req.messages)}\n\n` +
       drafts.map((d, i) => `ANSWER ${i + 1} (${d.model}):\n${d.content}`).join("\n\n")}] },

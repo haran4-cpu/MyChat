@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kestrel</title>
+<style>
+:root{--bg:#0f1218;--panel:#161b24;--panel2:#1c2330;--line:#273041;--text:#e6e9ef;--dim:#8b95a7;--acc:#e08a3c;--ok:#4caf7d;--bad:#e05d5d;--warn:#d9a441;--blue:#5b8def}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--text);font:14px/1.5 "Segoe UI",system-ui,Arial,sans-serif;display:grid;grid-template-columns:300px 1fr;grid-template-rows:100%}
+aside{background:var(--panel);border-right:1px solid var(--line);overflow:auto;padding:14px}
+main{display:grid;grid-template-rows:auto 1fr auto;min-width:0}
+h1{font-size:18px;margin:0 0 2px;letter-spacing:.5px}h1 span{color:var(--acc)}
+h2{font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim);margin:18px 0 8px}
+.small{font-size:12px;color:var(--dim)}
+.pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:11px;border:1px solid var(--line);margin:2px 2px 0 0}
+.pill.ok{border-color:var(--ok);color:var(--ok)}.pill.bad{border-color:var(--bad);color:var(--bad)}.pill.warn{border-color:var(--warn);color:var(--warn)}
+button{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:6px 11px;cursor:pointer;font:inherit}
+button:hover{border-color:var(--acc)}button.pri{background:var(--acc);border-color:var(--acc);color:#111;font-weight:600}
+button.danger{border-color:var(--bad);color:var(--bad)}
+input,select,textarea{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:6px 8px;font:inherit;width:100%}
+textarea{resize:vertical}
+header{padding:10px 18px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+#log{overflow:auto;padding:18px 18px 8px}
+.msg{max-width:900px;margin:0 auto 14px;padding:10px 14px;border-radius:10px;white-space:pre-wrap;word-wrap:break-word;unicode-bidi:plaintext}
+.msg.user{background:var(--panel2);border:1px solid var(--line)}
+.msg.bot{background:transparent;border-left:3px solid var(--acc)}
+.msg.sys{color:var(--dim);font-size:12px;border:1px dashed var(--line)}
+.tool{max-width:900px;margin:0 auto 6px;font:12px/1.4 Consolas,monospace;color:var(--dim)}
+.tool details{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:4px 8px}
+.tool summary{cursor:pointer}.tool .ok{color:var(--ok)}.tool .bad{color:var(--bad)}
+.tool pre{white-space:pre-wrap;margin:6px 0 2px;max-height:300px;overflow:auto}
+.think{max-width:900px;margin:0 auto 8px;color:#6f7a8d;font-size:12px;font-style:italic;white-space:pre-wrap;max-height:120px;overflow:auto}
+.appr{max-width:900px;margin:0 auto 14px;border:1px solid var(--warn);background:#2a2415;border-radius:10px;padding:12px}
+.appr pre{background:var(--bg);padding:8px;border-radius:6px;max-height:260px;overflow:auto;white-space:pre-wrap;font:12px Consolas,monospace}
+.appr .row{display:flex;gap:8px;margin-top:8px}
+footer{border-top:1px solid var(--line);padding:12px 18px;display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end}
+#inp{min-height:52px;max-height:240px;unicode-bidi:plaintext}
+.step{font-size:12px;padding:3px 0;border-bottom:1px solid var(--line)}
+.step b{display:inline-block;width:18px}
+.mitem{cursor:pointer;padding:5px 6px;border-radius:6px;font-size:12px}.mitem:hover{background:var(--panel2)}
+.root{display:flex;justify-content:space-between;gap:6px;font-size:12px;padding:3px 0;word-break:break-all}
+.root button{padding:0 6px;font-size:11px}
+a{color:var(--blue)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+#busy{display:none}#busy.on{display:inline-block}
+.spinner{width:12px;height:12px;border:2px solid var(--line);border-top-color:var(--acc);border-radius:50%;display:inline-block;animation:s 1s linear infinite;vertical-align:-2px}
+@keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<aside>
+  <h1>KES<span>TREL</span></h1>
+  <div class="small">local engineering agent</div>
+  <div id="st" style="margin-top:8px"></div>
+
+  <h2>Mission (long task)</h2>
+  <textarea id="goal" rows="3" placeholder="Describe a long task. Kestrel plans it, runs each step, checks every file, and can resume after a restart."></textarea>
+  <div style="margin-top:6px;display:flex;gap:6px"><button class="pri" onclick="startMission()">Start mission</button></div>
+  <div id="mission" style="margin-top:8px"></div>
+  <div id="missions" style="margin-top:6px"></div>
+
+  <h2>Approved folders</h2>
+  <div id="roots"></div>
+  <div class="grid2" style="margin-top:6px"><input id="newroot" placeholder="C:\path\to\folder" style="grid-column:1/3">
+  <select id="newmode"><option value="read">read only</option><option value="write">read + write</option></select>
+  <button onclick="addRoot()">Approve</button></div>
+
+  <h2>Settings</h2>
+  <label class="small">File writes</label><select id="ap_write"><option value="ask">ask me each time</option><option value="auto">automatic</option></select>
+  <label class="small">Commands</label><select id="ap_command"><option value="ask">ask me each time</option><option value="auto">automatic</option></select>
+  <label class="small">New folder access</label><select id="ap_new_folder_access"><option value="ask">ask me</option><option value="auto">automatic</option></select>
+  <label class="small"><input type="checkbox" id="think" style="width:auto"> Think before each action (slower, more careful)</label>
+  <h2>Online mode</h2>
+  <label class="small"><input type="checkbox" id="on_enabled" style="width:auto"> Use an online model for planning and review</label>
+  <select id="on_backend"><option value="ollama-cloud">Ollama cloud (model:cloud)</option><option value="anthropic">Anthropic API</option><option value="openai-compatible">OpenAI-compatible API</option></select>
+  <input id="on_model" placeholder="model name, e.g. glm-5.3-flash:cloud" style="margin-top:4px">
+  <input id="on_base" placeholder="base URL (OpenAI-compatible only)" style="margin-top:4px">
+  <input id="on_keyenv" placeholder="API key environment variable" style="margin-top:4px">
+  <label class="small"><input type="checkbox" id="on_web" style="width:auto"> Allow web_fetch tool</label>
+  <div style="margin-top:6px"><button onclick="saveSettings()">Save settings</button></div>
+
+  <h2>Accountability</h2>
+  <button onclick="audit()">Verify action log</button>
+  <div id="audit" class="small" style="margin-top:6px"></div>
+</aside>
+
+<main>
+  <header>
+    <button onclick="newChat()">New chat</button>
+    <button class="danger" onclick="stopAll()">Stop</button>
+    <span id="busy"><span class="spinner"></span> <span id="busytxt" class="small">working</span></span>
+    <span id="speed" class="small" style="margin-left:auto"></span>
+  </header>
+  <div id="log"></div>
+  <footer>
+    <textarea id="inp" placeholder="Ask Kestrel to read, build, fix or create files...  (Enter = send, Shift+Enter = new line)"></textarea>
+    <button class="pri" onclick="send()">Send</button>
+  </footer>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const log=$('log');
+let cur=null, think=null, lastSeq=0;
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function atBottom(){return log.scrollHeight-log.scrollTop-log.clientHeight<80}
+function add(html,cls){const st=atBottom();const d=document.createElement('div');if(cls)d.className=cls;d.innerHTML=html;log.appendChild(d);if(st)log.scrollTop=log.scrollHeight;return d}
+function linkify(t){return esc(t).replace(/((?:[A-Za-z]:\\|\/)[^\s"'<>|*?]+\.(?:docx|xlsx|pptx|pdf|html|md|txt|csv|json|py|js|ts|zip))/g,p=>`<a href="/api/file?path=${encodeURIComponent(p.replace(/&amp;/g,'&'))}" target="_blank">${p}</a>`)}
+async function api(p,b){const r=await fetch(p,b?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}:{});return r.json()}
+
+function onEvent(ev){
+  if(ev.seq<=lastSeq)return; lastSeq=ev.seq;
+  const d=ev.data;
+  switch(ev.kind){
+    case 'token':
+      if(d.kind==='thinking'){if(!think)think=add('','think');think.textContent+=d.text;think.scrollTop=think.scrollHeight}
+      else{if(!cur)cur=add('','msg bot');cur.textContent+=d.text;if(atBottom())log.scrollTop=log.scrollHeight}
+      break;
+    case 'tool_call':cur=null;think=null;
+      add(`<details><summary>&rarr; ${esc(d.name)} <span class="small">${esc(Object.entries(d.args).map(([k,v])=>k+'='+String(v).slice(0,80)).join('  '))}</span></summary><pre>${esc(JSON.stringify(d.args,null,1))}</pre></details>`,'tool');break;
+    case 'tool_result':{const t=log.querySelectorAll('.tool');const last=t[t.length-1];
+      if(last){const s=last.querySelector('summary');s.innerHTML+=` <span class="${d.ok?'ok':'bad'}">${d.ok?'✓':'✗'}</span>`;last.querySelector('details').insertAdjacentHTML('beforeend',`<pre>${linkify(d.result)}</pre>`)}break}
+    case 'answer':
+      if(cur&&cur.textContent.trim()===String(d.text).trim()){cur.innerHTML=linkify(d.text)}
+      else if(d.text){add(linkify(d.text),'msg bot')}
+      if(d.finished&&d.finished.files&&d.finished.files.length)add('Files: '+d.finished.files.map(f=>linkify(f)).join('<br>'),'msg sys');
+      cur=null;think=null;break;
+    case 'approval':showApproval(d);break;
+    case 'approval_done':{const e=document.getElementById('ap_'+d.id);if(e){e.querySelector('.row').innerHTML=`<span class="small">decision: ${esc(d.decision)}</span>`;e.style.opacity=.6}break}
+    case 'llm':$('speed').textContent=`${d.model} · ${d.prompt_tokens} in / ${d.output_tokens} out · ${d.seconds}s`+(d.output_tokens&&d.seconds?` · ${(d.output_tokens/d.seconds).toFixed(1)} tok/s`:'');break;
+    case 'busy':$('busy').classList.toggle('on',d.busy);if(!d.busy)refresh();break;
+    case 'error':add('Error: '+esc(d.message),'msg sys');break;
+    case 'compacted':add(`(older history summarized to keep the model fast: ${d.removed} messages)`,'msg sys');break;
+    case 'mission':showMission(d);break;
+  }
+}
+function showApproval(d){
+  if(document.getElementById('ap_'+d.id))return;
+  const det=d.detail||{};const prev=det.preview?`<pre>${esc(det.preview)}</pre>`:'';
+  const cmd=det.command?`<pre>${esc(det.command)}</pre>`:'';
+  const el=add(`<b>Approval needed · ${esc(d.kind)}</b><div>${esc(d.summary)}</div>${cmd}${prev}
+   <div class="row"><button class="pri" onclick="decide('${d.id}','allow')">Allow</button>
+   <button onclick="decide('${d.id}','allow_always')">Allow all ${esc(d.kind)} this session</button>
+   <button class="danger" onclick="decide('${d.id}','deny')">Deny</button></div>`,'appr');el.id='ap_'+d.id;
+  log.scrollTop=log.scrollHeight;
+}
+async function decide(id,dec){await api('/api/approve',{id,decision:dec})}
+function showMission(m){
+  const icon={done:'✓',blocked:'!',running:'▶',pending:'·'};
+  $('mission').innerHTML=`<div class="small"><b>${esc(m.status)}</b> · ${esc(m.goal.slice(0,90))}</div>`+
+    m.steps.map((s,i)=>`<div class="step" title="${esc(s.summary||s.deliverable||'')}"><b>${icon[s.status]||'·'}</b>${i+1}. ${esc(s.title)}${s.attempts>1?` <span class="small">(try ${s.attempts})</span>`:''}</div>`).join('')+
+    (m.status==='paused'||m.status==='error'||m.status==='done_with_blocks'?`<button style="margin-top:6px" onclick="resume('${m.id}')">Resume</button>`:'')+
+    (m.files&&m.files.length?'<div class="small" style="margin-top:6px">'+m.files.slice(-8).map(linkify).join('<br>')+'</div>':'');
+  if(m.status==='running'||m.status==='planning')$('busy').classList.add('on');
+}
+async function resume(id){const r=await api('/api/mission/resume',{id});if(!r.ok)alert(r.error)}
+async function startMission(){const g=$('goal').value.trim();if(!g)return;const r=await api('/api/mission/start',{goal:g});if(!r.ok)alert(r.error);else{$('goal').value='';add('Mission started: '+esc(g),'msg sys')}}
+async function send(){const t=$('inp').value.trim();if(!t)return;const r=await api('/api/chat',{text:t});if(!r.ok){alert(r.error);return}add(esc(t),'msg user');$('inp').value='';cur=null}
+$('inp').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
+async function newChat(){await api('/api/new',{});log.innerHTML='';add('New chat started.','msg sys')}
+async function stopAll(){await api('/api/stop',{})}
+async function addRoot(){const r=await api('/api/roots',{path:$('newroot').value,mode:$('newmode').value});if(!r.ok)alert(r.error);$('newroot').value='';refresh()}
+async function rmRoot(p){await api('/api/roots',{path:p,action:'remove'});refresh()}
+async function saveSettings(){await api('/api/settings',{approvals:{write:$('ap_write').value,command:$('ap_command').value,new_folder_access:$('ap_new_folder_access').value},
+  think_when_acting:$('think').checked,online:{enabled:$('on_enabled').checked,backend:$('on_backend').value,model:$('on_model').value,base_url:$('on_base').value,api_key_env:$('on_keyenv').value,allow_web_fetch:$('on_web').checked}});
+  add('Settings saved.','msg sys');refresh()}
+async function audit(){const r=await api('/api/audit');$('audit').innerHTML=`<span class="pill ${r.ok?'ok':'bad'}">${r.ok?'intact':'TAMPERED'}</span> ${r.entries} entries · ${esc(r.message)}`}
+async function refresh(){
+  const s=await api('/api/status');
+  $('st').innerHTML=`<span class="pill ${s.ollama?'ok':'bad'}">Ollama ${s.ollama?'connected':'offline'}</span><span class="pill ${s.online?'warn':''}">${s.online?'online mode':'offline mode'}</span><span class="pill">${s.skills} playbooks</span>`+
+    `<div class="small" style="margin-top:6px">agent: ${esc(s.models.agent)}<br>fast: ${esc(s.models.fast)}<br>deep: ${esc(s.models.deep)}</div>`;
+  $('roots').innerHTML=s.roots.map((r,i)=>`<div class="root"><span>${esc(r.path)} <span class="pill">${r.mode}</span></span>${i?`<button onclick='rmRoot(${JSON.stringify(r.path)})'>x</button>`:''}</div>`).join('');
+  $('missions').innerHTML=s.missions.map(m=>`<div class="mitem" onclick="loadMission('${m.id}')">${esc(m.status)} · ${m.progress} · ${esc(m.goal.slice(0,60))}</div>`).join('');
+  for(const k of ['write','command','new_folder_access'])$('ap_'+k).value=s.approvals[k];
+  $('busy').classList.toggle('on',s.busy);
+  s.pending.forEach(showApproval);
+}
+async function loadMission(id){const m=await api('/api/mission?id='+encodeURIComponent(id));if(m.id)showMission(m)}
+function connect(){
+  const es=new EventSource('/api/events');
+  es.onmessage=e=>onEvent(JSON.parse(e.data));
+  es.onerror=()=>{es.close();setTimeout(connect,2000)};
+}
+(async()=>{await refresh();const h=await api('/api/history');h.forEach(onEvent);connect();
+  if(!log.children.length)add('Hi. I work on your computer through approved folders only. Ask me to read, build, fix or create files (Word, Excel, PowerPoint, PDF, code...). For long tasks use Mission on the left.','msg sys')})();
+</script>
+</body>
+</html>

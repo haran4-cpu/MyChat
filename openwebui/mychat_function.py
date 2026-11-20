@@ -1,7 +1,7 @@
 """
 title: MyChat
 author: MyChat (multi-model gateway)
-version: 1.2.0
+version: 1.3.0
 required_open_webui_version: 0.6.0
 description: MyChat inside Open WebUI. Cloud and local models combined per task (Auto, Max, Consensus, Verified/Truth Engine, Fast, Private). Starts the MyChat gateway on this PC by itself; accounts and keys are managed from the "MyChat · Accounts" model without leaving Open WebUI.
 """
@@ -127,11 +127,39 @@ class Pipe:
             if not await self._healthy(client):
                 return
 
+    async def _supervisor(self, client) -> Optional[dict]:
+        try:
+            r = await client.get("http://127.0.0.1:11510/status", timeout=1.5)
+            return r.json() if r.status_code == 200 else None
+        except Exception:
+            return None
+
+    def _start_supervisor(self) -> bool:
+        """The supervisor keeps Ollama, Open WebUI, the gateway and Kestrel running and reloads them on new code."""
+        sup = Path(self.valves.MYCHAT_DIR) / "pc" / "supervisor.mjs"
+        node = self._node()
+        if not (sup.exists() and node):
+            return False
+        home = self._home()
+        home.mkdir(parents=True, exist_ok=True)
+        log = open(home / "supervisor-console.log", "ab")
+        flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
+        subprocess.Popen([node, str(sup)], cwd=str(sup.parent.parent), stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                         creationflags=flags, close_fds=True)
+        return True
+
     async def _ensure(self, client: httpx.AsyncClient, emitter=None) -> str:
         """Returns "" when the gateway is up, otherwise a message for the person."""
+        if self.valves.AUTO_START and await self._supervisor(client) is None and self._start_supervisor():
+            await self._status(emitter, "Starting MyChat services…")
+            for _ in range(60):                      # the supervisor starts the gateway within a few seconds
+                await asyncio.sleep(0.25)
+                if await self._healthy(client):
+                    return ""
         h = await self._health(client)
         if h is not None:
-            await self._reload_if_updated(client, h, emitter)
+            if await self._supervisor(client) is None:   # the supervisor reloads on new code; without it, do it here
+                await self._reload_if_updated(client, h, emitter)
         if await self._healthy(client):
             return ""
         if not self.valves.AUTO_START:
@@ -205,6 +233,16 @@ class Pipe:
         free = [p.get("name", k) for k, p in prov.items() if p.get("keyless") and p.get("models")]
         if free:
             out += ["", "Working now without any key: " + ", ".join(free) + "."]
+        sup = await self._supervisor(client)
+        if sup:
+            out += ["", "**Services on this PC** (kept running by the MyChat supervisor)", "",
+                    "| Service | State |", "|---|---|"]
+            for sv in sup.get("services", []):
+                st = "✓ running" if sv.get("up") else ("✗ " + sv["lastError"] if sv.get("lastError") else "starting…")
+                if sv.get("pendingReload"):
+                    st += " · update waiting until it is idle"
+                out.append(f"| {sv.get('name')} | {st} |")
+            out += ["", "Type **/update** here to install the latest tested version from GitHub (backup first)."]
         out += ["", "**To add a key, paste it as a message in this chat** (several at once is fine). It is checked live, stored only "
                 "on this PC, and never sent to a model."]
         return "\n".join(out)
@@ -230,6 +268,23 @@ class Pipe:
             # a message that is only API keys connects them; it is never forwarded to a model
             if KEY_RX.search(last) and ONLY_TOKENS.match(last) or (model == "accounts" and ONLY_TOKENS.match(last)):
                 yield await self._paste(client, token, last)
+                return
+            if last.strip().lower() in ("/update", "/update check"):
+                try:
+                    r = await client.post("http://127.0.0.1:11510/update" + ("?check=1" if "check" in last.lower() else ""),
+                                          headers={"Authorization": "Bearer " + token}, timeout=180)
+                    u = r.json()
+                except Exception as e:
+                    u = {"error": str(e)}
+                if u.get("error"):
+                    yield f"✗ Update not installed: {u['error']}"
+                elif not u.get("changed"):
+                    yield f"✓ Already up to date (commit {u.get('commit', '')[:7]})."
+                else:
+                    verb = "installed" if u.get("installed") else "available"
+                    yield (f"✓ Update {verb}: commit {u['commit'][:7]}, {len(u['changed'])} files.\n\n" +
+                           "\n".join("- " + c for c in u["changed"][:30]) +
+                           ("\n\nServices reload by themselves (Kestrel waits until it is idle). Backup: `" + u.get("backup", "") + "`" if u.get("installed") else ""))
                 return
             if model == "accounts" or last.strip().lower() in ("/keys", "/accounts", "/connect"):
                 yield await self._accounts_table(client, token)
