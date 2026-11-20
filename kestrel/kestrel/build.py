@@ -305,6 +305,8 @@ class BuildEngine:
         self.use_tests = bool(b.get("acceptance_tests", True))
         self.tests: list = []
         self.judged: set = set()
+        self.fail_runs: dict[str, int] = {}   # test name -> how many fresh attempts failed it
+        self.multi_judged: set[str] = set()
         self.think_plan = bool(b.get("think_plan", True))
         self.think_fix = bool(b.get("think_fix", True))
         self.role = b.get("role", "agent")
@@ -755,6 +757,23 @@ class BuildEngine:
                     self.progress(f"Wrote {len(self.tests)} acceptance tests from the requirements: " +
                                   "; ".join(t["name"] for t in self.tests[:8]))
                     rep = self.verify(code, spec, f"c{cand + 1}r0t")
+            # A test that EVERY independently written attempt fails the same way is more likely wrong than all the code.
+            # Measured 2026-11-20 (snake, cloud brain): 3 fresh programs, 9 repairs, all stuck on one canvas test.
+            # The judge (who never sees the code) re-decides with that evidence.
+            failed_now = {t["name"]: t for t in rep.tests_failed}
+            for n in failed_now:
+                self.fail_runs[n] = self.fail_runs.get(n, 0) + 1
+            if cand >= 1:
+                suspects = [n for n in failed_now if self.fail_runs.get(n, 0) >= cand + 1 and n not in self.multi_judged]
+                if suspects:
+                    self.multi_judged.update(suspects)
+                    self.judged -= set(suspects)
+                    before = len(self.tests)
+                    self.arbitrate([{"name": n, "reason": f"It failed the same way on {cand + 1} independently written programs "
+                                     f"(last failure: {failed_now[n].get('msg', '')[:200]}). Check whether the test can be met at all."}
+                                    for n in suspects], rep)
+                    if len(self.tests) < before:
+                        rep = self.verify(code, spec, f"c{cand + 1}r0j")
             consider(code, rep, f"c{cand + 1}r0")
             self.learn(rep)
             self.progress(self._line(rep, f"Attempt {cand + 1}, run 1"))

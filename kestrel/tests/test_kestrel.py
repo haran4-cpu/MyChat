@@ -837,6 +837,26 @@ class AcceptanceTests(unittest.TestCase):
         self.assertTrue(judge)
         self.assertNotIn("n += 1", json.dumps(judge[0]["messages"]))
 
+    def test_a_test_every_fresh_attempt_fails_goes_to_the_judge(self):
+        """Measured 2026-11-20 (snake): three independently written programs all failed one canvas test; the repairs
+        chased it for 5 minutes. Identical failure across fresh attempts now sends the test to the judge by itself."""
+        wrong = {"tests": [{"name": "plus adds five", "requirement": "Clicking + increases the count by exactly 1",
+                            "steps": [{"do": "click", "target": "#inc"}, {"do": "expect", "target": "#count", "text_matches": "^5$"}]}]}
+        good = COUNTER.replace("n += 2", "n += 1")
+        FAKE.script += [{"content": json.dumps(COUNTER_SPEC)}, {"content": "```html\n" + good + "```"}, {"content": json.dumps(wrong)},
+                        {"content": "```html\n" + good.replace("<title>c</title>", "<title>c2</title>") + "```"},
+                        {"content": json.dumps({"verdict": "test_is_wrong", "reason": "requirement says 1, test expects 5"})},
+                        {"content": json.dumps({"defects": []})}]             # no tests left: the review pass runs instead
+        eng = self._engine(max_candidates=2, max_repairs=0)
+        res = eng.run("a counter")
+        log = "\n".join(res["log"])
+        self.assertIn("dropped", log)
+        self.assertEqual(eng.tests, [])
+        judge = [r for r in FAKE.requests if "independently written programs" in json.dumps(r["messages"])]
+        self.assertTrue(judge)
+        self.assertNotIn("n += 1", json.dumps(judge[0]["messages"]))     # the judge still never sees the code
+        self.assertTrue(res["ok"])
+
     def test_judge_disagreeing_keeps_the_test(self):
         claim = {"diagnosis": "nothing to fix", "edits": [], "wrong_tests": [{"name": "plus adds one", "reason": "I think it is fine"}]}
         FAKE.script += [{"content": json.dumps(COUNTER_SPEC)}, {"content": "```html\n" + COUNTER + "```"},
