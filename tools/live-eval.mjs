@@ -34,6 +34,7 @@ for (const [p, t] of Object.entries(files)) { await fs.mkdir(path.dirname(path.j
 const wfs = nodeFs(root);
 const tools = { search, evaluate: (e) => evaluate(e).toString(12) };
 
+const leaks = (t) => /"(final|thought|tool)"\s*:/.test(String(t));   // raw protocol JSON must never reach the person
 async function task(name, fn) {
   if (only.length && !only.includes(name)) return;
   const t0 = Date.now();
@@ -72,14 +73,14 @@ await task("access", async () => {
   const r = await runAgent(gw, { goal: "יש לך גישה לקבצים של הפרויקט שלי? מה יש בו?", fs: wfs, maxSteps: 8, ...tools });
   const denies = /(אין לי גישה|don'?t have access|no access|cannot access|can'?t access)/i.test(r.answer);
   const knows = /demo-app|demo-shop/i.test(r.answer) && /(cart|auth|users)\.js|cart|users/i.test(r.answer);
-  return { pass: !denies && knows, score: (denies ? 0 : 0.5) + (knows ? 0.5 : 0), by: r.by, detail: `steps: ${r.steps.map((s) => s.tool).join(",")}\n${r.answer.slice(0, 600)}` };
+  return { pass: !denies && knows && !leaks(r.answer), score: (denies ? 0 : 0.5) + (knows ? 0.5 : 0), by: r.by, detail: `steps: ${r.steps.map((s) => s.tool).join(",")}\n${r.answer.slice(0, 600)}` };
 });
 
 await task("review", async () => {
   const r = await runAgent(gw, { goal: "Review the project in Projects/demo-app like a senior engineer. List the real bugs, most serious first, each with path:line and the fix.", fs: wfs, maxSteps: 12, ...tools });
   const found = BUGS.filter(([, rx]) => rx.test(r.answer));
   const c = await citedOk(r.answer);
-  return { pass: found.length >= 2 && c.bad === 0, score: found.length / BUGS.length, by: r.by,
+  return { pass: found.length >= 2 && c.bad === 0 && !leaks(r.answer), score: found.length / BUGS.length, by: r.by,
     detail: `found ${found.length}/3: ${found.map((b) => b[0]).join("; ")} · citations ${c.cites} (${c.bad} wrong) · steps: ${r.steps.map((s) => s.tool).join(",")}\n${r.answer.slice(0, 900)}` };
 });
 

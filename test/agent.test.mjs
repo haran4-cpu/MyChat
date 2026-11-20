@@ -183,3 +183,13 @@ test("workspace map says what each project is and where its code is; the agent s
   assert.match(gw.seen[2].messages.at(-1).content, /already ran exactly this/);
   assert.equal(r.steps.length, 1);
 });
+
+test("loose JSON from models: raw newlines, code blocks inside the answer, text around it", async () => {
+  const { parseJsonLoose } = await import("../core/json.mjs");
+  const ans = "## Review\n\n```js\nconst a = 1;\n```\n\nDone.";
+  const raw = `I have read all files.\n{"thought":"ok","final":"${ans}"}`;
+  assert.equal(parseJsonLoose(raw).final, ans);
+  assert.equal(parseJsonLoose('```json\n{"tool":"read","args":{"path":"a.md"}}\n```').tool, "read");
+  assert.equal(parseJsonLoose('{"thought":"x","final":"line1\\nline2 with \\"quote\\"", "ops": [ {"op": "mkdir"').final, 'line1\nline2 with "quote"');
+  assert.equal(parseJsonLoose("plain text"), null);
+});

@@ -3,6 +3,7 @@
 //   3. show every change (diffs) and wait for approval, 4. apply only what was approved,
 //   5. keep a journal so every applied plan can be undone.
 // Nothing is ever deleted: "delete" moves the item into .mychat-trash/<plan id>/ inside the same folder.
+import { parseJsonLoose } from "./json.mjs";
 // The same code runs on the PC gateway (Node fs) and in the phone app (Capacitor Filesystem); each passes a small
 // fs adapter: { list(rel) -> [{name, dir, size}], read(rel) -> string|null, write(rel, text), mkdir(rel),
 //               move(from, to), exists(rel) -> bool, rmdirEmpty(rel) }.
@@ -241,14 +242,7 @@ function subFs(fs, base) {
   return { list: (r) => fs.list(j(r)), read: (r) => fs.read(j(r)), exists: (r) => fs.exists(j(r)) };
 }
 
-function parseJson(t) {
-  const s = String(t || "").replace(/^[\s\S]*?```(?:json)?\s*/i, (m) => (m.includes("```") ? "" : m)).replace(/```[\s\S]*$/, "");
-  for (const cand of [s, String(t || "")]) {
-    const a = cand.indexOf("{"), b = cand.lastIndexOf("}");
-    if (a >= 0 && b > a) { try { return JSON.parse(cand.slice(a, b + 1)); } catch { /* next */ } }
-  }
-  return null;
-}
+const parseJson = parseJsonLoose;
 
 /** Validate the model's ops: safe paths, known ops, sizes. Returns { ops, rejected }. */
 export function checkOps(raw) {

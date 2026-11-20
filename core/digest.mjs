@@ -1,3 +1,4 @@
+import { parseJsonLoose } from "./json.mjs";
 // Reading more than fits in one model call: a whole project, a big archive, many attachments.
 // How strong agents do it (sub-agents / map-reduce): split into parts, let several models read the parts in parallel,
 // each returning notes WITH exact quotes, then CHECK every quote against the real file (a note whose quote is not in
@@ -60,11 +61,7 @@ const REDUCE_SYS = `You write the final answer from verified notes taken from th
 Use only these notes and summaries; do not invent files, code or problems that are not in them. Cite places as path:line.
 Be concrete and direct like a senior engineer: what matters most first, why it matters, and the specific fix. Answer in the language of the question.`;
 
-function parseJson(t) {
-  const s = String(t || ""), a = s.indexOf("{"), b = s.lastIndexOf("}");
-  if (a < 0 || b <= a) return null;
-  try { return JSON.parse(s.slice(a, b + 1)); } catch { return null; }
-}
+const parseJson = parseJsonLoose;
 const squash = (s) => String(s).replace(/\s+/g, " ").trim();
 
 /** Check a note's quote against the real file. Returns the line where it was found, or 0. */
