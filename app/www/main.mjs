@@ -1,5 +1,5 @@
 // MyChat for Android — UI. All model work is done by ./engine.mjs (the same core as the PC gateway).
-import { init, state, ask, setKey, settings, saveSettings, smartFetch } from "./engine.mjs";
+import { init, state, ask, setKey, settings, saveSettings, smartFetch, brain, pcLink } from "./engine.mjs";
 import { detectKeys, validateKey, identifyPlainKey, pkcePair, openRouterAuthUrl, openRouterExchange, CONNECT, SEARCH_KEYS, exportKeys, importKeys, transferCode, BUNDLE_PREFIX } from "./core/accounts.mjs";
 import { SEARCH_PROVIDERS, Search } from "./core/search.mjs";
 import { agentView, filesView, hostTools } from "./agentui.mjs";
@@ -161,8 +161,17 @@ async function filesContext(items, question, onStatus, signal) {
   const total = files.reduce((n, f) => n + f.text.length, 0);
   if (!files.length) return { inline: items.some((x) => x.kind !== "image") ? "\n\n(The attached files are not text and could not be read.)" : "" };
   if (total <= 60000) return { inline: "\n\nATTACHED FILES:\n" + files.map((f) => `===== ${f.path} =====\n${f.text}`).join("\n\n") };
-  return { study: await study(state.gw, { question, files, onStatus, signal }) };
+  const gw = await brain();
+  return { study: await study(gw, { question, files, onStatus, signal, ...(gw.remote ? { concurrency: 4 } : {}) }) };
 }
+
+// Long tasks keep running with the screen off: a foreground service (Android) while they run, "Answer ready" when done.
+const keepAlive = {
+  on: false,
+  async start(text) { const K = plugin("KeepAlive"); if (!K || this.on) return; try { await K.start({ text }); this.on = true; } catch { /* still runs in the foreground */ } },
+  async end(text) { const K = plugin("KeepAlive"); if (!K || !this.on) return; this.on = false; try { await K.done({ text, notify: document.visibilityState === "hidden" }); } catch { /* ignore */ } },
+};
+const modelKeys = () => Object.keys(state.keys).filter((k) => state.gw.providers[k] && !state.gw.providers[k].keyless);
 
 async function send(text) {
   if (running) { running.abort(); return; }
@@ -182,6 +191,8 @@ async function send(text) {
   $("#sendBtn").classList.add("stop"); $("#sendBtn").setAttribute("aria-label", "Stop");
   let acc = "", raf = 0;
   const t0 = Date.now();
+  if (files.length || ["max", "verified", "consensus"].includes(mode)) keepAlive.start(files.length ? "Reading your files…" : "Thinking…");
+  const noKeys = !modelKeys().length;
   try {
     const apiMsgs = current.messages.map(({ role, content, files: fl }) => ({ role, content: fl?.length ? content + `\n(attached: ${fl.join(", ")})` : content }));
     if (files.length) {
@@ -189,7 +200,8 @@ async function send(text) {
       const ctx = await filesContext(files, text, (t) => (status.textContent = t), running.signal);
       if (ctx.study) {
         const s2 = ctx.study;
-        current.messages.push({ role: "assistant", content: s2.answer + `\n\n---\n*Read ${s2.read} files in ${s2.parts} part(s) by several models · ${s2.notes.length} findings checked against the code · ${s2.dropped} unproven dropped${s2.skipped.length ? ` · ${s2.skipped.length} not read` : ""}*` });
+        current.messages.push({ role: "assistant", content: s2.answer + `\n\n---\n*Read ${s2.read} files in ${s2.parts} part(s) by several models · ${s2.notes.length} findings checked against the code · ${s2.dropped} unproven dropped${s2.unread ? ` · ${s2.unread} part(s) could not be read` : ""}${s2.skipped.length ? ` · ${s2.skipped.length} files not read` : ""}*` +
+          (noKeys ? "\n\n> ⚠ No account is connected on this phone, so this used the free no-key channels (slow, often rate-limited). Connect Google Gemini or Groq in **Accounts** (about a minute) — or link your PC — for much better results." : "") });
         current.meta[current.messages.length - 1] = { mode: "deep read", trace: [{ by: s2.by }], ms: Date.now() - t0 };
         return;
       }
@@ -205,10 +217,12 @@ async function send(text) {
     current.messages.push({ role: "assistant", content: r.content });
     current.meta[current.messages.length - 1] = { mode: r.mode, trace: r.trace, claims: r.claims, sources: r.sources, ms: Date.now() - t0 };
   } catch (e) {
-    const msg = running.signal.aborted ? (acc || "Stopped.") : `${acc ? acc + "\n\n" : ""}**Could not answer:** ${e.message}\n\nCheck **Accounts**: connect at least one provider.`;
+    const msg = running.signal.aborted ? (acc || "Stopped.") : `${acc ? acc + "\n\n" : ""}**Could not answer:** ${e.message}\n\n` +
+      (noKeys ? "No account is connected on this phone — only the free no-key channels were available, and they are busy. Connect Google Gemini or Groq in **Accounts** (about a minute)." : "All connected accounts failed just now (limits or outages). Try again in a minute, or connect one more account in **Accounts**.");
     current.messages.push({ role: "assistant", content: msg });
   } finally {
     running = null; status.hidden = true;
+    keepAlive.end("Your answer is ready");
     $("#sendBtn").classList.remove("stop"); $("#sendBtn").setAttribute("aria-label", "Send");
     saveChats(); renderChat();
   }
@@ -262,8 +276,10 @@ async function pasteKeys(text, out) {
     const code = prompt("Code shown on the other device (XXXX-XXXX-XXXX-XXXX)") || "";
     try {
       const keys = await importKeys(text, code);
-      for (const [k, v] of Object.entries(keys)) await setKey(k, v);
-      out.textContent = `✓ ${Object.keys(keys).length} keys added: ${Object.keys(keys).join(", ")}`;
+      if (keys.__pc) { saveSettings({ ...settings(), pc: keys.__pc }); delete keys.__pc; }
+      for (const [k, v] of Object.entries(keys)) if (!k.startsWith("__")) await setKey(k, v);
+      const linked = state.settings.pc ? await pcLink(true) : null;
+      out.textContent = `✓ ${Object.keys(keys).length} keys added` + (state.settings.pc ? (linked ? " · ✓ your PC is linked" : " · PC paired (not reachable right now — it will be used when it is)") : "");
       setTimeout(() => show("accounts"), 1500);
     } catch (e) { out.textContent = "✗ " + e.message; }
     return;
@@ -347,6 +363,12 @@ function renderAccounts() {
       onclick: () => { if (st[id]?.hasKey) return toast(`${name} is connected`); localStorage.setItem("mychat.keyHunt", JSON.stringify({ id, at: Date.now() })); openExternal(state.gw.providers[id].keyUrl); toast("Copy the key there, then come back here", 5000); } },
       el("b", {}, (st[id]?.hasKey ? "✓ " : "") + name), el("small", {}, note))))));
   pad.append(transferCard());
+  if (state.settings.pc) {
+    const line = el("p", {}, "Checking your PC…");
+    pad.append(el("section", { class: "card" }, el("h3", {}, "Your PC"), line,
+      el("div", { class: "actions" }, el("button", { type: "button", onclick: () => { const s2 = settings(); delete s2.pc; saveSettings(s2); renderAccounts(); } }, "Unpair"))));
+    pcLink(true).then((b) => { line.textContent = b ? `✓ Linked (${b}) — chat, deep reads and the Agent run on your PC with its accounts.` : "Paired, not reachable now (PC off, or not on the same Wi-Fi/Tailscale). The phone answers on its own meanwhile."; });
+  }
 
   const paste = el("section", { class: "card paste" }, el("h3", {}, "Add a key"),
     el("p", {}, "Copy a key on the provider’s site, then paste it here. The provider is recognised and the key is tested. Keys are encrypted on this phone."));
@@ -393,7 +415,7 @@ function renderAccounts() {
 
 
 // ---------------------------------------------------------------- navigation
-let view = "chat", agentPrefill = "";
+let view = "chat", agentPrefill = "", brainNow = null;
 function show(name) {
   view = name;
   for (const v of document.querySelectorAll(".view")) v.hidden = v.id !== "view-" + name;
@@ -403,7 +425,8 @@ function show(name) {
   if (name !== "chat") $("#viewSub").textContent = "";
   if (name === "chat") renderChat();
   if (name === "accounts") renderAccounts();
-  if (name === "agent") { agentView($("#view-agent"), { el, md, toast, gw: () => state.gw, tools: () => hostTools({ search: state.search, fetch: smartFetch }), prefill: agentPrefill }); agentPrefill = ""; }
+  if (name === "agent") brain().then((b) => { brainNow = b.remote ? b : null; });
+  if (name === "agent") { agentView($("#view-agent"), { el, md, toast, gw: () => brainNow || state.gw, tools: () => hostTools({ search: state.search, fetch: smartFetch }), prefill: agentPrefill, keepAlive }); agentPrefill = ""; }
   if (name === "files") filesView($("#view-files"), { el, toast, onAgent: (text) => { agentPrefill = text; show("agent"); },
     onAttach: (rel) => { attached.push({ name: rel.split("/").pop(), path: rel, kind: /\.(zip|apk|jar)$/i.test(rel) ? "folder" : "file" }); renderAttached(); show("chat"); } });
 }

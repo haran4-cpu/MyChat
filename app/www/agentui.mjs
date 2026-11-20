@@ -39,7 +39,7 @@ export function hostTools({ search, fetch: f }) {
 }
 
 // ---------------------------------------------------------------- Agent
-export function agentView(root, { el, md, toast, gw, tools, prefill }) {
+export function agentView(root, { el, md, toast, gw, tools, prefill, keepAlive }) {
   let session = sessions.all()[0] && !prefill ? null : null;   // start fresh; old sessions are one tap away
   let running = null;
   const newSession = () => ({ id: Date.now().toString(36), title: "", at: Date.now(), turns: [] });
@@ -69,6 +69,7 @@ export function agentView(root, { el, md, toast, gw, tools, prefill }) {
       if (running) { running.abort(); return; }
       const text = goal.value.trim(); if (!text) return toast("Write what to do");
       running = new AbortController(); go.textContent = "Stop"; status.hidden = false; status.replaceChildren();
+      keepAlive?.start("The Agent is working…");
       const turn = { goal: text, at: Date.now(), steps: [] };
       try {
         const history = session.turns.flatMap((t) => [{ role: "user", content: t.goal }, { role: "assistant", content: t.answer || "" }]);
@@ -80,7 +81,7 @@ export function agentView(root, { el, md, toast, gw, tools, prefill }) {
       if (!session.title) session.title = text.slice(0, 70);
       session.turns.push(turn); session.at = Date.now();
       if (!sessions.save(session)) toast("Phone storage is full: older tasks were removed");
-      running = null; draw();
+      running = null; keepAlive?.end("The Agent finished: " + text.slice(0, 60)); draw();
     };
     pad.append(el("section", { class: "card" }, goal, el("div", { class: "actions" }, go, el("button", { class: "btn ghost", type: "button", onclick: () => { session = newSession(); draw(); } }, "New task")), status));
     root.append(pad);

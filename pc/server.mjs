@@ -299,6 +299,46 @@ function serveUi(res, name) {
   res.end(data);
 }
 
+// ---------------------------------------------------------------- phone link (off by default)
+// The phone can use this PC — its accounts, local models and folders — over the home Wi-Fi or Tailscale. A SEPARATE port
+// that serves only the API, only with the token: no pages, no keys, no settings. Repeated wrong tokens are blocked.
+const LINK_PORT = Number(process.env.MYCHAT_LINK_PORT || 11501);
+const LINK_ROUTES = /^\/(health|status|v1\/chat\/completions|v1\/models|agent\/(roots|tree|plan|apply|undo|history))$/;
+let linkServer = null;
+const strikes = new Map();
+function linkUrls() {
+  const out = [];
+  for (const [name, list] of Object.entries(os.networkInterfaces())) for (const a of list || []) {
+    if (a.family !== "IPv4" || a.internal) continue;
+    out.push({ url: `http://${a.address}:${LINK_PORT}`, via: /^100\./.test(a.address) ? "Tailscale (works anywhere)" : `${name} (home network)` });
+  }
+  return out.sort((a, b) => (a.via.startsWith("Tailscale") ? -1 : 1) - (b.via.startsWith("Tailscale") ? -1 : 1));
+}
+function startPhoneLink() {
+  if (linkServer) return;
+  linkServer = http.createServer((req, res) => {
+    const ip = req.socket.remoteAddress || "?", now = Date.now();
+    const st = strikes.get(ip) || { n: 0, until: 0 };
+    if (st.until > now) return send(res, 429, { error: { message: "too many wrong tokens; try again later" } });
+    const url = new URL(req.url, "http://x");
+    if (!LINK_ROUTES.test(url.pathname)) return send(res, 404, { error: { message: "not available over the phone link" } });
+    const auth = String(req.headers.authorization || "");
+    const ok = auth.length === ("Bearer " + token).length && crypto.timingSafeEqual(Buffer.from(auth), Buffer.from("Bearer " + token));
+    if (!ok && url.pathname !== "/health") {
+      st.n++; if (st.n >= 10) { st.until = now + 10 * 60e3; st.n = 0; } strikes.set(ip, st);
+      return send(res, 401, { error: { message: "wrong token" } });
+    }
+    req.headers.host = "127.0.0.1";   // passes the local-only guard of the main handler, which checks the token again
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Headers", "authorization, content-type");
+    if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }
+    server.emit("request", req, res);
+  });
+  linkServer.on("error", (e) => { console.error("phone link:", e.message); linkServer = null; });
+  linkServer.listen(LINK_PORT, "0.0.0.0", () => console.log(`phone link on port ${LINK_PORT}`));
+}
+function stopPhoneLink() { linkServer?.close(); linkServer = null; }
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://x");
@@ -384,15 +424,25 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === "POST" && url.pathname === "/connections/export") {
-      const code = transferCode();
-      return send(res, 200, { code, text: await exportKeys(readJson("keys.json", {}), code) });
+      const b = await body(req);
+      const code = transferCode(), payload = { ...readJson("keys.json", {}) };
+      if (b.withPc && settings.phoneLink?.enabled) payload.__pc = { urls: linkUrls().map((u) => u.url), token };
+      return send(res, 200, { code, text: await exportKeys(payload, code) });
+    }
+    if (url.pathname === "/system/phone-link") {
+      if (req.method === "POST") {
+        const b = await body(req);
+        settings.phoneLink = { enabled: !!b.enabled }; writeJson("settings.json", settings);
+        if (b.enabled) startPhoneLink(); else stopPhoneLink();
+      }
+      return send(res, 200, { enabled: !!settings.phoneLink?.enabled, running: !!linkServer, port: LINK_PORT, urls: linkUrls() });
     }
     if (req.method === "POST" && url.pathname === "/connections/paste") {
       const b = await body(req);
       if (String(b.text || "").includes(BUNDLE_PREFIX)) {
         try {
           const got = await importKeys(b.text, String(b.code || ""));
-          for (const [k, v] of Object.entries(got)) saveKey(k, v);
+          for (const [k, v] of Object.entries(got)) if (!k.startsWith("__") && typeof v === "string") saveKey(k, v);
           build(); await gw.refreshModels(true);
           return send(res, 200, { results: Object.keys(got).map((k) => ({ provider: k, name: PROVIDERS[k]?.name || SEARCH_PROVIDERS[k]?.name || k, ok: true, models: 0 })) });
         } catch (e) { return send(res, 200, { results: [], needCode: true, error: e.message }); }
@@ -444,5 +494,6 @@ const server = http.createServer(async (req, res) => {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   server.listen(PORT, "127.0.0.1", () => console.log(`MyChat gateway on http://127.0.0.1:${PORT}  (home: ${HOME})`));
+  if (settings.phoneLink?.enabled) startPhoneLink();
 }
 export { server, HOME, token };

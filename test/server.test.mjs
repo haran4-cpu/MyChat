@@ -23,6 +23,7 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
     extraProviders: { a: { name: "a", baseUrl: mu + "/a" }, b: { name: "b", baseUrl: mu + "/b" } } }));
   fs.writeFileSync(path.join(home, "keys.json"), JSON.stringify({ a: "k", b: "k" }));
   process.env.MYCHAT_HOME = home;
+  process.env.MYCHAT_LINK_PORT = String(20000 + Math.floor(Math.random() * 20000));
   const { server, token } = await import("../pc/server.mjs?t=" + Date.now());
   await new Promise((ok) => server.listen(0, "127.0.0.1", ok));
   const u = `http://127.0.0.1:${server.address().port}`;
@@ -69,5 +70,21 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
   assert.match((await (await fetch(u + "/agent/tree?root=0", { headers: H })).json()).tree, /a\.txt/);
   assert.equal((await fetch(u + "/agent/undo", { method: "POST", headers: H, body: JSON.stringify({ id: "latest" }) })).status, 404);
   assert.equal((await fetch(u + "/agent/tree?root=0")).status, 401, "agent API needs the token");
+  // phone link: off by default; when on, a separate port serves only the API, only with the token
+  const lp = `http://127.0.0.1:${process.env.MYCHAT_LINK_PORT}`;
+  await assert.rejects(fetch(lp + "/health"));
+  const link = await (await fetch(u + "/system/phone-link", { method: "POST", headers: H, body: JSON.stringify({ enabled: true }) })).json();
+  assert.ok(link.enabled);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal((await fetch(lp + "/health")).status, 200);
+  assert.equal((await fetch(lp + "/v1/models")).status, 401);
+  assert.equal((await fetch(lp + "/v1/models", { headers: H })).status, 200);
+  assert.equal((await fetch(lp + "/", { headers: H })).status, 404, "no pages over the link (the page carries the token)");
+  assert.equal((await fetch(lp + "/connections/export", { method: "POST", headers: H, body: "{}" })).status, 404, "no keys over the link");
+  const pair = await (await fetch(u + "/connections/export", { method: "POST", headers: H, body: JSON.stringify({ withPc: true }) })).json();
+  const { importKeys } = await import("../core/accounts.mjs");
+  const got = await importKeys(pair.text, pair.code);
+  assert.equal(got.__pc.token, token);
+  await fetch(u + "/system/phone-link", { method: "POST", headers: H, body: JSON.stringify({ enabled: false }) });
   server.closeAllConnections(); server.close(); mock.closeAllConnections(); mock.close();
 });

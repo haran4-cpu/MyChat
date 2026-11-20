@@ -237,6 +237,21 @@ async function system() {
   v.append(el("h2", {}, "Updates"), el("div", { class: "card stack" },
     el("div", { class: "sub" }, "Installs only versions that passed all tests on GitHub. A backup of every replaced file is kept, and services reload by themselves (Kestrel waits until it is idle)."),
     el("div", { class: "row" }, el("span", { class: "grow" }), check, inst), out));
+  const link = await api("/system/phone-link");
+  const pairOut = el("div", { class: "stack" });
+  const pair = el("button", { class: "btn primary", disabled: !link.enabled, onclick: () => busy(pair, async () => {
+    const r = await api("/connections/export", { withPc: true });
+    pairOut.replaceChildren(el("div", { class: "sub" }, "On the phone: Accounts → Add a key → paste this text → type the code."),
+      el("div", { style: "font:600 22px ui-monospace,Consolas,monospace;letter-spacing:1px" }, r.code),
+      el("textarea", { readonly: true, style: "min-height:60px;font:12px ui-monospace,Consolas,monospace" }, r.text),
+      el("button", { class: "btn small", onclick: async () => { await navigator.clipboard.writeText(r.text); toast("Copied — send it to yourself (WhatsApp / e-mail)"); } }, "Copy"));
+  }) }, "Pair the phone (keys + this PC)");
+  v.append(el("h2", {}, "Phone link"), el("div", { class: "card stack" },
+    el("div", { class: "sub" }, "Lets the phone use this PC: all its accounts, local models and folders, and long tasks keep running here even when the phone sleeps. A separate port that answers only with your token — no pages, no keys. For use outside home, install Tailscale (free) on both PC and phone."),
+    el("label", { class: "row" }, el("span", { class: "grow" }, link.enabled ? (link.running ? `On — port ${link.port}` : "On, but the port is busy") : "Off"),
+      el("input", { type: "checkbox", checked: link.enabled, onchange: async (e) => { await api("/system/phone-link", { enabled: e.target.checked }); toast(e.target.checked ? "Phone link on. If Windows asks, allow Node.js on private networks." : "Phone link off"); system(); } })),
+    link.enabled ? el("div", {}, link.urls.map((u) => el("div", { class: "row" }, el("code", {}, u.url), el("span", { class: "sub" }, u.via)))) : null,
+    pair, pairOut));
   v.append(el("h2", {}, "Phone"), el("div", { class: "card stack" }, el("div", {}, "The Android app is built automatically on every change."),
     el("a", { class: "btn", href: "https://github.com/haran4-cpu/MyChat/releases", target: "_blank", rel: "noopener" }, "Latest APK")));
 }

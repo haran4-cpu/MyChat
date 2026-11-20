@@ -149,3 +149,20 @@ test("PC folder adapter: real files, trash, undo, and nothing outside the folder
 test("a new file's diff shows only added lines", () => {
   assert.deepEqual(lineDiff("", "a\nb"), ["+ a", "+ b"]);
 });
+
+test("study: the same file twice is read once, and a part that fails is retried instead of lost", async () => {
+  const code = "export const a = 1;\n".repeat(50);
+  const files = [{ path: "app/www/main.js", text: code }, { path: "app/MyChat-apk/assets/public/main.js", text: code }, { path: "b.js", text: "let b = 2;\n" }];
+  let failOnce = true;
+  const gw = { async chat(req) {
+    if (req.messages[0].content.startsWith("You read ONE PART")) {
+      if (failOnce) { failOnce = false; throw new Error("All models failed (3 tried)"); }
+      return { provider: "p", model: "m", content: JSON.stringify({ summary: "s", notes: [{ path: "b.js", line: 1, quote: "let b = 2;", note: "n", severity: "low" }] }) };
+    }
+    return { provider: "p", model: "m", content: "final" };
+  } };
+  const r = await study(gw, { question: "q", files, partSize: 100000, retryDelayMs: 1 });
+  assert.equal(r.read, 2, "duplicate skipped");
+  assert.equal(r.unread, 0, "the failed part was retried");
+  assert.equal(r.notes.length, 1);
+});

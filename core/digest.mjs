@@ -10,13 +10,19 @@ const rank = (p) => { const i = PRIORITY.findIndex((rx) => rx.test(p)); return i
 
 /** Pick readable files, most informative first, within a character budget. */
 export function selectFiles(files, budget = 600_000) {
-  const ok = files.filter((f) => typeof f.text === "string" && !SKIP_PATH.test(f.path) && !/^.{4000,}$/m.test(f.text.slice(0, 20000)));
+  const seen = new Map(), dupes = [];
+  const ok = files.filter((f) => typeof f.text === "string" && !SKIP_PATH.test(f.path) && !/^.{4000,}$/m.test(f.text.slice(0, 20000)))
+    .filter((f) => {   // the same file twice (an app ZIP that also holds its APK) is read once
+      const k = f.text.length + ":" + f.text.slice(0, 200) + f.text.slice(-200);
+      if (seen.has(k) && seen.get(k) === f.text) { dupes.push(f.path); return false; }
+      seen.set(k, f.text); return true;
+    });
   ok.sort((a, b) => rank(a.path) - rank(b.path) || a.text.length - b.text.length);
   const picked = [], skipped = [];
   let used = 0;
   for (const f of ok) { if (used + f.text.length > budget) { skipped.push(f.path); continue; } picked.push(f); used += f.text.length; }
-  const filtered = files.filter((f) => !ok.includes(f)).map((f) => f.path);
-  return { picked, skipped: [...skipped, ...filtered], chars: used };
+  const filtered = files.filter((f) => !ok.includes(f) && !dupes.includes(f.path)).map((f) => f.path);
+  return { picked, skipped: [...skipped, ...filtered], chars: used, duplicates: dupes.length };
 }
 
 /** Pack files into parts of at most `size` characters (big files are split by lines, with their line numbers kept). */
@@ -73,6 +79,7 @@ export function verifyQuote(fileText, quote, hintLine = 0) {
   return 0;
 }
 
+const sleep = (ms, signal) => new Promise((ok, bad) => { const t = setTimeout(ok, ms); signal?.addEventListener?.("abort", () => { clearTimeout(t); bad(new Error("stopped")); }); });
 async function pool(items, n, fn) {
   const out = new Array(items.length);
   let k = 0;
@@ -83,23 +90,35 @@ async function pool(items, n, fn) {
 /**
  * study(gw, { question, files:[{path,text}], ... }) -> { answer, notes, dropped, parts, skipped, calls, by }
  */
-export async function study(gw, { question, files, budget = 600_000, partSize = 50_000, concurrency = 3, onStatus = () => {}, signal, privateData = false }) {
+export async function study(gw, { question, files, budget = 600_000, partSize = 50_000, concurrency = 3, retryDelayMs = 20000, onStatus = () => {}, signal, privateData = false }) {
   const { picked, skipped } = selectFiles(files, budget);
   if (!picked.length) return { answer: "None of these files can be read as text.", notes: [], dropped: 0, parts: 0, skipped, calls: 0 };
   const parts = chunk(picked, partSize);
   const byPath = new Map(picked.map((f) => [f.path, f.text]));
   let calls = 0, done = 0;
   onStatus(`Reading ${picked.length} files in ${parts.length} part(s)…`);
-  const results = await pool(parts, concurrency, async (part, i) => {
+  // Free accounts hit rate limits mid-way: a failed part waits and is retried (other models, less parallelism) instead
+  // of being lost. Parts that still fail are named in the answer.
+  let par = concurrency;
+  const readPart = async (part, i) => {
     const body = part.map((p) => `===== ${p.path} (from line ${p.from}) =====\n${numbered(p)}`).join("\n\n");
-    try {
-      calls++;
-      const r = await gw.chat({ temperature: 0.1, messages: [{ role: "system", content: MAP_SYS },
-        { role: "user", content: `QUESTION:\n${question}\n\nPART ${i + 1} of ${parts.length}:\n${body}` }] }, { task: "long", signal, privateData });
-      onStatus(`Read part ${++done} of ${parts.length}…`);
-      return { ...(parseJson(r.content) || { summary: "", notes: [] }), by: `${r.provider}:${r.model}` };
-    } catch (e) { onStatus(`Part ${i + 1} failed: ${e.message.slice(0, 80)}`); return { summary: "", notes: [], error: e.message }; }
-  });
+    calls++;
+    const r = await gw.chat({ temperature: 0.1, messages: [{ role: "system", content: MAP_SYS },
+      { role: "user", content: `QUESTION:\n${question}\n\nPART ${i + 1} of ${parts.length}:\n${body}` }] }, { task: "long", signal, privateData });
+    onStatus(`Read part ${++done} of ${parts.length}…`);
+    return { ...(parseJson(r.content) || { summary: "", notes: [] }), by: `${r.provider}:${r.model}` };
+  };
+  const results = new Array(parts.length);
+  let queue = parts.map((_, i) => i);
+  for (let round = 0; round < 3 && queue.length; round++) {
+    if (round) { onStatus(`Retrying ${queue.length} part(s) in ${round * 20} s (rate limits)…`); await sleep(round * retryDelayMs, signal); par = 1; }
+    const failed = [];
+    await pool(queue, par, async (i) => {
+      try { results[i] = await readPart(parts[i], i); }
+      catch (e) { if (signal?.aborted) throw e; failed.push(i); results[i] = { summary: "", notes: [], error: e.message }; onStatus(`Part ${i + 1} failed (${e.message.slice(0, 60)}); will retry`); }
+    });
+    queue = failed.sort((a, b) => a - b);
+  }
   const notes = [];
   let dropped = 0;
   for (const r of results) for (const n of Array.isArray(r.notes) ? r.notes : []) {
@@ -115,7 +134,8 @@ export async function study(gw, { question, files, budget = 600_000, partSize = 
   const noteText = notes.slice(0, 80).map((n) => `[${n.severity}] ${n.path}:${n.line} — ${n.note}\n    > ${n.quote}`).join("\n");
   calls++;
   const fin = await gw.chat({ temperature: 0.2, messages: [{ role: "system", content: REDUCE_SYS },
-    { role: "user", content: `QUESTION:\n${question}\n\nFILES READ: ${picked.length}${skipped.length ? ` (not read: ${skipped.length}, e.g. ${skipped.slice(0, 5).join(", ")})` : ""}\n\nPART SUMMARIES:\n${summaries}\n\nVERIFIED NOTES (${notes.length}; ${dropped} notes were dropped because their quote was not in the file):\n${noteText || "(none)"}` }] },
+    { role: "user", content: `QUESTION:\n${question}\n\n${results.some((r) => r?.error) ? `NOTE: ${results.filter((r) => r?.error).length} of ${parts.length} parts could not be read (model limits); say so briefly.\n\n` : ""}FILES READ: ${picked.length}${skipped.length ? ` (not read: ${skipped.length}, e.g. ${skipped.slice(0, 5).join(", ")})` : ""}\n\nPART SUMMARIES:\n${summaries}\n\nVERIFIED NOTES (${notes.length}; ${dropped} notes were dropped because their quote was not in the file):\n${noteText || "(none)"}` }] },
     { task: "reason", signal, privateData });
-  return { answer: fin.content, notes, dropped, parts: parts.length, skipped, calls, by: `${fin.provider}:${fin.model}`, read: picked.length };
+  const unread = results.filter((r) => r?.error).length;
+  return { answer: fin.content, notes, dropped, parts: parts.length, unread, skipped, calls, by: `${fin.provider}:${fin.model}`, read: picked.length };
 }

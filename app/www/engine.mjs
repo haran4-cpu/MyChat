@@ -63,7 +63,69 @@ export async function setKey(provider, key) {
   await state.gw.refreshModels(true).catch(() => {});
 }
 
+// ---------------------------------------------------------------- your PC as the brain (phone link)
+// When the PC is paired and reachable (home Wi-Fi or Tailscale), the phone sends the work there: all the PC's accounts,
+// local models and folders. If the PC can't be reached, the phone answers on its own as before.
+let pcCache = { at: 0, base: null };
+export async function pcLink(force = false) {
+  const pc = state.settings.pc;
+  if (!pc?.token || !pc.urls?.length) return null;
+  if (!force && Date.now() - pcCache.at < 60000) return pcCache.base;
+  let base = null;
+  for (const u of pc.urls) {
+    try { const r = await smartFetch(u + "/health", { signal: AbortSignal.timeout(2000) }); if (r.ok) { base = u; break; } } catch { /* next */ }
+  }
+  pcCache = { at: Date.now(), base };
+  return base;
+}
+export function pcGateway(base) {
+  const H = { Authorization: "Bearer " + state.settings.pc.token, "Content-Type": "application/json" };
+  return {
+    remote: true,
+    async chat(req, opt = {}) {
+      const model = opt.privateData ? "mychat/private" : opt.task === "fast" ? "mychat/fast" : "mychat/auto";
+      const r = await smartFetch(base + "/v1/chat/completions", { method: "POST", headers: H, signal: opt.signal,
+        body: JSON.stringify({ model, messages: req.messages, temperature: req.temperature, stream: false }) });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error?.message || "PC: HTTP " + r.status);
+      return { content: j.choices?.[0]?.message?.content || "", provider: "pc", model: `${j.mychat?.provider || "?"}:${j.mychat?.model || "?"}` };
+    },
+  };
+}
+/** The engine for long work: the PC when linked, else this phone. */
+export async function brain() { const b = await pcLink(); return b ? pcGateway(b) : state.gw; }
+
+async function askPc(base, messages, { mode, onDelta, onStatus, signal }) {
+  onStatus?.("On your PC…");
+  const r = await smartFetch(base + "/v1/chat/completions", { method: "POST", signal,
+    headers: { Authorization: "Bearer " + state.settings.pc.token, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "mychat/" + mode, messages, stream: true }) });
+  if (!r.ok) throw new Error("PC: HTTP " + r.status);
+  let content = "", why = "";
+  if (r.body?.getReader) {
+    const rd = r.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await rd.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let k;
+      while ((k = buf.indexOf("\n\n")) >= 0) {
+        const line = buf.slice(0, k).trim(); buf = buf.slice(k + 2);
+        if (!line.startsWith("data:") || line === "data: [DONE]") continue;
+        try { const d = JSON.parse(line.slice(5)).choices?.[0]?.delta || {}; if (d.content) { content += d.content; onDelta?.(d.content); } if (d.reasoning_content) { why += d.reasoning_content; onStatus?.(d.reasoning_content.trim().split("\n").pop()); } } catch { /* partial */ }
+      }
+    }
+  } else { content = await r.text(); onDelta?.(content); }
+  const last = why.trim().split("\n").pop() || "";
+  return { content, mode, trace: [{ step: "pc", by: last.replace(/^\[[^\]]*\]\s*/, "") || "your PC" }] };
+}
+
 export async function ask(messages, { mode = "auto", onDelta, onStatus, signal } = {}) {
+  const base = await pcLink();
+  if (base) {
+    try { return await askPc(base, messages, { mode, onDelta, onStatus, signal }); }
+    catch (e) { if (signal?.aborted) throw e; pcCache = { at: Date.now(), base: null }; onStatus?.("PC not reachable — answering on the phone"); }
+  }
   if (!Object.keys(state.gw.models).length) await state.gw.refreshModels();
   const r = await run(state.gw, { messages }, { mode, onDelta, onStatus, signal, truth: { search: state.search, ledger: state.ledger } });
   try { if (state.gw.stats.toJSON) lsStore("mychat.stats").save(state.gw.stats.toJSON()); } catch { /* not essential */ }
