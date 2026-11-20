@@ -54,7 +54,7 @@ jobs:
           echo "$out"
           echo "$out" | grep -q '\\"code\\":true' && echo "$out" | grep -q '\\"keyInPlaintext\\":false' && echo "$out" | grep -q '\\"messages\\":2'
           echo "$out" | grep -q '\\"agent\\":{\\"ok\\":true' && echo "$out" | grep -q '\\"filesTab\\":true' && echo "$out" | grep -q '\\"agentTab\\":true'
-          echo "$out" | grep -q '\\"unzipped\\":true' && echo "$out" | grep -q '\\"keysMove\\":true' && echo "$out" | grep -q '\\"attachButton\\":true'
+          echo "$out" | grep -q '\\"unzipped\\":true' && echo "$out" | grep -q '\\"keysMove\\":true' && echo "$out" | grep -q '\\"attachButton\\":true' && echo "$out" | grep -q '\\"markdown\\":true'
           rm www/selftest.html
 
       - name: Create the Android project

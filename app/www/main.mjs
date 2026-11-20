@@ -6,6 +6,7 @@ import { agentView, filesView, hostTools } from "./agentui.mjs";
 import { workspace, importFiles } from "./files.mjs";
 import { workspaceReader, apply as applyOps, undo as undoOps } from "./core/agent.mjs";
 import { study } from "./core/digest.mjs";
+import { md } from "./markdown.mjs";
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, attrs = {}, ...kids) => {
@@ -27,23 +28,7 @@ function openExternal(url) { const b = plugin("Browser"); if (b) b.open({ url })
 
 // ---------------------------------------------------------------- markdown (escaped first, then a small safe subset)
 const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-function inline(t) {
-  return esc(t)
-    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
-    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2">$1</a>')
-    .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2">$2</a>');
-}
-export function md(src) {
-  return String(src).split("```").map((part, i) => {
-    if (i % 2) return `<pre><button class="copycode" type="button">Copy</button><code>${esc(part.replace(/^[\w+.-]*\n/, ""))}</code></pre>`;
-    return part.split(/\n{2,}/).filter((p) => p.trim()).map((p) => {
-      const h = /^#{1,4}\s+(.*)$/.exec(p.trim());
-      if (h && !p.trim().includes("\n")) return `<p><b>${inline(h[1])}</b></p>`;
-      return `<p>${p.split("\n").map(inline).join("<br>")}</p>`;
-    }).join("");
-  }).join("");
-}
+export { md };
 
 // ---------------------------------------------------------------- chats (kept on the phone)
 const MODES = [["auto", "Auto"], ["fast", "Fast"], ["max", "Max"], ["verified", "Verified"], ["consensus", "Consensus"]];
@@ -125,7 +110,16 @@ function renderChat() {
   $("#viewSub").textContent = current.title || "";
   if (!current.messages.length) {
     box.append(el("div", { class: "empty" }, el("b", {}, "MyChat"),
-      "Ask anything. Facts and numbers are checked automatically.", el("br"), "שאלו כל דבר. עובדות ומספרים נבדקים אוטומטית."));
+      "Ask anything — about the world or about your own files. Facts, numbers and file references are checked.", el("br"), "שאלו כל דבר — על העולם או על הקבצים שלכם."));
+    if (!Object.keys(state.keys).some((k) => state.gw.providers[k] && !state.gw.providers[k].keyless) && !state.settings.pc) {
+      box.append(el("section", { class: "card hero onboard" }, el("h3", {}, "Make it fast: connect one free account"),
+        el("p", {}, "Without an account MyChat uses slow public channels (answers can take minutes). Sign in with Google on the provider's site, copy the key, come back — it is added automatically."),
+        el("div", { class: "gkeys" }, [["gemini", "Google Gemini", "free · 1 minute"], ["groq", "Groq", "free · very fast"]].map(([id, name, note]) =>
+          el("button", { type: "button", class: "gkey", onclick: () => { localStorage.setItem("mychat.keyHunt", JSON.stringify({ id, at: Date.now() })); openExternal(state.gw.providers[id].keyUrl); toast("Copy the key there, then come back", 5000); } },
+            el("b", {}, name), el("small", {}, note)))),
+        el("div", { class: "actions" }, el("button", { class: "btn white", type: "button", onclick: startOpenRouter }, "Continue with Google (OpenRouter)"),
+          el("button", { class: "btn ghost", type: "button", onclick: () => show("accounts") }, "All options · pair with PC"))));
+    }
     return;
   }
   current.messages.forEach((m, i) => {
@@ -142,8 +136,16 @@ function renderChat() {
       box.append(botBubble(m.content, meta));
       if (meta.steps?.length) box.append(el("details", { class: "steps-box" }, el("summary", {}, `🔧 ${meta.steps.length} steps — looked at your files`), el("div", { class: "steps" }, meta.steps.map((x) => el("div", { class: "step tool" }, x)))));
       if (meta.ops) box.append(chatOps(meta.ops));
+      const plain = m.content.split("\n\n---\n")[0];
+      const vs = meta.versions;
       box.append(el("div", { class: "actions" },
-        el("button", { type: "button", onclick: () => { navigator.clipboard?.writeText(m.content.split("\n\n---\n")[0]).then(() => toast("Copied")); } }, "Copy"),
+        vs?.length > 1 ? el("span", { class: "versions" },
+          el("button", { type: "button", "aria-label": "Previous answer", disabled: meta.vi === 0, onclick: () => showVersion(i, meta.vi - 1) }, "‹"),
+          el("span", {}, `${meta.vi + 1}/${vs.length}`),
+          el("button", { type: "button", "aria-label": "Next answer", disabled: meta.vi === vs.length - 1, onclick: () => showVersion(i, meta.vi + 1) }, "›")) : null,
+        el("button", { type: "button", onclick: () => { navigator.clipboard?.writeText(plain).then(() => toast("Copied")); } }, "Copy"),
+        navigator.share ? el("button", { type: "button", onclick: () => navigator.share({ text: plain }).catch(() => {}) }, "Share") : null,
+        "speechSynthesis" in globalThis ? el("button", { type: "button", onclick: () => speak(plain) }, "Read aloud") : null,
         i === current.messages.length - 1 ? el("button", { type: "button", onclick: retry }, "Try again") : null));
     }
   });
@@ -229,7 +231,8 @@ const keepAlive = {
 };
 const modelKeys = () => Object.keys(state.keys).filter((k) => state.gw.providers[k] && !state.gw.providers[k].keyless);
 
-async function send(text) {
+async function send(text, filesAgain) {
+  if (filesAgain?.length) attached = filesAgain.map((p) => ({ name: p.split("/").pop(), path: p, kind: /\.(zip|apk|jar)$/i.test(p) || !/\.[a-z0-9]{1,6}$/i.test(p) ? "folder" : "file" }));
   if (running) { running.abort(); return; }
   text = text.trim(); if (!text && !attached.length) return;
   if (!text) text = "Look at the attached files and tell me what they are and what stands out.";
@@ -276,9 +279,11 @@ async function send(text) {
     localStorage.removeItem("mychat.pendingJob");
     current.messages.push({ role: "assistant", content: r.content });
     const k = current.messages.length - 1;
+    const versionsBefore = carry; carry = null;
     current.meta[k] = { mode: r.mode, trace: r.trace, claims: r.claims, sources: r.sources, ms: Date.now() - t0,
       ...(steps.length || r.steps?.length ? { steps: steps.length ? steps : r.steps.filter((x) => x.tool).map((x) => `${x.tool} ${JSON.stringify(x.args || {}).slice(0, 100)}`) } : {}) };
     if (r.ops?.length) current.meta[k].ops = { id: r.planId, goal: text, ops: r.ops, preview: r.preview, remote: r.remote || null };
+    if (versionsBefore) { const vs = [...versionsBefore, { content: r.content, meta: { ...current.meta[k] } }]; current.meta[k].versions = vs; current.meta[k].vi = vs.length - 1; }
   } catch (e) {
     const msg = running.signal.aborted ? (acc || "Stopped.") : `${acc ? acc + "\n\n" : ""}**Could not answer:** ${e.message}\n\n` +
       (noKeys ? "No account is connected on this phone — only the free no-key channels were available, and they are busy. Connect Google Gemini or Groq in **Accounts** (about a minute)." : "All connected accounts failed just now (limits or outages). Try again in a minute, or connect one more account in **Accounts**.");
@@ -290,11 +295,27 @@ async function send(text) {
     saveChats(); renderChat();
   }
 }
+// "Try again" keeps every earlier answer: ‹ 1/3 › switches between them.
+let carry = null;
 function retry() {
   const last = current.messages.at(-1);
   if (last?.role !== "assistant") return;
+  const meta = current.meta[current.messages.length - 1] || {};
+  carry = meta.versions || [{ content: last.content, meta: { ...meta, versions: undefined, vi: undefined } }];
   current.messages.pop(); current.meta.length = current.messages.length;
-  const q = current.messages.pop(); send(q.content);
+  const q = current.messages.pop(); send(q.content, q.files);
+}
+function showVersion(i, vi) {
+  const meta = current.meta[i], v = meta.versions[vi];
+  current.messages[i].content = v.content;
+  current.meta[i] = { ...v.meta, versions: meta.versions, vi };
+  saveChats(); renderChat();
+}
+function speak(text) {
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text.replace(/[#*`>|_~-]+/g, " ").slice(0, 4000));
+  u.lang = /[\u0590-\u05FF]/.test(text) ? "he-IL" : "en-US";
+  speechSynthesis.speak(u);
 }
 
 function showChecks(meta) {

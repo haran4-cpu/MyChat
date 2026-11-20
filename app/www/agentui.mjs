@@ -6,6 +6,7 @@ import { evaluate } from "./core/exact.mjs";
 import { htmlToText } from "./core/search.mjs";
 import { isArchiveName, isZip, extractZip } from "./core/zip.mjs";
 import { workspace, importFiles, uniquePath } from "./files.mjs";
+import { md } from "./markdown.mjs";
 
 // ---------------------------------------------------------------- storage (sessions + undo journals), size-capped
 const store = (key, max) => ({
@@ -181,9 +182,18 @@ export function filesView(root, { el, toast, onAgent, onAttach }) {
         toast("Unpacking…");
         try { const r = await extractZip(bytes, fs, to); toast(`✓ ${r.files} files in ${to}`); sheet.hidden = true; cwd = to; draw(); } catch (e) { toast("✗ " + e.message, 5000); }
       } }, "Unpack"));
-      const text = isArchiveName(it.name) ? null : await fs.read(rel);
-      box.replaceChildren(text == null ? el("p", {}, isArchiveName(it.name) ? "An archive. Unpack it to read its files, or ask the Agent — it can read inside archives." : "Not a text file. Open it from the phone's Files app (Documents/MyChat).")
-                                       : el("pre", { class: "diff", dir: "auto" }, text.slice(0, 200000)), actions);
+      let view;
+      if (/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(it.name) && fs.readBytes) {   // images: shown, not described
+        const bytes = await fs.readBytes(rel);
+        const type = /\.svg$/i.test(it.name) ? "image/svg+xml" : "image/" + it.name.split(".").pop().toLowerCase().replace("jpg", "jpeg");
+        view = bytes ? el("img", { class: "filepreview", alt: it.name, src: URL.createObjectURL(new Blob([bytes], { type })) }) : el("p", {}, "Could not open the image.");
+      } else {
+        const text = isArchiveName(it.name) ? null : await fs.read(rel);
+        if (text == null) view = el("p", {}, isArchiveName(it.name) ? "An archive. Unpack it to read its files, or ask in the chat — it can read inside archives." : "Not a text file. Open it from the phone's Files app (Documents/MyChat).");
+        else if (/\.(md|markdown)$/i.test(it.name)) { view = el("div", { class: "msg bot" }); const b = el("div", { class: "body", dir: "auto" }); b.innerHTML = md(text.slice(0, 200000)); view.append(b); }
+        else view = el("pre", { class: "diff", dir: "auto" }, text.slice(0, 200000));
+      }
+      box.replaceChildren(view, actions);
       sheet.hidden = false;
     }
     pad.append(list);

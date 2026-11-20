@@ -161,7 +161,8 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   const mem = memory ? String((await Promise.resolve().then(() => memory.get()).catch(() => "")) || "").slice(-4000) : "";
   // team of models: for real work the strongest available reasoning model writes the plan, the worker follows it
   let planText = "", planBy = "";
-  if (planFirst && goal.length > 30 && !/^(hi|hello|thanks|שלום|תודה)/i.test(goal)) {
+  // planning costs one call: worth it for real work (reviews, changes, many files), not for a quick look-up
+  if (planFirst && (goal.length > 90 || REVIEW_RX.test(goal) || /(refactor|organi[sz]e|rename|move|create|build|fix|improve|migrate|ארגן|סדר|שנה|תקן|בנה|צור|שפר)/i.test(goal))) {
     try {
       onStep({ kind: "status", text: "Planning…" });
       const p = await gw.chat({ temperature: 0.2, messages: [{ role: "system", content: "You plan work for an agent that has file tools (tree, read, search, find, study) over the person's folder. Write 2-5 numbered steps: which projects/files to look at first and how to verify the result. No preamble, no answer to the task itself." },

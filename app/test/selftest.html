@@ -129,6 +129,9 @@ try {
   for (let i = 0; i < 40 && !document.querySelector("#view-agent .goal"); i++) await wait(100);
   agent.agentTab = !!document.querySelector("#view-agent .goal");
   agent.attachButton = !!document.querySelector("#attachBtn");
+  const { md } = await import("./markdown.mjs");
+  const h = md("## T\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n- x\n- y");
+  agent.markdown = /<table>/.test(h) && /<ul><li>x<\/li><li>y<\/li><\/ul>/.test(h) && /<h3/.test(h);
 } catch (e) { agent = { ok: false, error: String(e.stack || e) }; }
 const saved = JSON.parse(localStorage.getItem("mychat.chats") || "[]");
 const vault = localStorage.getItem("mychat.keys.v1") || "";
