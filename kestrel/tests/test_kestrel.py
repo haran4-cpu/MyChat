@@ -1024,3 +1024,15 @@ class CloudJsonTests(unittest.TestCase):
         d = eng.json_call([{"role": "user", "content": "write tests"}], build.TESTS_SCHEMA, think=True, label="tests")
         self.assertEqual(d["tests"][0]["name"], "t1")
         self.assertEqual(calls, [False])     # one call, no separate thinking pass
+
+
+class LoopGuardFalsePositiveTests(unittest.TestCase):
+    def test_a_list_of_similar_tests_is_not_mistaken_for_a_loop(self):
+        """Measured 2026-11-20: cloud-written acceptance tests (12 similar objects) tripped the old guard and were dropped."""
+        from kestrel.build import JsonLoopGuard
+        tests = [{"name": f"Test {i}: Start counts down", "steps": [{"do": "click", "target": "Start"}, {"do": "wait", "ms": 3000},
+                  {"do": "expect", "target": "page", "text_matches": "24:5[0-9]"}]} for i in range(12)]
+        txt = json.dumps({"tests": tests})
+        g = JsonLoopGuard()
+        for i in range(0, len(txt), 17):
+            g.feed("content", txt[i:i + 17])

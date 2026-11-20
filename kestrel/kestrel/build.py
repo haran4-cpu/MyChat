@@ -163,23 +163,25 @@ def _strip_fence(text: str) -> str:
 
 
 class JsonLoopGuard:
-    """JSON answers are often a single long line, so look for the tail repeating at character level."""
+    """A real loop repeats the same block back to back. Templated JSON (lists of similar tests or edits) repeats
+    patterns with small differences and must not be cut off. Detects one block of 20-400 chars repeated 3x in a row."""
 
     def __init__(self, probe: int = 120):
         self.buf = ""
-        self.probe = probe
         self._last = 0
 
     def feed(self, kind: str, text: str):
         if kind != "content":
             return
         self.buf += text
-        if len(self.buf) - self._last < 400 or len(self.buf) < 4 * self.probe:
+        if len(self.buf) - self._last < 200 or len(self.buf) < 60:
             return
         self._last = len(self.buf)
-        tail = self.buf[-self.probe:]
-        if len(set(tail)) > 8 and self.buf[-4000:].count(tail) >= 3:
-            raise Degenerate("repetition loop inside the JSON answer")
+        b = self.buf[-1500:]
+        for p in range(20, min(400, len(b) // 3) + 1):
+            blk = b[-p:]
+            if len(set(blk)) > 4 and b[-2 * p:-p] == blk and b[-3 * p:-2 * p] == blk:
+                raise Degenerate(f"repetition loop inside the JSON answer (a {p}-character block repeated)")
 
 
 def extract_code(text: str, ext: str = "") -> str:
@@ -613,7 +615,8 @@ class BuildEngine:
             saved = self.think_budget
             self.think_budget = min(saved, 1500)
             d = self.json_call(msgs, TESTS_SCHEMA, think=True, label="tests", predict=3000)
-        except LLMError:
+        except LLMError as e:
+            self.progress(f"Acceptance tests could not be written ({str(e)[:160]}); checking without them")
             return []
         finally:
             self.think_budget = saved
@@ -621,6 +624,8 @@ class BuildEngine:
         texts = {(e.get("text") or "").lower() for e in inv if e.get("text")}
         src = code.lower()
         proposed = d.get("tests") or []
+        if not proposed:
+            self.progress("Acceptance tests: the model proposed none (" + (", ".join(d.keys()) or "empty answer")[:80] + ")")
         good, dropped = [], []
 
         def real(tg: str) -> bool:
