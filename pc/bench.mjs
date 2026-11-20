@@ -96,6 +96,7 @@ export class Bench {
     const QS = (truthSet === "basic" ? SET : truthSet === "all" ? [...SET, ...SET_HARD] : SET_HARD).slice(0, truthLimit);
     if (this.state.running) return this.state;
     const st = this.state = { running: true, startedAt: Date.now(), phase: "models", done: 0, total: 0, models: [], truth: null, log: [] };
+    this.stopped = false;
     const gw = this.gw;
     (async () => {
       try {
@@ -109,7 +110,7 @@ export class Bench {
         await Promise.all(Object.values(byProvider).map(async (list) => {
           let kept = 0;
           for (const c of list) {
-            if (kept >= c.keep || gw.parked[c.provider]?.until > Date.now()) break;
+            if (this.stopped || kept >= c.keep || gw.parked[c.provider]?.until > Date.now()) break;
             const row = { provider: c.provider, model: c.model, acc: {}, ms: {}, errors: 0, answers: [] };
             const per = {};
             for (const pr of PROBES) {
@@ -146,6 +147,7 @@ export class Bench {
           st.phase = "truth";
           const rows = [];
           for (const [q, rx, kind] of QS) {
+            if (this.stopped) break;
             for (const mode of modes) {
               const t0 = Date.now(), c0 = gw.calls || 0;
               let text = "", first = 0;
@@ -154,7 +156,7 @@ export class Bench {
               catch (e) { text = "ERROR " + e.message; }
               const body = normAnswer(text.split("\n---\n")[0]);
               const ok = rx.test(body);
-              rows.push({ q, kind, mode, ok, confidentWrong: !ok && !HEDGE.test(body), ms: Date.now() - t0, firstMs: first, calls: (gw.calls || 0) - c0, answer: body.slice(0, 200) });
+              rows.push({ q, kind, mode, ok, error: text.startsWith("ERROR"), confidentWrong: !ok && !HEDGE.test(body), ms: Date.now() - t0, firstMs: first, calls: (gw.calls || 0) - c0, answer: body.slice(0, 200) });
               st.done++;
             }
           }
@@ -167,7 +169,8 @@ export class Bench {
               facts: `${by("fact").filter((x) => x.ok).length}/${by("fact").length}`, avgSeconds: +(r.reduce((a, x) => a + x.ms, 0) / r.length / 1000).toFixed(1),
               firstWordSeconds: +(r.reduce((a, x) => a + (x.firstMs || x.ms), 0) / r.length / 1000).toFixed(1), avgCalls: +(r.reduce((a, x) => a + x.calls, 0) / r.length).toFixed(1) };
           }
-          st.truth = { summary: sum, rows, withEvidence: !!this.truthTools?.search };
+          st.truth = { summary: sum, rows, withEvidence: !!this.truthTools?.search, stopped: this.stopped,
+                       errors: rows.filter((r) => r.error).length };
         }
       } catch (e) {
         st.error = e.message;
@@ -179,4 +182,7 @@ export class Bench {
     })();
     return st;
   }
+
+  /** Stop after the question in progress (a run that hit the daily limits only produces errors). */
+  stop() { this.stopped = true; return this.state; }
 }

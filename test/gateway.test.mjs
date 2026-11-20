@@ -278,3 +278,29 @@ test("a stream that stalls after its first words is cut off and the next model f
     assert.match(gw.stats.peek("s", "stall").lastError, /stalled/);
   } finally { srv.closeAllConnections(); srv.close(); }
 });
+
+test("candidate list keeps at most 3 models per account up front, so a second account is always reached", () => {
+  const gw = new Gateway({ keys: { gemini: "k", groq: "k" }, allowKeyless: false, allowLocal: false });
+  gw.models = { gemini: ["g1", "g2", "g3", "g4", "g5", "g6", "g7", "g8"], groq: ["q1"] };
+  gw.pins = { chat: ["gemini:g1", "gemini:g2", "gemini:g3", "gemini:g4", "gemini:g5", "gemini:g6", "gemini:g7", "gemini:g8"] };
+  const list = gw.candidates("chat");
+  assert.ok(list.slice(0, 4).some((c) => c.provider === "groq"), list.map((c) => c.provider + ":" + c.model).join(","));
+});
+
+test("429 from 3 different models of one account within 2 minutes pauses the account, doubling each time", () => {
+  const gw = new Gateway({ keys: { gemini: "k" }, allowKeyless: false, allowLocal: false });
+  gw.noteQuota("gemini", "a"); gw.noteQuota("gemini", "a"); gw.noteQuota("gemini", "b");
+  assert.ok(!gw.parked.gemini, "same model twice + one other is not enough");
+  gw.noteQuota("gemini", "c");
+  assert.ok(gw.parked.gemini.until - Date.now() > 14 * 60000 && /15 min/.test(gw.parked.gemini.reason));
+  gw.noteQuota("gemini", "d"); gw.noteQuota("gemini", "e"); gw.noteQuota("gemini", "f");
+  assert.match(gw.parked.gemini.reason, /30 min/);
+});
+
+test("image, computer-use and live-audio models are not chat models", async () => {
+  const { NOT_CHAT } = await import("../core/providers.mjs");
+  for (const m of ["gemini-nano-banana-2.1", "nano-banana-pro-preview", "gemini-2.5-computer-use-preview-10-2025", "imagen-4.0", "veo-3.0", "gemini-2.5-flash-native-audio", "gemini-live-2.5-flash-live"])
+    assert.ok(NOT_CHAT.test(m), m);
+  for (const m of ["gemini-3-flash-preview", "gemini-flash-lite-latest", "openai/gpt-oss-120b", "nvidia/nemotron-3-ultra-550b-a55b:free"])
+    assert.ok(!NOT_CHAT.test(m), m);
+});

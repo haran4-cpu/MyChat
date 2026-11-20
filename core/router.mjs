@@ -179,6 +179,8 @@ export class Gateway {
     this.disabled = {};        // provider -> reason (bad key etc.)
     this.parked = {};          // provider -> { until, reason } (no credit / balance): retried after a while, shown on Accounts
     this.limits = {};          // provider -> { remaining, resetAt } from rate-limit headers
+    this.quotaHits = {};       // provider -> [{ model, at }] recent 429s (several models of one account in a row = the account is out)
+    this.quotaStrikes = {};    // provider -> how many times it was paused today (pause doubles: 15 min, 30, 60, 120)
     this.requests = 0;
     this.idleTimeoutMs = o.idleTimeoutMs || 45000;
     this.explore = null;
@@ -282,7 +284,27 @@ export class Gateway {
       }
     }
     out.sort((a, b) => b.score - a.score);
-    return out.slice(0, limit);
+    // Measured 2026-11-20: with one account out of quota, all 8 slots were its models (37 Gemini models listed) and
+    // every request failed before reaching the accounts that still worked. At most 3 per account in the list;
+    // the rest go to other accounts (unless only one account is asked for).
+    const perProvider = {}, first = [], rest = [];
+    for (const c of out) ((perProvider[c.provider] = (perProvider[c.provider] || 0) + 1) <= 3 ? first : rest).push(c);
+    return [...first, ...rest].slice(0, limit);
+  }
+
+  /** A 429 from several different models of one account within 2 minutes means the account (not the model) is out:
+   *  pause the whole account instead of walking through its model list. */
+  noteQuota(id, model) {
+    const now = Date.now();
+    const hits = (this.quotaHits[id] = (this.quotaHits[id] || []).filter((h) => now - h.at < 120000 && h.model !== model));
+    hits.push({ model, at: now });
+    if (hits.length < 3) return;
+    const day = new Date().toISOString().slice(0, 10), st = this.quotaStrikes[id];
+    const n = st?.day === day ? st.n + 1 : 1;
+    this.quotaStrikes[id] = { day, n };
+    const mins = Math.min(120, 15 * 2 ** (n - 1));
+    this.parked[id] = { until: now + mins * 60000, reason: `out of quota on several models — paused ${mins} min` };
+    this.quotaHits[id] = [];
   }
 
   /** The models of one account that have actually answered. null = nothing proven yet (cold start: everything is open).
@@ -409,7 +431,7 @@ export class Gateway {
         this.stats.failure(c.provider, c.model, txt, 3600e3);
       } else if (res.status === 429 && /limit:\s*0\b|free.?tier.{0,40}not|not available on the free/i.test(txt)) {
         this.stats.failure(c.provider, c.model, "not on this plan: " + txt, 24 * 3600e3);   // e.g. Pro models on a free Gemini key
-      } else if (res.status === 429) this.stats.failure(c.provider, c.model, "429 " + txt, Math.max(ra * 1000, 60000));
+      } else if (res.status === 429) { this.stats.failure(c.provider, c.model, "429 " + txt, Math.max(ra * 1000, 60000)); this.noteQuota(c.provider, c.model); }
       else if (res.status === 401 || res.status === 403) { this.disabled[c.provider] = `key rejected (${res.status})`; this.stats.failure(c.provider, c.model, txt); }
       else if (res.status === 404 || res.status === 400) this.stats.failure(c.provider, c.model, txt, 6 * 3600e3); // model gone / unsupported params
       else this.stats.failure(c.provider, c.model, txt, 20000);

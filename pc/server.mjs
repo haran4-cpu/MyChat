@@ -267,6 +267,7 @@ const server = http.createServer(async (req, res) => {
         onPins: (pins) => { if (b.apply !== false) { settings.pins = pins; writeJson("settings.json", settings); gw.pins = pins; } } });
       return send(res, 200, { running: st.running, total: st.total });
     }
+    if (req.method === "POST" && url.pathname === "/bench/stop") return send(res, 200, bench ? bench.stop() : { running: false });
     if (req.method === "GET" && url.pathname === "/diag") return send(res, 200, await search.diagnose());
     if (req.method === "GET" && url.pathname === "/bench") return send(res, 200, bench ? bench.state : { running: false });
     if (req.method === "POST" && url.pathname === "/admin/shutdown") {   // used by the Open WebUI function to reload updated code

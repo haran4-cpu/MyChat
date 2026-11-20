@@ -172,4 +172,4 @@ export function priorFor(model) {
 }
 
 // Models that obviously are not chat models (embeddings, image, audio, guard...) are never routed to.
-export const NOT_CHAT = /(embed|rerank|whisper|tts|speech|audio|image|flux|stable-diffusion|sdxl|guard|moderation|clip|ocr|parse|retriev|vision-encoder|orpheus|playai|voice|transcrib)/i;
+export const NOT_CHAT = /(embed|rerank|whisper|tts|speech|audio|image|flux|stable-diffusion|sdxl|guard|moderation|clip|ocr|parse|retriev|vision-encoder|orpheus|playai|voice|transcrib|nano-banana|computer-use|imagen|veo-|lyria|robotics|native-audio|-live\b|aqa\b)/i;
