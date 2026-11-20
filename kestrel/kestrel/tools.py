@@ -376,6 +376,38 @@ def quick_edit(ctx: Ctx, path, instruction):
     return f"edited {p} with {info}\n{preview}\ncheck: ok"
 
 
+def _proof_cli(*args: str, timeout: int = 150) -> str:
+    """Runs MyChat's proof tools (pc/proof-cli.mjs, next to Kestrel) with Node."""
+    import shutil
+    cli = Path(__file__).resolve().parents[2] / "pc" / "proof-cli.mjs"
+    node = os.environ.get("MYCHAT_NODE") or shutil.which("node")
+    if not cli.exists() or not node:
+        raise ToolError("proof tools not available here (needs MyChat's pc/proof-cli.mjs and Node)")
+    r = subprocess.run([node, str(cli), *args], capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
+    return (r.stdout or "") + (("\n[stderr] " + r.stderr[-800:]) if r.returncode else "")
+
+
+@tool("outline", "A parser-built map of a code file (every function/class/method with exact line ranges, event handlers, "
+      "element ids). Call it FIRST for big files, then read only the ranges you need.", {"path": S("file path")}, ["path"])
+def outline_file(ctx: Ctx, path):
+    p = ctx.guard.check_read(path)
+    if not p.is_file():
+        raise ToolError(f"not found: {p}")
+    ctx.reads = getattr(ctx, "reads", 0) + 1
+    return _proof_cli("outline", str(p))
+
+
+@tool("run_page", "RUN an HTML app in a real headless browser: load errors and every error after pressing each reachable "
+      "button (file:line), plus screenshots. The only way to say whether a page works.",
+      {"path": S("the .html file"), "clicks": S("how many buttons to press (default 25)", "integer")}, ["path"])
+def run_page(ctx: Ctx, path, clicks=25):
+    p = ctx.guard.check_read(path)
+    if not p.is_file() or p.suffix.lower() not in (".html", ".htm"):
+        raise ToolError(f"run_page needs an existing .html file: {p}")
+    ctx.reads = getattr(ctx, "reads", 0) + 1
+    return _proof_cli("page", str(p), str(int(clicks or 25)))
+
+
 @tool("finish", "Call when the task (or mission step) is complete. Give a short summary and the evidence.",
       {"summary": S("what was done"), "evidence": S("how you verified it (checks, outputs, files)")}, ["summary"])
 def finish(ctx: Ctx, summary, evidence=""):

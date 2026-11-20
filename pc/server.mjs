@@ -23,6 +23,14 @@ import { Search, SEARCH_PROVIDERS } from "../core/search.mjs";
 import { Ledger } from "../core/ledger.mjs";
 import { Bench } from "./bench.mjs";
 import { nodeFs } from "./agentfs.mjs";
+import { checkPage } from "./pagecheck.mjs";
+
+/** run_page for the agent, limited to one root folder (the path must stay inside it). */
+const pageRunner = (rootPath) => async (rel, o = {}) => {
+  const base = fs.realpathSync(rootPath), abs = path.resolve(base, String(rel).replace(/^[\\/]+/, ""));
+  if (!abs.startsWith(base + path.sep) || !fs.existsSync(abs)) throw new Error(`${rel}: not found in this folder`);
+  return checkPage(abs, { clicks: o.clicks ?? 25, outDir: path.join(HOME, "runs") });
+};
 import { plan as agentPlan, preview as agentPreview, apply as agentApply, undo as agentUndo, tree as agentTree } from "../core/agent.mjs";
 
 const HOME = process.env.MYCHAT_HOME || path.join(process.env.APPDATA || path.join(os.homedir(), ".config"), "MyChat");
@@ -101,7 +109,7 @@ async function brainRun(oreq, opts) {
   if (oreq.tools?.length || oreq.response_format || settings.oneBrain === false) return run(gw, oreq, opts);
   const root = agentRoots()[0];
   const r = await respond(gw, { ...opts, messages: oreq.messages, fs: root ? nodeFs(root.path) : null,
-    memory: root ? agentMemory(root.path) : null, tools: hostTools(), privateData: opts.privateData || root?.private,
+    memory: root ? agentMemory(root.path) : null, tools: { ...hostTools(), ...(root ? { runPage: pageRunner(root.path) } : {}) }, privateData: opts.privateData || root?.private,
     onStep: (st) => opts.onStatus?.(st.kind === "tool" ? `🔧 ${st.tool} ${JSON.stringify(st.args || {}).slice(0, 90)}` : String(st.text || "").slice(0, 160)) });
   if (r.ops?.length) {
     agentSave("plan", r.planId, { id: r.planId, goal: lastText(oreq.messages), ops: r.ops, preview: r.preview, root: root.path, rootIndex: 0, at: Date.now(), answer: r.content });
@@ -300,7 +308,7 @@ async function agentRoute(req, res, url) {
   if (url.pathname === "/agent/plan" && req.method === "POST") {
     const root = rootAt(b.root), afs = nodeFs(root.path);
     const p = await agentPlan(gw, { goal: String(b.goal || "").slice(0, 4000), fs: afs, privateData: root.private, history: Array.isArray(b.history) ? b.history.slice(-8) : [], memory: agentMemory(root.path),
-      search, evaluate: (e) => evaluate(e).toString(12),
+      search, evaluate: (e) => evaluate(e).toString(12), runPage: pageRunner(root.path),
       fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } });
     p.root = root.path; p.rootIndex = Number(b.root) || 0;
     p.preview = await agentPreview(afs, p.ops);

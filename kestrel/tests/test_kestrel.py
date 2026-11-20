@@ -329,6 +329,25 @@ class AgentTests(unittest.TestCase):
         out, ok = tools.call(s.ctx, "make_folder", {"path": "brand-new"})
         self.assertTrue(ok, out)
 
+    def test_outline_and_run_page(self):
+        import shutil
+        s, cfg, events, dec = self.session()
+        ws = Path(cfg["workspace"])
+        (ws / "app.html").write_text('<!doctype html><title>A</title><button id="b">Load</button><script>\n'
+                                     'function boom() {\n  const d = null;\n  return d.x;\n}\n'
+                                     'document.getElementById("b").addEventListener("click", boom);\n</script>')
+        if not shutil.which("node"):
+            self.skipTest("no node")
+        out, ok = tools.call(s.ctx, "outline", {"path": "app.html"}, limit=10000)
+        self.assertTrue(ok, out)
+        self.assertIn("function boom", out)
+        browsers = [b for b in ("/usr/bin/google-chrome", "/usr/bin/chromium") if Path(b).exists()]
+        if not browsers:
+            return
+        out, ok = tools.call(s.ctx, "run_page", {"path": "app.html"}, limit=10000)
+        self.assertTrue(ok, out)
+        self.assertIn("reading 'x'", out)
+
     def test_edit_file_uniqueness(self):
         s, cfg, events, dec = self.session()
         ws = Path(cfg["workspace"])

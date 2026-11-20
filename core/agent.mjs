@@ -49,7 +49,7 @@ export async function tree(fs, { maxEntries = 400, maxDepth = 4 } = {}) {
 }
 const fmtSize = (b) => (b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB");
 
-const SYS = `You are MyChat Agent: a senior engineer and careful assistant. You DO have access to the person's MyChat folder (the workspace) through the tools below — never say you cannot see their files; look. Never say something works, runs or is fine unless you ran or checked it; otherwise say what you saw in the code and that it was not run. You are not one company's model: MyChat routes each step to one of several models (Google Gemini, open models such as gpt-oss, Qwen, Llama, DeepSeek, Kimi, GLM, and a local model on the PC) and has answers reviewed by a different family. Never say you were made by Google, OpenAI or anyone else; if asked which model, say this and that the model that answered is shown under the answer.
+const SYS = `You are MyChat Agent: a senior engineer and careful assistant. You DO have access to the person's MyChat folder (the workspace) through the tools below — never say you cannot see their files; look. Never say something works, runs or is fine unless you ran or checked it (run_page runs HTML apps for real); otherwise say what you saw in the code and that it was not run. For a big file call outline first, then read only the line ranges you need. You are not one company's model: MyChat routes each step to one of several models (Google Gemini, open models such as gpt-oss, Qwen, Llama, DeepSeek, Kimi, GLM, and a local model on the PC) and has answers reviewed by a different family. Never say you were made by Google, OpenAI or anyone else; if asked which model, say this and that the model that answered is shown under the answer.
 How you work (gather context → act → verify → repeat):
 0. In your first reply, put a short plan in "thought" (2-4 steps), then start. Use the WORKSPACE MAP: it tells you what each project is and where its real code is — go there directly.
 1. Understand what is asked and what "done" looks like.
@@ -92,6 +92,8 @@ export const TOOL_DOCS = {
   calc: ["{\"expression\":\"(17.5/100)*2480\"}", "exact arithmetic"],
   web_search: ["{\"query\":\"...\"}", "web results with excerpts"],
   fetch: ["{\"url\":\"https://...\"}", "a web page as text"],
+  outline: ["{\"path\":\"file\"}", "a parser-built map of a code file: every function/class/method with its exact line range, event handlers, element ids — read this FIRST for big files, then read only the ranges you need"],
+  run_page: ["{\"path\":\"app.html\",\"clicks\":25}", "RUNS an HTML app in a real headless browser on the PC: load errors, every error after pressing each reachable button (with file:line), screenshots. The only way to say whether a page works"],
   run_js: ["{\"code\":\"...\"}", "pure computation in a JavaScript sandbox: NO file access, NO network (use read/search for files); returns console output"],
 };
 
@@ -152,9 +154,9 @@ export function workspaceReader(fs) {
  * host = { search?: Search, fetchText?(url), runJs?(code), privateData?, onStep?(step) }
  * Returns { id, goal, answer, summary, ops, rejected, steps, by, calls, reads, at }.
  */
-export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, search, fetchText, runJs, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
+export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, search, fetchText, runJs, runPage, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
   const reader = workspaceReader(fs);
-  const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate));
+  const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate) && (t !== "run_page" || runPage));
   const sys = SYS.replace("__TOOLS__", avail.map((t) => `  ${t} ${TOOL_DOCS[t][0]} — ${TOOL_DOCS[t][1]}`).join("\n")) + (REVIEW_RX.test(goal) ? REVIEW_GUIDE : "");
   const { workspaceMap } = await import("./projects.mjs");
   const [map, listing] = await Promise.all([workspaceMap(fs).catch(() => ""), tree(fs, { maxEntries: 150, maxDepth: 2 })]);
@@ -177,6 +179,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   let repeats = 0;
   const steps = [], reads = new Set(), seen = new Map();   // seen: path -> full text of every file it read (for checking its claims)
   let checked = null, repaired = false, unreadAsked = false;
+  const observed = new Set();   // names that came from a real run (run_page): not 'described without reading'
   const proposed = [];   // changes the model "called" as if they were tools
   let by = "", calls = 0, last = null, raw = "";
   const skip = [];   // models that answered with nothing usable in this task: the next call goes elsewhere
@@ -207,6 +210,20 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
         if (sub) { let ok = true; try { ok = (await fs.list(sub)).length > 0 || !!(await fs.exists?.(sub)); } catch { ok = false; }
           if (!ok) { const h = await didYouMean(sub); if (h) return `${sub}: no such folder.` + h; } }
         return await tree(sub ? subFs(fs, sub) : fs, { maxEntries: 400, maxDepth: 5 });
+      }
+      if (name === "outline") {
+        const t = await reader.text(args.path);
+        if (t == null) return `${args.path}: not found or not a text file` + await didYouMean(args.path);
+        const { outline, outlineText } = await import("./codemap.mjs");
+        reads.add(args.path); seen.set(args.path, t);   // the map is built from the whole file: citations into it are checkable
+        return `MAP of ${args.path} (built by a parser from the whole file, not guessed):\n` + outlineText(outline(t, args.path), 400);
+      }
+      if (name === "run_page") {
+        if (!/\.html?$/i.test(String(args.path || ""))) return "run_page needs an .html file";
+        onStep({ kind: "status", text: `Running ${args.path} in a headless browser…` });
+        const out = String((await runPage(String(args.path), { clicks: args.clicks })).text);
+        for (const m of out.matchAll(/[\w.-]+\.\w{2,12}/g)) observed.add(m[0].toLowerCase());
+        return out;
       }
       if (name === "read") {
         const t = await reader.text(args.path);
@@ -292,7 +309,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
       // contents of six files — API paths, Django versions, schemas — without reading one).
       const named = [...new Set((String(last.final ?? "").match(/[\w.-]+\.(?:html?|js|mjs|ts|tsx|jsx|py|json|md|txt|css|java|kt|go|rs|yml|yaml|toml|sql|xml|csv)\b/gi) || []))];
       const readNames = [...seen.keys()].map((k) => k.split(/[\\/!]/).pop().toLowerCase());
-      const unread = named.filter((n) => !readNames.includes(n.toLowerCase()));
+      const unread = named.filter((n) => !readNames.includes(n.toLowerCase()) && !observed.has(n.toLowerCase()));
       if (!unreadAsked && unread.length >= 2 && unread.length > named.length / 2 && step < maxSteps - 2) {
         unreadAsked = true;
         onStep({ kind: "status", text: `The answer describes ${unread.length} file(s) it never opened — reading them first` });
