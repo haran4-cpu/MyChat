@@ -192,7 +192,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   const done = new Map();
   let repeats = 0;
   const steps = [], reads = new Set(), seen = new Map();   // seen: path -> full text of every file it read (for checking its claims)
-  let checked = null, repaired = false, unreadAsked = false, challenged = null;
+  let checked = null, repaired = false, unreadAsked = false, challenged = null, runAsked = false;
   const observed = new Set();   // names that came from a real run (run_page): not 'described without reading'
   const proposed = [];   // changes the model "called" as if they were tools
   let by = "", calls = 0, last = null, raw = "";
@@ -340,6 +340,16 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
           "Then give your COMPLETE final answer again — the person sees only that last answer, never earlier drafts." });
         continue;
       }
+      // a verdict on a web app without running it is an opinion (measured on the PC: "PASS, production-grade" after
+      // reading 2 slices of a 12,000-line app): run it once first
+      const htmlSeen = [...seen.keys()].find((k) => /\.html?$/i.test(k));
+      if (runPage && htmlSeen && !runAsked && !steps.some((x) => x.tool === "run_page") && step < maxSteps - 2 &&
+          /\b(pass|fail|works?|working|broken|verdict|production|ready|bug|crash|error)\b|עובד|שבור|תקין/i.test(String(last.final ?? ""))) {
+        runAsked = true;
+        onStep({ kind: "status", text: "A verdict on a web app needs a run — running it first" });
+        msgs.push({ role: "assistant", content: r.content }, { role: "user", content: `Before any verdict, RUN the app: run_page {"path":"${htmlSeen}"}. Then give the COMPLETE final answer, with what the run showed.` });
+        continue;
+      }
       // proof before it reaches the person: every path:line it cites and every code quote must exist in what it read
       checked = await checkClaims(String(last.final ?? ""), seen, reader);
       if (checked.bad.length && !repaired && step < maxSteps - 1) {
@@ -429,10 +439,15 @@ export async function checkClaims(answer, seen, reader) {
   const all = squash([...seen.values()].join("\n"));
   if (seen.size) for (const line of answer.split("\n")) {
     if (!/[\w./!-]+\.[A-Za-z0-9]{1,6}:\d+/.test(line)) continue;
-    for (const m of line.matchAll(/`([^`]{12,200})`/g)) {
-      if (/^[\w./!-]+\.[A-Za-z0-9]{1,6}(:\d+)?$/.test(m[1]) || /\b(should|use|replace|change to|instead|fix)\b/i.test(line.slice(0, m.index).split(/[.;]/).pop())) continue;
+    // inline code spans are the odd pieces between backticks (a regex over the line paired the END of one span with
+    // the START of the next and "quoted" the prose between them — measured on the PC)
+    const parts = line.split("`");
+    for (let i = 1; i < parts.length - 1; i += 2) {
+      const q = parts[i], before = parts.slice(0, i).join("`");
+      if (q.length < 12 || q.length > 200) continue;
+      if (/^[\w./!-]+\.[A-Za-z0-9]{1,6}(:\d+([-–]\d+)?)?$/.test(q) || /\b(should|use|replace|change to|instead|fix)\b/i.test(before.split(/[.;]/).pop())) continue;
       total++;
-      if (!all.includes(squash(m[1]))) bad.push(`\`${m[1].slice(0, 60)}\` (quote not in the files read)`);
+      if (!all.includes(squash(q))) bad.push(`\`${q.slice(0, 60)}\` (quote not in the files read)`);
     }
   }
   return { total, bad };

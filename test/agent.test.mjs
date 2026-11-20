@@ -395,3 +395,10 @@ test("compare: claimed vs actual between two versions (single files with differe
   assert.match(f.text, /CHANGED app\.html: \+3 −3 lines/);
   void makeZipFor;
 });
+
+test("citation check: inline code spans are read correctly and line ranges are citations, not quotes", async () => {
+  const { checkClaims } = await import("../core/agent.mjs");
+  const seen = new Map([["P/a.html", Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n")]]);
+  const r = await checkClaims("Uses `innerHTML` for dynamic UI updates. Evidence at `P/a.html:8`, listeners at `P/a.html:9-10`.", seen, { text: async () => null });
+  assert.deepEqual(r.bad, []);
+});
