@@ -40,3 +40,6 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;p
 details summary{cursor:pointer;color:var(--sub);font-size:13px}
 #nav{scrollbar-width:none}#nav::-webkit-scrollbar{display:none}
 @media (max-width:760px){.top{flex-wrap:wrap;gap:10px;padding:10px 14px}.top .btn.primary{margin-left:auto}#nav{order:3;flex:1 1 100%;overflow-x:auto}main{padding:16px 14px}}
+.gstep { padding: 8px 0; border-top: 1px solid rgba(255,255,255,.06); align-items: center; gap: 10px; }
+.gstep.done { opacity: .6; }
+.gstep .grow b { display: block; font-size: 14px; }

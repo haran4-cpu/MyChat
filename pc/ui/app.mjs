@@ -141,18 +141,26 @@ function foldersCard(roots) {
 }
 
 // ------------------------------------------------------------------------------------------------ Accounts
-const FREE = ["openrouter", "gemini", "groq", "nvidia", "mistral", "cohere", "siliconflow", "github", "huggingface", "sambanova", "cerebras"];
+const FREE = ["openrouter", "gemini", "groq", "nvidia", "mistral", "cohere", "sambanova", "siliconflow", "huggingface", "cerebras", "github"];
+// The Google path: every free service that takes a Google sign-in (or a one-time check) and no card, best first.
+// Verified against public lists in Oct–Nov 2026: Gemini, Groq, OpenRouter, Mistral, NVIDIA, Cohere, SambaNova are free
+// without a card; GitHub Models was retired (July 2026); Cerebras now asks for a card.
+const GOOGLE_PATH = [
+  ["openrouter", "One click — Claude, GPT, Gemini, DeepSeek… free models daily", null],
+  ["gemini", "Gemini Flash family + Gemma, long context, images", "Sign in with Google → Create API key → Copy"],
+  ["groq", "Very fast open models (gpt-oss 120B, Qwen, Kimi)", "Continue with Google → Create API Key → Copy"],
+  ["nvidia", "Strong open models free: DeepSeek, Kimi, Qwen3, GLM, MiniMax", "Sign in (Google works) → verify phone once → Generate API Key → Copy"],
+  ["mistral", "Mistral Large, Devstral for code — Free mode, no card", "Continue with Google → API keys → Create new key → Copy"],
+  ["cohere", "Command models — trial key", "Continue with Google → API keys → Copy the trial key"],
+  ["sambanova", "Fast large open models, small free quota", "Sign in → API keys → Create → Copy"],
+];
 const PAID = ["anthropic", "openai", "deepseek", "xai", "moonshot", "zai", "together", "fireworks"];
 async function accounts() {
   const v = view(); v.replaceChildren(el("h1", {}, "Accounts"));
   if (new URLSearchParams(location.search).get("connected")) toast("✓ OpenRouter connected");
   const [st, cat] = await Promise.all([api("/status"), api("/catalog")]);
   const P = st.providers;
-  v.append(el("div", { class: "grid" },
-    el("div", { class: "card hero stack" }, el("h3", {}, "One sign-in, many models"),
-      el("div", { class: "sub" }, "OpenRouter with your Google account: Claude, GPT, Gemini, GLM, Kimi, DeepSeek. Opens in your browser and comes back here."),
-      el("a", { class: "btn primary", href: cat.openrouterStart }, P.openrouter?.hasKey ? "Reconnect OpenRouter" : "Connect OpenRouter")),
-    pasteCard()));
+  v.append(el("div", { class: "grid" }, googleCard(P, cat), pasteCard()));
   const card = (id) => {
     const p = P[id]; if (!p) return null;
     const pill = p.disabled && p.hasKey ? el("span", { class: "pill warn" }, p.disabled) : p.hasKey ? el("span", { class: "pill ok" }, `✓ ${p.models} models`) : el("span", { class: "pill" }, "not connected");
@@ -176,6 +184,49 @@ async function accounts() {
       el("div", { class: "sub" }, p.note), el("div", { class: "row" }, el("a", { class: "btn small", href: p.keyUrl, target: "_blank", rel: "noopener" }, p.hasKey ? "Manage key" : "Get a key"),
         p.hasKey ? el("button", { class: "btn small danger", onclick: async () => { await api("/connections/remove", { provider: id }); accounts(); } }, "Remove") : null)))));
 }
+/** Connect with Google: one service at a time. You sign in with Google there and copy the key; when you come back to
+ *  this page the key is read from the clipboard, recognised, tested and saved, and the next service opens. */
+function googleCard(P, cat) {
+  const todo = GOOGLE_PATH.filter(([id]) => P[id] && !P[id].hasKey);
+  const done = GOOGLE_PATH.length - todo.length;
+  const box = el("div", { class: "card hero stack" });
+  const head = el("div", {}, el("h3", {}, "Connect with Google"),
+    el("div", { class: "sub" }, `${done} of ${GOOGLE_PATH.length} free services connected. Each opens with your Google account; copy the key there and come back — it is added by itself. No card, no payment.`));
+  box.append(head);
+  if (!todo.length) { box.append(el("div", { class: "pill ok" }, "✓ All free Google services are connected")); return box; }
+  const list = el("div", { class: "stack" });
+  for (const [id, what, how] of GOOGLE_PATH) {
+    const p = P[id]; if (!p) continue;
+    const row = el("div", { class: "row gstep" + (p.hasKey ? " done" : "") },
+      el("span", { class: "pill " + (p.hasKey ? "ok" : "") }, p.hasKey ? "✓" : "·"),
+      el("div", { class: "grow" }, el("b", {}, p.name.replace(/\s*\(.*\)$/, "")), el("div", { class: "sub" }, what + (how && !p.hasKey ? " — " + how : ""))),
+      p.hasKey ? null : id === "openrouter"
+        ? el("a", { class: "btn small primary", href: cat.openrouterStart }, "Connect")
+        : el("button", { class: "btn small primary", onclick: () => { sessionStorage.setItem("mychat.hunt", id); window.open(p.keyUrl, "_blank", "noopener"); toast(`${p.name}: sign in with Google, create a key, copy it — then come back here`, 7000); } }, "Open"));
+    list.append(row);
+  }
+  box.append(list);
+  return box;
+}
+
+// Coming back from a provider's page: read the clipboard once, add the key if it is one (Edge/Chrome ask once).
+let lastClip = "";
+async function huntClipboard() {
+  const want = sessionStorage.getItem("mychat.hunt");
+  if (!want || document.visibilityState !== "visible") return;
+  let t = "";
+  try { t = (await navigator.clipboard.readText()).trim(); } catch { toast("Paste the key in “Add a key” (the browser did not allow reading the clipboard)", 6000); sessionStorage.removeItem("mychat.hunt"); return; }
+  if (!t || t === lastClip || t.length > 400) return;
+  lastClip = t;
+  const { results = [] } = await api("/connections/paste", { text: t });
+  if (!results.length) return toast("The clipboard does not hold a key yet — copy the key and come back", 5000);
+  const ok = results.filter((r) => r.ok);
+  toast(ok.length ? "✓ " + ok.map((r) => `${r.name}${r.models ? ` — ${r.models} models` : ""}`).join(", ") : "✗ " + results.map((r) => `${r.name}: ${r.error}`).join("; "), 6000);
+  if (ok.length) { sessionStorage.removeItem("mychat.hunt"); if (location.hash === "#accounts" || !location.hash) accounts(); }
+}
+addEventListener("focus", () => setTimeout(huntClipboard, 300));
+document.addEventListener("visibilitychange", () => setTimeout(huntClipboard, 300));
+
 function pasteCard() {
   const ta = el("textarea", { dir: "ltr", placeholder: "Paste one or more keys (AIza… · AQ.… · gsk_… · nvapi-… · sk-or-… · sk-ant-… · hf_… · xai-…)" });
   const out = el("pre", { class: "sub", style: "white-space:pre-wrap;margin:0" });

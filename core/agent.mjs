@@ -106,6 +106,7 @@ export const TOOL_DOCS = {
   outline: ["{\"path\":\"file\"}", "a parser-built map of a code file: every function/class/method with its exact line range, event handlers, element ids — read this FIRST for big files, then read only the ranges you need"],
   run_page: ["{\"path\":\"app.html\",\"clicks\":25}", "RUNS an HTML app in a real headless browser on the PC: load errors, every error after pressing each reachable button (with file:line), screenshots. The only way to say whether a page works"],
   compare: ["{\"a\":\"older file/folder/zip\",\"b\":\"newer one\"}", "what REALLY changed between two versions: files added/removed/changed, functions added/removed/rewritten (computed, not guessed). Use it to check a handoff's claims (\"fixed X\") against the facts; with run_page on both versions you also see which errors appeared or disappeared"],
+  look: ["{\"image\":\"screen\" | \"last_run\" | \"path/to.png\",\"question\":\"...\"}", "a vision model LOOKS at a picture and answers: the person's screen (only when they asked about their screen), the last run_page screenshot, or an image file"],
   skill_search: ["{\"query\":\"what kind of task\"}", "find expert procedures for this kind of task (review, debugging, security, testing, audio…) in a library of ~1,000 open-source skills"],
   skill_load: ["{\"id\":\"from skill_search\"}", "load one skill's full procedure and follow it where it fits"],
   run_js: ["{\"code\":\"...\"}", "pure computation in a JavaScript sandbox: NO file access, NO network (use read/search for files); returns console output"],
@@ -168,9 +169,9 @@ export function workspaceReader(fs) {
  * host = { search?: Search, fetchText?(url), runJs?(code), privateData?, onStep?(step) }
  * Returns { id, goal, answer, summary, ops, rejected, steps, by, calls, reads, at }.
  */
-export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, search, fetchText, runJs, runPage, skills, noChallenge = false, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
+export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, search, fetchText, runJs, runPage, skills, see, noChallenge = false, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
   const reader = workspaceReader(fs);
-  const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate) && (t !== "run_page" || runPage) && (!t.startsWith("skill_") || skills));
+  const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate) && (t !== "run_page" || runPage) && (!t.startsWith("skill_") || skills) && (t !== "look" || (see && !privateData)));
   const sys = SYS.replace("__TOOLS__", avail.map((t) => `  ${t} ${TOOL_DOCS[t][0]} — ${TOOL_DOCS[t][1]}`).join("\n")) + (REVIEW_RX.test(goal) ? REVIEW_GUIDE : "");
   const { workspaceMap } = await import("./projects.mjs");
   const [map, listing] = await Promise.all([workspaceMap(fs).catch(() => ""), tree(fs, { maxEntries: 150, maxDepth: 2 })]);
@@ -193,7 +194,8 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   let repeats = 0;
   const steps = [], reads = new Set(), seen = new Map();   // seen: path -> full text of every file it read (for checking its claims)
   let checked = null, repaired = false, unreadAsked = false, challenged = null, challengeRounds = 0, disproved = [], runAsked = false, langAsked = false, namedAsked = false;
-  const observed = new Set();   // names that came from a real run (run_page): not 'described without reading'
+  const observed = new Set();
+  let lastShot = null;   // the last run_page screenshot, for look   // names that came from a real run (run_page): not 'described without reading'
   const proposed = [];   // changes the model "called" as if they were tools
   let by = "", calls = 0, last = null, raw = "";
   const skip = [];   // models that answered with nothing usable in this task: the next call goes elsewhere
@@ -238,12 +240,23 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
         for (const m of r.text.matchAll(/[\w.-]+\.\w{2,12}/g)) observed.add(m[0].toLowerCase());
         return r.text;
       }
+      if (name === "look") {
+        const what = String(args.image || "last_run");
+        // the screen only when the person asked about it — never on the model's own initiative
+        if (what === "screen" && !/screen|מסך|צילום|screenshot|display|desktop|שולחן העבודה/i.test(goal)) return "Not allowed: look at the screen only when the person asks about their screen.";
+        const img = what === "last_run" ? lastShot : what;
+        if (!img) return "No run screenshot yet — use run_page first.";
+        onStep({ kind: "status", text: what === "screen" ? "Looking at your screen…" : "Looking at the picture…" });
+        return String(await see(img, String(args.question || "")));
+      }
       if (name === "skill_search") return String(skills.search(String(args.query || goal)));
       if (name === "skill_load") return String(skills.load(String(args.id || "")));
       if (name === "run_page") {
         if (!/\.html?$/i.test(String(args.path || ""))) return "run_page needs an .html file";
         onStep({ kind: "status", text: `Running ${args.path} in a headless browser…` });
-        const out = String((await runPage(String(args.path), { clicks: args.clicks })).text);
+        const rr = await runPage(String(args.path), { clicks: args.clicks });
+        if (rr.shots?.length) lastShot = rr.shots.at(-1);
+        const out = String(rr.text);
         for (const m of out.matchAll(/[\w.-]+\.\w{2,12}/g)) observed.add(m[0].toLowerCase());
         return out;
       }
@@ -360,7 +373,8 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
       if (!namedAsked && step < maxSteps - 2 && !(Array.isArray(last.ops) && last.ops.length)) {   // (moving/deleting a file needs no reading)
         const named = [...new Set(goal.match(/[\w./-]+\.(?:html?|m?js|ts|tsx|py|json|md|css|txt)\b/gi) || [])];
         const unopened = [];
-        for (const n of named.slice(0, 5)) if (![...seen.keys()].some((k) => k === n || k.endsWith("/" + n) || n.endsWith("/" + k) || k.split("/").pop() === n.split("/").pop())) {
+        const ranFiles = steps.filter((x) => x.tool === "run_page").map((x) => String(x.args?.path || ""));
+        for (const n of named.slice(0, 5)) if (!ranFiles.some((k) => k === n || k.split("/").pop() === n.split("/").pop()) && ![...seen.keys()].some((k) => k === n || k.endsWith("/" + n) || n.endsWith("/" + k) || k.split("/").pop() === n.split("/").pop())) {
           if ((await reader.text(n).catch(() => null)) != null) unopened.push(n);
         }
         if (unopened.length) {

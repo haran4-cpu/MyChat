@@ -494,8 +494,10 @@ function renderAccounts() {
   if (update) pad.append(el("section", { class: "card hero" }, el("h3", {}, `Update available — build ${update.build}`),
     el("p", {}, `You have build ${update.current}. Download it, open it, and Android installs it over this version (your chats and keys stay).`),
     el("button", { class: "btn white", type: "button", onclick: () => openExternal(update.url) }, "Download the update")));
-  const G = [["gemini", "Google Gemini", "free"], ["groq", "Groq", "free, very fast"], ["mistral", "Mistral", "free credits"], ["cohere", "Cohere", "free trial"],
-             ["siliconflow", "SiliconFlow", "some models free"], ["nvidia", "NVIDIA", "free endpoints"], ["huggingface", "Hugging Face", "small free credit"]];
+  // best free (no card) first — the same order as the PC's "Connect with Google"
+  const G = [["gemini", "Google Gemini", "free"], ["groq", "Groq", "free, very fast"], ["nvidia", "NVIDIA", "DeepSeek, Kimi, Qwen3 free"],
+             ["mistral", "Mistral", "Large + Devstral, free mode"], ["cohere", "Cohere", "free trial"], ["sambanova", "SambaNova", "small free quota"],
+             ["siliconflow", "SiliconFlow", "some models free"], ["huggingface", "Hugging Face", "small free credit"]];
   pad.append(el("section", { class: "card hero" },
     el("h3", {}, "Your Google account opens everything"),
     el("p", {}, "1 · One tap: OpenRouter with Google — Claude, GPT, Gemini, GLM, Kimi, DeepSeek in one account."),

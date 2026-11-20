@@ -25,6 +25,7 @@ import { Bench } from "./bench.mjs";
 import { nodeFs } from "./agentfs.mjs";
 import { checkPage } from "./pagecheck.mjs";
 import { skillSearch, skillLoad } from "./skills.mjs";
+import { captureScreen, askImage } from "./see.mjs";
 const SKILLS = { search: (q) => skillSearch(q), load: (id) => skillLoad(id) };
 
 /** run_page for the agent, limited to one root folder (the path must stay inside it). */
@@ -105,7 +106,14 @@ function agentMemory(root) {
     },
   };
 }
-const hostTools = () => ({ search, skills: SKILLS, evaluate: (e) => evaluate(e).toString(12),
+// look: "screen" captures the PC screen (the agent may only ask when the person asked about the screen); any other
+// value is a picture file (run screenshots live in MyChat's runs folder)
+const seeHost = () => async (img, q) => {
+  const f = img === "screen" ? await captureScreen(F("runs")) : path.resolve(String(img));
+  if (img !== "screen" && !f.startsWith(path.resolve(F("runs")) + path.sep)) throw new Error("look only at the screen or at run screenshots");
+  try { return await askImage(gw, f, q); } finally { if (img === "screen") fs.rm(f, () => {}); }
+};
+const hostTools = () => ({ search, skills: SKILLS, see: seeHost(), evaluate: (e) => evaluate(e).toString(12),
   fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } });
 async function brainRun(oreq, opts) {
   if (oreq.tools?.length || oreq.response_format || settings.oneBrain === false) return run(gw, oreq, opts);
@@ -310,7 +318,7 @@ async function agentRoute(req, res, url) {
   if (url.pathname === "/agent/plan" && req.method === "POST") {
     const root = rootAt(b.root), afs = nodeFs(root.path);
     const p = await agentPlan(gw, { goal: String(b.goal || "").slice(0, 4000), fs: afs, privateData: root.private, history: Array.isArray(b.history) ? b.history.slice(-8) : [], memory: agentMemory(root.path),
-      search, skills: SKILLS, evaluate: (e) => evaluate(e).toString(12), runPage: pageRunner(root.path),
+      search, skills: SKILLS, see: seeHost(), evaluate: (e) => evaluate(e).toString(12), runPage: pageRunner(root.path),
       fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } });
     p.root = root.path; p.rootIndex = Number(b.root) || 0;
     p.preview = await agentPreview(afs, p.ops);

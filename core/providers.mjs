@@ -100,7 +100,7 @@ export const PROVIDERS = {
     baseUrl: "https://models.github.ai/inference",
     keyUrl: "https://github.com/settings/personal-access-tokens",
     signIn: "GitHub account (token with models:read)",
-    free: "Status uncertain in late 2026 (reports of retirement); verified live",
+    free: "Retired in July 2026 (reported); kept only for keys that still answer",
     strengths: ["chat", "code"],
   },
   cohere: {

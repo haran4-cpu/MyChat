@@ -435,3 +435,22 @@ test("challenge: a check that tests something else than its claim is ignored", a
   assert.equal(r.tried, 1);
   assert.deepEqual(r.refuted.map((x) => x.claim), ["the code never uses innerHTML"]);
 });
+
+test("look: the run screenshot is shown to a vision model; the screen only when the person asked about it", async () => {
+  const fs = memoryFs({ "P/app.html": "<button>Go</button>" });
+  const calls = [];
+  const mk = (goal) => { let n = 0; return { gw: { async chat() { n++;
+    if (n === 1) return { provider: "p", model: "m", content: '{"calls":[{"tool":"run_page","args":{"path":"P/app.html"}}]}' };
+    if (n === 2) return { provider: "p", model: "m", content: '{"calls":[{"tool":"look","args":{"image":"last_run","question":"is the Go button visible?"}},{"tool":"look","args":{"image":"screen"}}]}' };
+    return { provider: "p", model: "m", content: '{"final":"done"}' }; } }, goal }; };
+  const see = async (img, q) => { calls.push(img); return `SEEN ${img}: ${q}`; };
+  const runPage = async () => ({ text: "RAN", shots: ["/runs/a-loaded.png", "/runs/a-after.png"] });
+  const a = mk("check my app P/app.html");
+  const r = await runAgent(a.gw, { goal: a.goal, fs, plan: false, maxSteps: 5, runPage, see, noChallenge: true });
+  assert.deepEqual(calls, ["/runs/a-after.png"], "the screen was NOT looked at: the person did not ask");
+  assert.match(r.steps.find((x) => x.tool === "look" && x.args.image === "screen").result, /Not allowed/);
+  calls.length = 0;
+  const b = mk("look at my screen and check my app P/app.html");
+  await runAgent(b.gw, { goal: b.goal, fs, plan: false, maxSteps: 5, runPage, see, noChallenge: true });
+  assert.deepEqual(calls.sort(), ["/runs/a-after.png", "screen"]);
+});
