@@ -461,7 +461,7 @@ async function checkUpdate(force = false) {
       update = u && u.build > me.build ? { ...u, current: me.build } : null;
       return update;
     }
-    const rel = await (await fetch("https://api.github.com/repos/haran4-cpu/MyChat/releases?per_page=5", { headers: { Accept: "application/vnd.github+json" } })).json();
+    const rel = await (await fetch("https://api.github.com/repos/haran4-cpu/MyChat/releases?per_page=100", { headers: { Accept: "application/vnd.github+json" } })).json();
     const best = (Array.isArray(rel) ? rel : []).map((r) => ({ build: Number(/build-(\d+)/.exec(r.tag_name)?.[1] || 0), url: r.assets?.find((a) => a.name.endsWith(".apk"))?.browser_download_url }))
       .filter((r) => r.url).sort((a, b) => b.build - a.build)[0];
     update = best && best.build > me.build ? { ...best, current: me.build } : null;
