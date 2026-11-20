@@ -270,8 +270,9 @@ class MyChatBackend(OpenAICompatBackend):
         body = {"model": model, "messages": msgs, "stream": True}
         if "temperature" in o:
             body["temperature"] = o["temperature"]
-        if o.get("num_predict"):
-            body["max_tokens"] = int(o["num_predict"]) + 200   # cloud models don't share the CPU's tight caps
+        # No max_tokens: the local caps were tuned for a 4-tok/s CPU, and on reasoning models (GPT-OSS) the hidden
+        # reasoning counts toward the cap - measured 2026-11-20: test lists came back cut off. The loop guard, the stop
+        # button and the gateway's stall timeout bound runaway answers instead.
         if fmt is not None:
             body["response_format"] = {"type": "json_object"}
             if isinstance(fmt, dict):  # keep the schema in view: json_object mode does not enforce it

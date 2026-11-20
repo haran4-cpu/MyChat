@@ -964,7 +964,8 @@ class CloudBrainTests(unittest.TestCase):
         b = seen[0]["body"]
         self.assertEqual(seen[0]["auth"], "Bearer tok")
         self.assertEqual(b["response_format"], {"type": "json_object"})
-        self.assertEqual((b["temperature"], b["max_tokens"]), (0.2, 1200))
+        self.assertEqual(b["temperature"], 0.2)
+        self.assertNotIn("max_tokens", b)          # reasoning models count hidden reasoning toward the cap
         self.assertEqual(rep.model, "groq:openai/gpt-oss-120b")
 
     def test_cloud_only_for_allowed_folders_never_private(self):
