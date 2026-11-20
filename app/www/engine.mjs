@@ -150,7 +150,7 @@ export async function pollJob(base, id, { onDelta, onStatus, signal, shown = 0 }
       if (j.content?.length > shown) { onDelta?.(j.content.slice(shown)); shown = j.content.length; }
       if (j.statusLine && j.statusLine !== lastStatus) { lastStatus = j.statusLine; onStatus?.("PC · " + j.statusLine); }
       if (j.status === "done") return { content: j.content, ...(j.result || {}), remote: base, trace: [{ step: "pc", by: (j.result?.trace || []).map((t) => t.by).filter(Boolean).pop() || "your PC" }] };
-      if (j.status === "error") throw Object.assign(new Error(j.error || "failed on the PC"), { final: true });
+      if (j.status === "error") throw Object.assign(new Error(j.error || "failed on the PC"), { final: true, detail: j.detail });
       if (!j.id) throw Object.assign(new Error("the PC no longer has this job"), { final: true });
     } catch (e) {
       if (e.final || signal?.aborted) throw e;

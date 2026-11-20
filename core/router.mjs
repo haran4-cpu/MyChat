@@ -171,7 +171,35 @@ export function fromGemini(j, whole = false) {
 }
 
 export class GatewayError extends Error {
-  constructor(msg, attempts) { super(msg); this.attempts = attempts; }
+  constructor(msg, attempts) {
+    super(msg); this.attempts = attempts;
+    const short = (e) => String(e).replace(/\s+/g, " ").slice(0, 120);
+    this.detail = (attempts || []).map((a) => `${a.provider}:${a.model} — ${a.ok ? "ok" : short(a.error)}`).join("\n");
+  }
+}
+
+/** Why nothing answered, in words a person can act on (measured: the phone showed a raw Google JSON error). */
+export function humanFailure(attempts, providers = {}, allowKeyless = true) {
+  if (!attempts?.length) return "No model could answer: no account is connected. Add a free key in Accounts, or turn on the free no-key channels.";
+  const why = {};
+  for (const a of attempts) {
+    const e = String(a.error || "");
+    const r = /\b429\b|quota|rate.?limit|too many requests/i.test(e) ? "out of free quota for now"
+      : /\b50[234]\b|overload|unavailable|high demand/i.test(e) ? "busy (overloaded)"
+      : /\b40[13]\b|key rejected|unauthori[sz]ed|invalid api key/i.test(e) ? "key rejected"
+      : /too long/i.test(e) ? "message too long for it"
+      : /failed to fetch|network|ECONN|ENOTFOUND|timed? ?out|aborted|stalled/i.test(e) ? "not reachable (network)"
+      : /another script/i.test(e) ? "answered in the wrong language"
+      : "error";
+    const name = providers[a.provider]?.keyless && !providers[a.provider]?.local ? "free no-key channels"
+      : (providers[a.provider]?.name || a.provider).replace(/\s*\(.*\)$/, "");
+    (why[name] ||= new Set()).add(r);
+  }
+  const lines = Object.entries(why).map(([n, rs]) => `${n}: ${[...rs].join(", ")}`);
+  const tips = ["wait a minute and ask again"];
+  if (Object.keys(why).length < 3) tips.push("add another free account in Accounts (Groq, OpenRouter, Cerebras, Mistral…) so one empty account can't stop you");
+  if (!allowKeyless) tips.push("or turn on the free no-key channels");
+  return `No model could answer right now (${attempts.length} tried). ${lines.join(" · ")}. You can ${tips.join(", ")}.`;
 }
 
 export class Gateway {
@@ -234,8 +262,8 @@ export class Gateway {
   }
 
   /** Discover each provider's models (cached 6 h). Failures disable nothing: the provider just has no list. */
-  async refreshModels(force = false) {
-    const ids = this.enabledProviders();
+  async refreshModels(force = false, only = null) {
+    const ids = this.enabledProviders().filter((id) => !only || only.includes(id));
     await Promise.all(ids.map(async (id) => {
       const p = this.providers[id];
       if (p.noModelList) { this.models[id] = p.models || []; return; }
@@ -264,7 +292,7 @@ export class Gateway {
   }
 
   /** Rank (provider, model) pairs for a task. */
-  candidates(task, { needTools = false, needVision = false, privateData = false, exclude = [], families = null, limit = 8, lang = "", diverse = false } = {}) {
+  candidates(task, { needTools = false, needVision = false, privateData = false, exclude = [], families = null, limit = 8, lang = "", diverse = false, quality = false } = {}) {
     const now = Date.now(), out = [];
     for (const id of this.enabledProviders()) {
       const p = this.providers[id];
@@ -274,7 +302,9 @@ export class Gateway {
         if (families && !families.includes(family(model))) continue;
         const st = this.stats.peek(id, model);
         if (st.cooldownUntil > now) continue;
-        if (!st.ok && st.fail >= 3) continue;             // never answered after 3 tries: dead on this account
+        // never answered after 3 tries: dead on this account — for 6 hours, not forever (measured on the phone: a few
+        // offline minutes marked every free channel dead for two weeks, and only one exhausted account was left)
+        if (!st.ok && st.fail >= 3 && now - (st.at || 0) < 6 * 3600e3) continue;
         // asked for other families or to avoid models (Truth Engine judge, Max reviewer): diversity beats the pool
         const pool = diverse || families || exclude.length ? null : this.pool(id);
         const pinned = Object.values(this.pins).some((l) => Array.isArray(l) && l.includes(id + ":" + model));
@@ -286,8 +316,8 @@ export class Gateway {
         if (needTools && p.keyless && !p.local) q *= 0.5;
         const rel = this.stats.reliability(id, model);
         let speed = 1;
-        if (st.ttft != null) speed = task === "fast" ? Math.max(0.3, 1 - st.ttft / 8000) : Math.max(0.6, 1 - st.ttft / 30000);
-        let score = q * (0.4 + 0.6 * rel) * speed;
+        if (st.ttft != null && !quality) speed = task === "fast" ? Math.max(0.3, 1 - st.ttft / 8000) : Math.max(0.6, 1 - st.ttft / 30000);
+        let score = q * (quality ? 0.7 + 0.3 * rel : 0.4 + 0.6 * rel) * speed;   // Max: strength first, a few lucky answers don't outrank it
         if (diverse && st.ok > 0) score *= 1.5;             // other families: proven models first, untried ones still possible
         if (p.keyless && !p.local) score *= 0.6;          // public gateways: last resort
         if (p.local) score *= task === "fast" ? 0.2 : 0.35; // this CPU is slow; local is for private/offline
@@ -387,7 +417,7 @@ export class Gateway {
     const lang = /[\u0590-\u05FF]/.test(lastUserText(req.messages)) ? "he" : "";
     const need = estimateTokens(req.messages) + 2000;
     let list = this.candidates(task, { needTools: !!req.tools?.length, needVision: hasImages(req.messages),
-                                       privateData: opt.privateData, exclude: opt.exclude, families: opt.families, lang });
+                                       privateData: opt.privateData, exclude: opt.exclude, families: opt.families, lang, quality: opt.quality });
     if (opt.prefer) {
       const [pp, ...mm] = opt.prefer.split(":"), pm = mm.join(":");
       list = [{ provider: pp, model: pm, score: 99, family: family(pm) }, ...list.filter((c) => !(c.provider === pp && c.model === pm))];
@@ -401,7 +431,7 @@ export class Gateway {
     }
     if (!list.length) throw new GatewayError("No model available: add a key in Connections, or allow the free no-key channels.", []);
     const attempts = [];
-    let partial = "", kept = null;
+    let partial = "", kept = null, fatal = false;
     for (const c of list) {
       if (opt.signal?.aborted) break;
       const win = this.ctx[c.provider]?.[c.model];
@@ -436,14 +466,37 @@ export class Gateway {
         if (e.wrongLang) { const st = this.stats.get(c.provider, c.model); st.heWrong = (st.heWrong || 0) + 1; }
         attempts.push({ ...c, ok: false, error: String(e.message || e).slice(0, 200) });
         this.log(`fail ${c.provider}:${c.model}: ${e.message}`);
-        if (e.fatal) break;
+        if (e.fatal) { fatal = true; break; }
       }
     }
     if (kept) return { ...kept, content: partial || kept.content, attempts, ms: Date.now() - t0 };
-    const short = (e) => String(e).replace(/\s+/g, " ").slice(0, 90);
-    throw new GatewayError(attempts.length
-      ? `All models failed (${attempts.length} tried). ` + attempts.slice(0, 3).map((a) => `${a.provider}:${a.model} — ${short(a.error)}`).join("; ")
-      : "All models failed: no model is available (connect a provider)", attempts);
+    // Rescue round. Measured 2026-11-20 on the phone: "hi" failed after 6 Gemini models (quota, 503) while other
+    // accounts and the free no-key channels were never tried. Before giving up, every other account gets one try with
+    // its best model, ignoring cool-downs and "dead" marks (those are guesses; this is the last chance).
+    if (!opt.signal?.aborted && !opt.noRescue && !fatal) {
+      const tried = new Set(attempts.map((a) => a.provider));
+      const missing = this.enabledProviders().filter((id) => !tried.has(id) && !(this.models[id] || []).length);
+      if (missing.length) await this.refreshModels(true, missing).catch(() => {});
+      for (const id of this.enabledProviders()) {
+        if (tried.has(id) || opt.signal?.aborted) continue;
+        if (opt.privateData && this.providers[id].keyless && !this.providers[id].local) continue;
+        const best = (this.models[id] || []).filter((m) => !NOT_CHAT.test(m) && !(opt.exclude || []).includes(id + ":" + m) && (!opt.families || opt.families.includes(family(m))))
+          .map((m) => ({ provider: id, model: m, score: (priorFor(m)[task] ?? priorFor(m).chat) + (this.stats.peek(id, m).ok ? 1 : 0), family: family(m) }))
+          .sort((a, b) => b.score - a.score)[0];
+        if (!best) continue;
+        try {
+          let text = "";
+          const r = await this._call(best, req, opt, (d) => { text += d; opt.onDelta?.(d); });
+          if (lang === "he" && wrongScript(r.content)) throw new Error("answered a Hebrew question in another script (Arabic)");
+          attempts.push({ ...best, ok: true, ms: r.ms, rescue: true });
+          return { ...r, content: text || r.content, provider: id, model: best.model, task, attempts, ms: Date.now() - t0 };
+        } catch (e) {
+          attempts.push({ ...best, ok: false, error: String(e.message || e).slice(0, 200), rescue: true });
+          this.log(`rescue fail ${id}:${best.model}: ${e.message}`);
+        }
+      }
+    }
+    throw new GatewayError(humanFailure(attempts, this.providers, this.allowKeyless), attempts);
   }
 
   async _call(c, req, opt, onDelta) {
@@ -473,7 +526,7 @@ export class Gateway {
     }
     if (!res.ok) {
       clearTimeout(firstTimer);
-      const txt = (await res.text().catch(() => "")).slice(0, 300);
+      const full = await res.text().catch(() => ""), txt = full.slice(0, 300);
       const ra = Number(res.headers.get?.("retry-after")) || 0;
       this.noteLimits(c.provider, res.headers);
       if ((res.status === 402 || BILLING_RX.test(txt)) && this.providers[c.provider]?.freeModels && !this.providers[c.provider].freeModels.test(c.model)) {
@@ -486,7 +539,11 @@ export class Gateway {
       } else if (res.status === 429 && DAILY_RX.test(txt)) {
         this.parked[c.provider] = { until: nextUtcMidnight(), reason: "free daily limit reached (resets 00:00 UTC)" };
         this.stats.failure(c.provider, c.model, txt, 3600e3);
-      } else if (res.status === 429 && /limit:\s*0\b|free.?tier.{0,40}not|not available on the free/i.test(txt)) {
+      } else if (res.status === 429 && /PerDay[A-Za-z]*PerModel|PerModel[A-Za-z]*PerDay/.test(full)) {
+        // Gemini free tier: this model's daily allowance is used up (other models of the account still have theirs)
+        this.stats.failure(c.provider, c.model, "daily quota of this model used up: " + txt, 6 * 3600e3);
+        this.noteQuota(c.provider, c.model);
+      } else if (res.status === 429 && /limit:\s*0\b|free.?tier.{0,40}not|not available on the free/i.test(full)) {
         this.stats.failure(c.provider, c.model, "not on this plan: " + txt, 24 * 3600e3);   // e.g. Pro models on a free Gemini key
       } else if (res.status === 429) { this.stats.failure(c.provider, c.model, "429 " + txt, Math.max(ra * 1000, 60000)); this.noteQuota(c.provider, c.model); }
       else if (res.status === 401 || res.status === 403) { this.disabled[c.provider] = `key rejected (${res.status})`; this.stats.failure(c.provider, c.model, txt); }

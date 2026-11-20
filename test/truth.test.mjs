@@ -143,10 +143,11 @@ test("Dawid–Skene: learns which model is reliable, even from unlabelled votes"
 test("auto mode hands factual questions to the Truth Engine and leaves chit-chat alone", async () => {
   const { g, calls } = world({ draft: () => "1889.", extract: () => claim({ oppose: [] }), judge: () => JSON.stringify({ verdict: "supported", source: 1, quote: "completed in March 1889" }), synth: () => "1889 [1]." });
   const r1 = await run(g, { messages: Q }, { mode: "auto", truth: { search: wikiSearch(), ledger: new Ledger() } });
-  assert.equal(r1.mode, "checked");                                    // factual question: instant answer + check
+  assert.equal(r1.mode, "auto");                                       // the label is the mode the person chose…
+  assert.equal(r1.route, "answered, then fact-checked");              // …and says what it did: instant answer + check
   const before = calls.length;
   const r2 = await run(g, { messages: [{ role: "user", content: "hi" }] }, { mode: "auto", truth: { search: wikiSearch(), ledger: new Ledger() } });
-  assert.ok(!["verified", "checked"].includes(r2.mode));
+  assert.equal(r2.route, "quick answer");
   assert.equal(calls.length - before, 1);
 });
 

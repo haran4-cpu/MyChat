@@ -290,7 +290,7 @@ export async function checkedAnswer(gw, req, o = {}) {
   const q = lastUserText(req.messages);
   const trace = [];
   if (!Object.keys(gw.models).length) await gw.refreshModels();
-  const call = (r, extra = {}) => gw.chat(r, { signal: o.signal, privateData: o.privateData, ...extra });
+  const call = (r, extra = {}) => gw.chat(r, { signal: o.signal, privateData: o.privateData, quality: o.quality, ...extra });
   const calls0 = gw.calls || 0;
 
   // evidence for the question itself starts now, while the answer is being written (no model call)

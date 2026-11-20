@@ -25,6 +25,8 @@ jobs:
       - name: Run
         env:
           MYCHAT_KEYS_JSON: ${{ secrets.MYCHAT_KEYS_JSON }}
+          MYCHAT_KEYS_BUNDLE: ${{ secrets.MYCHAT_KEYS_BUNDLE }}
+          MYCHAT_KEYS_CODE: ${{ secrets.MYCHAT_KEYS_CODE }}
         run: node tools/live-eval.mjs ${{ github.event.inputs.only && format('--only={0}', github.event.inputs.only) || '' }}
       - uses: actions/upload-artifact@v4
         if: always()

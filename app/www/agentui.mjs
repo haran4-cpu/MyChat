@@ -40,6 +40,23 @@ export function hostTools({ search, fetch: f }) {
 }
 
 // ---------------------------------------------------------------- Agent
+/** A tool call in words ("Read src/app.js", "Searched “TODO”") instead of raw JSON. */
+export function stepLabel(s) {
+  const a = s.args || {}, q = (x) => `“${String(x).slice(0, 60)}”`, p = (x) => String(x || "/").slice(-70);
+  switch (s.tool) {
+    case "tree": return { verb: "Listed", obj: p(a.path) };
+    case "read": return { verb: "Read", obj: p(a.path) + (a.from ? ` (from line ${a.from})` : "") };
+    case "search": return { verb: "Searched", obj: q(a.query || a.pattern || a.q || "") + (a.path ? " in " + p(a.path) : "") };
+    case "find": return { verb: "Found files", obj: q(a.pattern || a.name || a.query || "") };
+    case "study": return { verb: "Studied", obj: p(a.path || (a.paths || []).join(", ")) + " with several models" };
+    case "calc": return { verb: "Calculated", obj: String(a.expr || a.expression || "").slice(0, 60) };
+    case "web_search": return { verb: "Searched the web for", obj: q(a.query || "") };
+    case "fetch": { let h = String(a.url || ""); try { h = new URL(h).host + new URL(h).pathname.slice(0, 30); } catch {} return { verb: "Opened", obj: h }; }
+    case "run_js": return { verb: "Ran code", obj: "in the sandbox" };
+    default: return { verb: s.tool || "Step", obj: JSON.stringify(a).slice(0, 80) };
+  }
+}
+
 export function agentView(root, { el, md, toast, gw, tools, prefill, keepAlive }) {
   let session = sessions.all()[0] && !prefill ? null : null;   // start fresh; old sessions are one tap away
   let running = null;
@@ -64,7 +81,7 @@ export function agentView(root, { el, md, toast, gw, tools, prefill, keepAlive }
     for (const t of session.turns) pad.append(turnView(t, fs));
     const goal = el("textarea", { class: "goal", dir: "auto", rows: 3, placeholder: session.turns.length ? "Follow-up… · המשך…" : "What should I do? e.g. “Review the app in Projects/MyChat-14 like a senior engineer” · “סדר את הקבצים ב-Inbox לפי נושא”" });
     if (prefill) { goal.value = prefill; prefill = ""; }
-    const status = el("div", { class: "steps live", hidden: true });
+    const status = el("div", { class: "timeline live", hidden: true });
     const go = el("button", { class: "btn", type: "button" }, "Start");
     go.onclick = async () => {
       if (running) { running.abort(); return; }
@@ -72,11 +89,12 @@ export function agentView(root, { el, md, toast, gw, tools, prefill, keepAlive }
       running = new AbortController(); go.textContent = "Stop"; status.hidden = false; status.replaceChildren();
       keepAlive?.start("The Agent is working…");
       const turn = { goal: text, at: Date.now(), steps: [] };
+      status.append(el("div", { class: "tl status" }, el("span", { class: "dot" }), el("span", {}, "Starting…")));
       try {
         const history = session.turns.flatMap((t) => [{ role: "user", content: t.goal }, { role: "assistant", content: t.answer || "" }]);
         const r = await runAgent(gw(), { goal: text, fs, history, signal: running.signal, ...tools(),
           onStep: (s) => { status.append(stepEl(s)); status.scrollTop = status.scrollHeight; if (s.kind !== "status") turn.steps.push(s); } });
-        Object.assign(turn, { answer: r.answer, ops: r.ops, rejected: r.rejected, by: r.by, calls: r.calls, planId: r.id });
+        Object.assign(turn, { answer: r.answer, ops: r.ops, rejected: r.rejected, by: r.by, calls: r.calls, planId: r.id, ms: Date.now() - turn.at });
         if (r.ops.length) turn.preview = await preview(fs, r.ops);
       } catch (e) { turn.answer = (running.signal.aborted ? "Stopped." : "✗ " + e.message); }
       if (!session.title) session.title = text.slice(0, 70);
@@ -88,13 +106,14 @@ export function agentView(root, { el, md, toast, gw, tools, prefill, keepAlive }
     root.append(pad);
     root.scrollTop = root.scrollHeight;
   };
-  const stepEl = (s) => el("div", { class: "step " + s.kind, dir: "auto" },
-    s.kind === "tool" ? `🔧 ${s.tool} ${s.args ? JSON.stringify(s.args).slice(0, 120) : ""}` : s.kind === "thought" ? `💭 ${s.text}` : `… ${s.text}`);
+  const stepEl = (s) => el("div", { class: "tl " + s.kind, dir: "auto" }, el("span", { class: "dot" }),
+    s.kind === "tool" ? el("span", {}, el("b", {}, stepLabel(s).verb), " ", el("span", { class: "obj" }, stepLabel(s).obj)) : el("span", {}, String(s.text || "")));
   function turnView(t, fs) {
     const box = el("section", { class: "card turn" }, el("div", { class: "msg user", dir: "auto" }, t.goal));
     if (t.steps?.length) {
-      const d = el("details", {}, el("summary", {}, `${t.steps.filter((s) => s.kind === "tool").length} tool steps · ${t.calls || "?"} model calls · ${(t.by || "").split(":").slice(1).join(":").split("/").pop()}`),
-        el("div", { class: "steps" }, t.steps.map(stepEl)));
+      const n = t.steps.filter((s) => s.kind === "tool").length, secs = t.ms ? ` · ${t.ms < 60000 ? Math.round(t.ms / 1000) + " s" : Math.round(t.ms / 60000) + " min"}` : "";
+      const d = el("details", { class: "work" }, el("summary", {}, `Worked through ${n} step${n === 1 ? "" : "s"} · ${t.calls || "?"} model calls${secs}`),
+        el("div", { class: "timeline" }, t.steps.map(stepEl)));
       box.append(d);
     }
     const ans = el("div", { class: "body", dir: "auto" }); ans.innerHTML = md(t.answer || ""); box.append(ans);

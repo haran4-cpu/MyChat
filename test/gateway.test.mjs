@@ -362,3 +362,71 @@ test("Hebrew questions avoid small models unless they were measured good in Hebr
   gw.pins = { he: ["a:Olala-v1.0-mini-7A1B"] };
   assert.ok(gw.candidates("chat", { lang: "he" }).some((c) => c.model === "Olala-v1.0-mini-7A1B"));
 });
+
+test("one empty account can't stop an answer: other accounts and no-key channels get a rescue try, and the error is human", async () => {
+  const q = { status: 429 };
+  const w = await mockWorld({
+    g: { "gemini-3-pro": q, "gemini-3-flash": q, "gemini-2.5-pro": q, "gemini-2.5-flash": q, "gemini-2.0-flash": q, "gemini-flash-lite": q, "gemini-x": q, "gemini-y": q },
+    k: { "llama-3.3-70b": { text: "שלום! במה אפשר לעזור?" } },
+  });
+  const gw = new Gateway({ keys: { g: "k" }, allowKeyless: true, allowLocal: false,
+    extraProviders: { g: { name: "Google Gemini", baseUrl: `${w.url}/g` }, k: { name: "Free (no key)", baseUrl: `${w.url}/k`, keyless: true } } });
+  for (const id of Object.keys(gw.providers)) if (!["g", "k"].includes(id)) delete gw.providers[id];
+  await gw.refreshModels();
+  // the phone had marked the free channel dead (3 failures while offline) — a stale guess must not block the last chance
+  for (let i = 0; i < 3; i++) gw.stats.failure("k", "llama-3.3-70b", "Failed to fetch", 600000);
+  const r = await gw.chat({ messages: [{ role: "user", content: "היי" }] });
+  assert.equal(r.provider, "k");
+  assert.match(r.content, /שלום/);
+  // and when truly nothing answers, the message says why in plain words, no raw JSON
+  const w2 = await mockWorld({ g: { "gemini-3-flash": q, "gemini-2.5-flash": { status: 503 } } });
+  const gw2 = new Gateway({ keys: { g: "k" }, allowKeyless: false, allowLocal: false, extraProviders: { g: { name: "Google Gemini", baseUrl: `${w2.url}/g` } } });
+  for (const id of Object.keys(gw2.providers)) if (id !== "g") delete gw2.providers[id];
+  await assert.rejects(gw2.chat({ messages: [{ role: "user", content: "hi" }] }), (e) => {
+    assert.match(e.message, /^No model could answer right now \(2 tried\)\. Google Gemini: .*quota.*busy/);
+    assert.doesNotMatch(e.message, /[{}]/);
+    assert.match(e.detail, /gemini-3-flash/);
+    return true;
+  });
+  w.srv.close(); w2.srv.close();
+});
+
+test("the modes really differ: Fast/Auto answer once, Max drafts with the strongest model and gets a cross-family review, Auto escalates real code", async () => {
+  const review = JSON.stringify({ verdict: "ok", issues: [] });
+  const ans = (b) => ({ text: /independent senior reviewer/.test(b.messages[0].content) ? review : "Here is a complete answer." });
+  const w = await mockWorld({ a: { "gemini-3-flash": ans, "gemini-3-pro": ans }, b: { "deepseek-v4": ans } });
+  const g = only(["a", "b"])(gwFor(w, ["a", "b"]));
+  await g.refreshModels();
+  g.stats.success("a", "gemini-3-flash", 300, 200);            // measured fast
+  g.stats.success("a", "gemini-3-pro", 9000, 40);              // measured slow but strongest
+  const ask = async (mode, content) => { const n = w.calls.length; const r = await run(g, { messages: [{ role: "user", content }] }, { mode }); return { r, calls: w.calls.length - n }; };
+  let x = await ask("fast", "hi");
+  assert.equal(x.calls, 1); assert.equal(x.r.route, "fastest model"); assert.equal(x.r.mode, "fast");
+  x = await ask("auto", "hi");
+  assert.equal(x.calls, 1); assert.equal(x.r.route, "quick answer"); assert.equal(x.r.mode, "auto");
+  x = await ask("max", "hi");
+  assert.equal(x.calls, 1); assert.equal(x.r.model, "gemini-3-pro", "Max uses the strongest model even when it is slow");
+  x = await ask("max", "what should I name my coffee shop next to the beach?");
+  assert.equal(x.calls, 2); assert.match(x.r.route, /reviewed/); assert.equal(x.r.mode, "max");
+  assert.notEqual(x.r.trace[0].by.split(":")[0], x.r.trace[1].by.split(":")[0], "review by another family");
+  x = await ask("auto", "what should I name my coffee shop next to the beach?");
+  assert.equal(x.calls, 1, "Auto does not review a casual question");
+  x = await ask("auto", "write a python function that parses ISO dates with timezones and returns UTC datetimes, with tests");
+  assert.equal(x.calls, 2, "Auto escalates real code to a review"); assert.match(x.r.route, /reviewed/);
+  w.srv.close();
+});
+
+test("Max: a review with only minor points keeps the draft; a blocker gets fixed", async () => {
+  let verdict;
+  const ans = (b) => ({ text: /independent senior reviewer/.test(b.messages[0].content) ? JSON.stringify(verdict)
+    : /reviewer \(a different model\) found/.test(b.messages.at(-1).content) ? "fixed answer" : "draft answer" });
+  const w = await mockWorld({ a: { "gemini-3-pro": ans }, b: { "deepseek-v4": ans } });
+  const g = only(["a", "b"])(gwFor(w, ["a", "b"]));
+  verdict = { verdict: "revise", issues: [{ severity: "minor", where: "intro", fix: "shorter" }] };
+  let r = await run(g, { messages: [{ role: "user", content: "explain the trade-offs of SQLite vs Postgres for a small app" }] }, { mode: "max" });
+  assert.equal(r.content, "draft answer");
+  verdict = { verdict: "revise", issues: [{ severity: "blocker", where: "point 2", fix: "SQLite does support concurrent readers" }] };
+  r = await run(g, { messages: [{ role: "user", content: "explain the trade-offs of SQLite vs Postgres for a small app" }] }, { mode: "max" });
+  assert.equal(r.content, "fixed answer"); assert.match(r.issues[0], /\[blocker\] point 2/);
+  w.srv.close();
+});

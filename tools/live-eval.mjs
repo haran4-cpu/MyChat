@@ -15,7 +15,14 @@ import { makeZip, extractZip } from "../core/zip.mjs";
 import { nodeFs } from "../pc/agentfs.mjs";
 import { respond } from "../core/assistant.mjs";
 
+// Keys: MYCHAT_KEYS_JSON, or the same encrypted text the phone/PC exports (MYCHAT_KEYS_BUNDLE + MYCHAT_KEYS_CODE secrets).
+// Only provider names are ever printed, never a key.
 const keys = JSON.parse(process.env.MYCHAT_KEYS_JSON || "{}");
+if (process.env.MYCHAT_KEYS_BUNDLE) {
+  const { importKeys } = await import("../core/accounts.mjs");
+  try { Object.assign(keys, await importKeys(process.env.MYCHAT_KEYS_BUNDLE, process.env.MYCHAT_KEYS_CODE || "")); }
+  catch (e) { console.log("::warning::keys bundle not used: " + e.message); }
+}
 const gw = new Gateway({ keys, allowKeyless: true, allowLocal: false });
 const search = new Search({ keys });
 const only = (process.argv.find((a) => a.startsWith("--only=")) || "").slice(7).split(",").filter(Boolean);

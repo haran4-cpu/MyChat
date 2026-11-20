@@ -32,6 +32,24 @@ export { md };
 
 // ---------------------------------------------------------------- chats (kept on the phone)
 const MODES = [["auto", "Auto"], ["fast", "Fast"], ["max", "Max"], ["verified", "Verified"], ["consensus", "Consensus"]];
+const MODE_HINT = {
+  auto: "Auto — quick for small talk, fact-checked for facts, a second model reviews real code and analysis",
+  fast: "Fast — the quickest good model, one pass",
+  max: "Max — the strongest model, then an independent review by another model family and a fix round",
+  verified: "Verified — several drafts, every claim checked against sources (slowest, most careful)",
+  consensus: "Consensus — three model families answer, a fourth reconciles them",
+};
+const MODE_NAME = { auto: "Auto", fast: "Fast", max: "Max", verified: "Verified", consensus: "Consensus", agent: "Agent", "deep read": "Deep read", checked: "Auto" };
+const ICONS = {
+  copy: '<path d="M9 9h10v10H9z"/><path d="M5 15V5h10"/>',
+  retry: '<path d="M4 12a8 8 0 0 1 14-5.3L20 8"/><path d="M20 3v5h-5"/><path d="M20 12a8 8 0 0 1-14 5.3L4 16"/><path d="M4 21v-5h5"/>',
+  speak: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/>',
+  share: '<path d="M12 3v12"/><path d="M7 8l5-5 5 5"/><path d="M5 13v7h14v-7"/>',
+  edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
+  alert: '<path d="M12 3l10 18H2z"/><path d="M12 10v4"/><path d="M12 17.5v.5"/>',
+};
+const icon = (n) => { const t = document.createElement("template"); t.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[n]}</svg>`; return t.content.firstChild; };
+const iconBtn = (n, label, onclick, extra = {}) => el("button", { type: "button", class: "ib", "aria-label": label, title: label, onclick, ...extra }, icon(n));
 let chats = []; try { chats = JSON.parse(localStorage.getItem("mychat.chats") || "[]"); } catch { chats = []; }
 let current = null, mode = localStorage.getItem("mychat.mode") || "auto", running = null;
 const saveChats = () => { try { localStorage.setItem("mychat.chats", JSON.stringify(chats.slice(0, 200))); } catch { chats = chats.slice(0, 50); } };
@@ -42,8 +60,13 @@ function renderModes() {
   const box = $("#modes"); box.replaceChildren();
   for (const [id, label] of MODES) {
     box.append(el("button", { type: "button", role: "radio", "aria-checked": String(id === mode), class: id,
-      onclick: () => { mode = id; localStorage.setItem("mychat.mode", id); renderModes(); } }, label));
+      onclick: () => { mode = id; localStorage.setItem("mychat.mode", id); renderModes(); showHint(); } }, label));
   }
+}
+function showHint() {
+  const h = $("#modeHint"); if (!h) return;
+  h.textContent = MODE_HINT[mode] || ""; h.hidden = false;
+  clearTimeout(showHint.t); showHint.t = setTimeout(() => (h.hidden = true), 6000);
 }
 
 function botBubble(content, meta = {}) {
@@ -70,8 +93,23 @@ function botBubble(content, meta = {}) {
 function whoLine(meta) {
   const by = (meta.trace || []).map((t) => t.by).filter(Boolean).map((b) => b.split(":").slice(1).join(":").split("/").pop());
   const uniq = [...new Set(by)];
-  const secs = meta.ms ? ` · ${Math.round(meta.ms / 1000)} s` : "";
-  return uniq.length ? el("div", { class: "who" }, `${meta.mode || ""} · ${uniq.slice(0, 3).join(", ")}${secs}`) : null;
+  if (!uniq.length && !meta.mode) return null;
+  const parts = [MODE_NAME[meta.mode] || meta.mode, meta.route, uniq.slice(0, 3).join(" + "), meta.ms ? (meta.ms < 10000 ? (meta.ms / 1000).toFixed(1) : Math.round(meta.ms / 1000)) + " s" : ""].filter(Boolean);
+  const line = el("button", { type: "button", class: "who", onclick: () => showTrace(meta) }, parts.join(" · "));
+  return line;
+}
+function showTrace(meta) {
+  const rows = (meta.trace || []).map((t) => `${t.step || "answer"}${t.by ? " — " + t.by.split(":").slice(1).join(":") : ""}${t.verdict ? ` (${t.verdict}${t.issues ? ", " + t.issues + " issue(s)" : ""})` : ""}${t.error ? " — " + t.error : ""}`);
+  sheet("How this answer was made", [`Mode: ${MODE_NAME[meta.mode] || meta.mode || "?"}`, meta.route ? `Route: ${meta.route}` : null, ...rows, meta.ms ? `Time: ${(meta.ms / 1000).toFixed(1)} s` : null].filter(Boolean));
+}
+/** A bottom sheet with plain lines (trace, error details). */
+function sheet(title, lines) {
+  const close = () => bg.remove();
+  const bg = el("div", { class: "sheetbg", onclick: (e) => { if (e.target === bg) close(); } },
+    el("div", { class: "sheet", role: "dialog", "aria-label": title }, el("div", { class: "grab" }), el("b", {}, title),
+      el("div", { class: "lines" }, lines.map((l) => el("div", { dir: "auto" }, l))),
+      el("button", { class: "btn ghost", type: "button", onclick: close }, "Close")));
+  document.body.append(bg);
 }
 
 /** Changes the assistant proposed from the chat: approve here, undo here (same engine as the Agent tab). */
@@ -105,6 +143,17 @@ function chatOps(o) {
   return wrap;
 }
 
+/** A failed answer: what happened in plain words, what to do, the technical lines only on request. */
+function errorCard(meta, isLast) {
+  return el("div", { class: "errcard", dir: "auto" },
+    el("div", { class: "errhead" }, icon("alert"), el("b", {}, meta.error.title || "Couldn't get an answer")),
+    el("p", {}, meta.error.message),
+    el("div", { class: "actions" },
+      isLast ? el("button", { class: "btn", type: "button", onclick: retry }, "Try again") : null,
+      el("button", { class: "btn ghost", type: "button", onclick: () => show("accounts") }, "Accounts"),
+      meta.error.detail ? el("button", { class: "btn ghost", type: "button", onclick: () => sheet("Technical details", meta.error.detail.split("\n")) }, "Details") : null));
+}
+
 function renderChat() {
   const box = $("#messages"); box.replaceChildren();
   $("#viewSub").textContent = current.title || "";
@@ -124,29 +173,32 @@ function renderChat() {
   }
   current.messages.forEach((m, i) => {
     if (m.role === "user") {
+      const last = i >= current.messages.length - 2 && !running;
       box.append(el("div", { class: "msg user", dir: "auto" }, m.content, m.files?.length ? el("div", { class: "files" }, m.files.map((f) => el("span", { class: "chip file" }, "📎 " + f.split("/").pop()))) : null));
-      if (i >= current.messages.length - 2 && !running) box.append(el("div", { class: "actions right" }, el("button", { type: "button", onclick: () => {
+      if (last) box.append(el("div", { class: "turnbar right" }, iconBtn("edit", "Edit and resend", () => {
         // edit and resend: the question goes back into the box, it and everything after it are removed
         $("#msg").value = m.content; current.messages.splice(i); current.meta.splice(i); saveChats(); renderChat(); $("#msg").focus();
-      } }, "Edit")));
+      })));
     }
     else {
       const meta = current.meta[i] || {};
-      const w = whoLine(meta); if (w) box.append(w);
+      const isLast = i === current.messages.length - 1;
+      if (meta.error) { box.append(errorCard(meta, isLast)); return; }
       box.append(botBubble(m.content, meta));
-      if (meta.steps?.length) box.append(el("details", { class: "steps-box" }, el("summary", {}, `🔧 ${meta.steps.length} steps — looked at your files`), el("div", { class: "steps" }, meta.steps.map((x) => el("div", { class: "step tool" }, x)))));
+      if (meta.steps?.length) box.append(el("details", { class: "steps-box" }, el("summary", {}, `${meta.steps.length} steps — looked at your files`), el("div", { class: "steps" }, meta.steps.map((x) => el("div", { class: "step tool" }, x)))));
       if (meta.ops) box.append(chatOps(meta.ops));
       const plain = m.content.split("\n\n---\n")[0];
       const vs = meta.versions;
-      box.append(el("div", { class: "actions" },
+      box.append(el("div", { class: "turnbar" },
         vs?.length > 1 ? el("span", { class: "versions" },
-          el("button", { type: "button", "aria-label": "Previous answer", disabled: meta.vi === 0, onclick: () => showVersion(i, meta.vi - 1) }, "‹"),
+          el("button", { type: "button", class: "ib", "aria-label": "Previous answer", disabled: meta.vi === 0, onclick: () => showVersion(i, meta.vi - 1) }, "‹"),
           el("span", {}, `${meta.vi + 1}/${vs.length}`),
-          el("button", { type: "button", "aria-label": "Next answer", disabled: meta.vi === vs.length - 1, onclick: () => showVersion(i, meta.vi + 1) }, "›")) : null,
-        el("button", { type: "button", onclick: () => { navigator.clipboard?.writeText(plain).then(() => toast("Copied")); } }, "Copy"),
-        navigator.share ? el("button", { type: "button", onclick: () => navigator.share({ text: plain }).catch(() => {}) }, "Share") : null,
-        "speechSynthesis" in globalThis ? el("button", { type: "button", onclick: () => speak(plain) }, "Read aloud") : null,
-        i === current.messages.length - 1 ? el("button", { type: "button", onclick: retry }, "Try again") : null));
+          el("button", { type: "button", class: "ib", "aria-label": "Next answer", disabled: meta.vi === vs.length - 1, onclick: () => showVersion(i, meta.vi + 1) }, "›")) : null,
+        iconBtn("copy", "Copy", () => { navigator.clipboard?.writeText(plain).then(() => toast("Copied")); }),
+        isLast ? iconBtn("retry", "Try again", retry) : null,
+        "speechSynthesis" in globalThis ? iconBtn("speak", "Read aloud", () => speak(plain)) : null,
+        navigator.share ? iconBtn("share", "Share", () => navigator.share({ text: plain }).catch(() => {})) : null,
+        whoLine(meta)));
     }
   });
   box.scrollTop = box.scrollHeight;
@@ -243,9 +295,11 @@ async function send(text, filesAgain) {
   renderChat();
   const box = $("#messages");
   const live = botBubble("");
-  box.append(live);
-  const status = $("#statusLine");
-  status.hidden = false; status.textContent = "Choosing models…";
+  // what is happening right now, inside the answer itself (drafting, reviewing, reading files…)
+  const thinking = el("div", { class: "thinking" }, el("span", { class: "dots" }, el("i"), el("i"), el("i")), el("span", { class: "st" }, `${MODE_NAME[mode]} · choosing models…`));
+  live.prepend(thinking);
+  box.append(live); box.scrollTop = box.scrollHeight;
+  const status = { set textContent(t) { thinking.querySelector(".st").textContent = t; }, hidden: false };
   running = new AbortController();
   $("#sendBtn").classList.add("stop"); $("#sendBtn").setAttribute("aria-label", "Stop");
   let acc = "", raf = 0;
@@ -274,22 +328,26 @@ async function send(text, filesAgain) {
       onJob: (id, base) => { localStorage.setItem("mychat.pendingJob", JSON.stringify({ chat: current.id, id, base, at: Date.now() })); },
       onStep: (st) => { if (st.kind === "tool") steps.push(`${st.tool} ${JSON.stringify(st.args || {}).slice(0, 100)}`); status.textContent = st.kind === "tool" ? `🔧 ${st.tool} ${JSON.stringify(st.args || {}).slice(0, 70)}` : String(st.text || "").slice(0, 120); },
       onStatus: (s) => { status.textContent = String(s).split("\n").filter(Boolean).pop() || ""; },
-      onDelta: (t) => { acc += t; if (!raf) raf = requestAnimationFrame(() => { raf = 0; live.querySelector(".body").innerHTML = md(acc); box.scrollTop = box.scrollHeight; }); },
+      onDelta: (t) => { acc += t; if (!raf) raf = requestAnimationFrame(() => { raf = 0; thinking.classList.add("small"); live.querySelector(".body").innerHTML = md(acc); box.scrollTop = box.scrollHeight; }); },
     });
     localStorage.removeItem("mychat.pendingJob");
     current.messages.push({ role: "assistant", content: r.content });
     const k = current.messages.length - 1;
     const versionsBefore = carry; carry = null;
-    current.meta[k] = { mode: r.mode, trace: r.trace, claims: r.claims, sources: r.sources, ms: Date.now() - t0,
+    current.meta[k] = { mode: r.mode, route: r.route, trace: r.trace, claims: r.claims, sources: r.sources, ms: Date.now() - t0,
       ...(steps.length || r.steps?.length ? { steps: steps.length ? steps : r.steps.filter((x) => x.tool).map((x) => `${x.tool} ${JSON.stringify(x.args || {}).slice(0, 100)}`) } : {}) };
     if (r.ops?.length) current.meta[k].ops = { id: r.planId, goal: text, ops: r.ops, preview: r.preview, remote: r.remote || null };
     if (versionsBefore) { const vs = [...versionsBefore, { content: r.content, meta: { ...current.meta[k] } }]; current.meta[k].versions = vs; current.meta[k].vi = vs.length - 1; }
   } catch (e) {
-    const msg = running.signal.aborted ? (acc || "Stopped.") : `${acc ? acc + "\n\n" : ""}**Could not answer:** ${e.message}\n\n` +
-      (noKeys ? "No account is connected on this phone — only the free no-key channels were available, and they are busy. Connect Google Gemini or Groq in **Accounts** (about a minute)." : "All connected accounts failed just now (limits or outages). Try again in a minute, or connect one more account in **Accounts**.");
-    current.messages.push({ role: "assistant", content: msg });
+    if (running.signal.aborted) current.messages.push({ role: "assistant", content: acc || "Stopped." });
+    else {
+      current.messages.push({ role: "assistant", content: acc || "(no answer)" });
+      const human = /^No model could answer|^No model available/.test(e.message) ? e.message : `Something went wrong: ${e.message}`;
+      current.meta[current.messages.length - 1] = { mode, error: { message: human + (noKeys ? " No account is connected on this phone yet — connecting Google Gemini or Groq takes about a minute." : ""),
+        detail: e.detail || String(e.stack || e.message).slice(0, 1500) }, ms: Date.now() - t0 };
+    }
   } finally {
-    running = null; status.hidden = true;
+    running = null;
     keepAlive.end("Your answer is ready");
     $("#sendBtn").classList.remove("stop"); $("#sendBtn").setAttribute("aria-label", "Send");
     saveChats(); renderChat();
@@ -301,7 +359,7 @@ function retry() {
   const last = current.messages.at(-1);
   if (last?.role !== "assistant") return;
   const meta = current.meta[current.messages.length - 1] || {};
-  carry = meta.versions || [{ content: last.content, meta: { ...meta, versions: undefined, vi: undefined } }];
+  carry = meta.error ? null : meta.versions || [{ content: last.content, meta: { ...meta, versions: undefined, vi: undefined } }];
   current.messages.pop(); current.meta.length = current.messages.length;
   const q = current.messages.pop(); send(q.content, q.files);
 }

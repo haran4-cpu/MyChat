@@ -91,7 +91,7 @@ document.querySelector('.tabs button[data-view="chat"]').click();
 document.querySelector("#msg").value = "בדיקה: מה שלומך?";
 document.querySelector("#sendForm").requestSubmit();
 mark("sent");
-for (let i = 0; i < 60 && !document.querySelector(".actions"); i++) await wait(100);
+for (let i = 0; i < 60 && !document.querySelector(".turnbar, .errcard"); i++) await wait(100);
 mark("answered");
 await wait(800);
 // Agent, Files, attachments and key transfer on the phone's folder (browser storage here, Documents/MyChat on the phone)

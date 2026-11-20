@@ -123,8 +123,8 @@ function startJob(b) {
   const oreq = { messages: Array.isArray(b.messages) ? b.messages : [] };
   brainRun(oreq, { mode: job.mode, privateData: b.mode === "private", truth: truthFor(false),
     onDelta: (t) => { job.content += t; }, onStatus: (st) => { job.statusLine = st; job.steps.push(st); if (job.steps.length > 200) job.steps.shift(); } })
-    .then((r) => Object.assign(job, { status: "done", content: r.content, result: { mode: r.mode, trace: r.trace, claims: r.claims, sources: r.sources, ops: r.ops, planId: r.planId, checked: r.checked } }))
-    .catch((e) => Object.assign(job, { status: "error", error: e.message }))
+    .then((r) => Object.assign(job, { status: "done", content: r.content, result: { mode: r.mode, route: r.route, trace: r.trace, claims: r.claims, sources: r.sources, ops: r.ops, planId: r.planId, checked: r.checked } }))
+    .catch((e) => Object.assign(job, { status: "error", error: e.message, detail: e.detail }))
     .finally(() => { job.ended = Date.now(); try { fs.writeFileSync(path.join(AGENT_DIR, id + ".json"), JSON.stringify(job)); } catch { /* ignore */ } });
   for (const [k, j] of jobs) if (j.ended && Date.now() - j.ended > 24 * 3600e3) jobs.delete(k);
   return job;

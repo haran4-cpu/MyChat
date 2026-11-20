@@ -433,7 +433,7 @@ class Pipe:
                                 said += d["content"]
                                 got_any = True
                                 yield d["content"]
-                    if "All models failed" in said[:300] or "no model" in said[:300].lower():
+                    if "All models failed" in said[:300] or "no model" in said[:300].lower() and "Accounts" not in said[:600]:
                         yield ("\n\nNo cloud provider is connected yet. Pick **MyChat · Accounts & keys** in the model list: "
                                "sign in with Google (OpenRouter) or paste a key, then ask again.")
             except httpx.HTTPError as e:
