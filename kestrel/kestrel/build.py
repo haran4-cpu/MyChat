@@ -87,7 +87,8 @@ SYS_TESTS = ("You write acceptance tests for a web page, one or two per requirem
              "{do:'expect', target, text_matches:'regex'} | {do:'expect_number', target, op:'<'|'>'|'=='|'<='|'>='|'!=', value:'number' or 'mark'} "
              "(mm:ss is read as seconds) | {do:'expect_changed', target} / {do:'expect_same', target} (compared with its mark; "
              "works for canvas too) | {do:'expect_visible', target} | {do:'expect_hidden', target} | {do:'expect_no_errors'}.\n"
-             "target = '#id' from the inventory, or a control's visible text, or 'canvas', or 'page'.\n"
+             "target = '#id' from the inventory, or a control's visible text, or 'canvas', or 'page', or '2nd input' "
+             "(the Nth match of a CSS selector in page order: '1st input', '3rd button').\n"
              "Use only elements in the inventory. Test BEHAVIOUR the requirement promises (values, changes, states), not "
              "styling. Avoid anything random or timing-fragile: allow generous waits and ranges. Answer with JSON only.")
 SYS_JUDGE = ("You arbitrate between a requirement and an acceptance test. You do NOT see the program. Decide only whether the "

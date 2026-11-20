@@ -779,6 +779,19 @@ class AcceptanceTests(unittest.TestCase):
         self.assertIn("could not find", r[1]["msg"])
         self.assertIn('shows "1"', r[2]["msg"])
 
+    def test_nth_target_works_when_inputs_are_wrapped(self):
+        """Measured: the converter's hidden checks used 'input:last-of-type', which picks the wrong box when each input
+        sits in its own <div> (a normal layout), so correct converters failed."""
+        from kestrel import runcheck
+        d = Path(tempfile.mkdtemp())
+        f = d / "c.html"
+        f.write_text("<!doctype html><html><body><div><input id=c></div><div><input id=f></div><script>"
+                     "c.oninput=function(){f.value=(c.value*9/5+32).toFixed(1)};</script></body></html>", encoding="utf-8")
+        tests = [{"name": "c to f", "steps": [{"do": "type", "target": "1st input", "text": "100"}, {"do": "wait", "ms": 300},
+                                              {"do": "expect", "target": "2nd input", "text_matches": "^212(\\.0)?$"}]}]
+        r = runcheck.run_tests(f, tests)
+        self.assertTrue(r[0]["ok"], r)
+
     def test_batched_tests_are_isolated_and_a_frozen_test_does_not_sink_the_rest(self):
         from kestrel import runcheck
         d = Path(tempfile.mkdtemp())

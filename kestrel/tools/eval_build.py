@@ -73,10 +73,10 @@ TASKS = {
         "goal": "Build a temperature converter in one HTML file: a Celsius input and a Fahrenheit input that update each "
                 "other live as you type, rounded to one decimal.",
         "held_out": [
-            {"name": "c to f", "steps": [{"do": "type", "target": "input", "text": "100"}, {"do": "wait", "ms": 300},
-                                         {"do": "expect", "target": "input:nth-of-type(2), input:last-of-type", "text_matches": "^212(\\.0)?$"}]},
-            {"name": "zero", "steps": [{"do": "type", "target": "input", "text": "0"}, {"do": "wait", "ms": 300},
-                                       {"do": "expect", "target": "input:last-of-type", "text_matches": "^32(\\.0)?$"}]},
+            {"name": "c to f", "steps": [{"do": "type", "target": "1st input", "text": "100"}, {"do": "wait", "ms": 300},
+                                         {"do": "expect", "target": "2nd input", "text_matches": "^212(\\.0)?$"}]},
+            {"name": "zero", "steps": [{"do": "type", "target": "1st input", "text": "0"}, {"do": "wait", "ms": 300},
+                                       {"do": "expect", "target": "2nd input", "text_matches": "^32(\\.0)?$"}]},
         ]},
     "snake": {
         "goal": "Build a Snake game in one HTML file with a canvas: it starts moving right away, arrow keys steer, eating food "

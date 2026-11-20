@@ -180,6 +180,7 @@ export class Gateway {
     this.parked = {};          // provider -> { until, reason } (no credit / balance): retried after a while, shown on Accounts
     this.limits = {};          // provider -> { remaining, resetAt } from rate-limit headers
     this.requests = 0;
+    this.idleTimeoutMs = o.idleTimeoutMs || 45000;
     this.explore = null;
     this.log = o.log || (() => {});
     this.firstTokenTimeoutMs = o.firstTokenTimeoutMs || 45000;
@@ -432,10 +433,18 @@ export class Gateway {
         finish = j.choices?.[0]?.finish_reason;
       } else {
         const reader = res.body.getReader(), dec = new TextDecoder();
-        let buf = "";
+        let buf = "", idleTimer = null;
+        // Measured 2026-11-20: a stream that stalls after its first words hung a whole benchmark for minutes.
+        // No bytes for idleTimeoutMs = the stream is dead: abort, count it as a failure, fail over (the partial
+        // answer is kept and continued by the next model).
+        const idle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => ctl.abort(), this.idleTimeoutMs); };
+        idle();
         for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
+          let value, done;
+          try { ({ value, done } = await reader.read()); }
+          catch (e) { clearTimeout(idleTimer); throw ctl.signal.aborted && !opt.signal?.aborted ? new Error(`stream stalled (no data for ${this.idleTimeoutMs / 1000} s)`) : e; }
+          if (done) { clearTimeout(idleTimer); break; }
+          idle();
           buf += dec.decode(value, { stream: true });
           let i;
           while ((i = buf.indexOf("\n")) >= 0) {

@@ -255,3 +255,26 @@ test("working pool: once an account has models that answer, the rest are skipped
   assert.ok(gw.limits.x.resetAt - Date.now() > 170e3);
   assert.equal(parseResetMs("7.66s"), 7660); assert.equal(parseResetMs("120ms"), 120); assert.equal(parseResetMs("30"), 30000);
 });
+
+test("a stream that stalls after its first words is cut off and the next model finishes the answer", async () => {
+  const srv = http.createServer((req, res) => {
+    let b = ""; req.on("data", (d) => (b += d)); req.on("end", () => {
+      const model = JSON.parse(b).model;
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.write("data: " + JSON.stringify({ choices: [{ delta: { content: model === "stall" ? "Half an " : "answer." } }] }) + "\n\n");
+      if (model !== "stall") res.end("data: [DONE]\n\n");          // "stall" never finishes and never closes
+    });
+  });
+  await new Promise((ok) => srv.listen(0, "127.0.0.1", ok));
+  const gw = new Gateway({ keys: { s: "k" }, allowKeyless: false, idleTimeoutMs: 400, extraProviders: { s: { name: "s", baseUrl: `http://127.0.0.1:${srv.address().port}/v1` } } });
+  for (const id of Object.keys(gw.providers)) if (id !== "s") gw.disabled[id] = "off";
+  gw.models.s = ["stall", "ok"];
+  gw.pins = { chat: ["s:stall"], fast: ["s:stall"] };
+  try {
+    const t0 = Date.now();
+    const r = await gw.chat({ messages: [{ role: "user", content: "hi" }] }, { onDelta: () => {} });
+    assert.ok(Date.now() - t0 < 5000, "did not hang");
+    assert.match(r.content, /^Half an answer\.?/);
+    assert.match(gw.stats.peek("s", "stall").lastError, /stalled/);
+  } finally { srv.closeAllConnections(); srv.close(); }
+});

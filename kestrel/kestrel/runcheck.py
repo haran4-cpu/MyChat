@@ -97,6 +97,7 @@ function vis(e){if(!e)return false;var r=e.getBoundingClientRect();var cs=getCom
 function txt(e){if(!e)return'';if(e.tagName==='INPUT'||e.tagName==='TEXTAREA'||e.tagName==='SELECT')return String(e.value);return (e.innerText||e.textContent||'').trim();}
 function find(t){if(t==null||t==='')return document.body;t=String(t).trim();var low=t.toLowerCase();
  if(low==='page'||low==='body')return document.body;if(low==='canvas')return document.querySelector('canvas');
+ var nth=t.match(/^(\d+)(?:st|nd|rd|th)\s+(.+)$/i);if(nth){try{return document.querySelectorAll(nth[2])[+nth[1]-1]||null}catch(e){return null}}
  if(/^[#.\[]/.test(t)||/^[a-z]+[#.\[]/.test(t)){try{return document.querySelector(t)}catch(e){}}
  var groups=['button,input[type=button],input[type=submit],a,[role=button],[onclick],select,label','h1,h2,h3,h4,h5,h6,p,span,div,li,td,th,output,strong,b'];
  for(var g=0;g<2;g++){var c=[].slice.call(document.querySelectorAll(groups[g])).filter(function(e){return e.id!=='__kestrel_report'});
