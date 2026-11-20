@@ -405,20 +405,69 @@ def coerce_args(t: Tool, args: dict) -> dict:
     return clean
 
 
+def nearby(ctx: Ctx, path: str) -> str:
+    """What the person probably meant when a path does not exist (measured 2026-11-20: asked about the project
+    "DJ-TiTo-23.8", the local model tried a folder of that name 9 times — the project was the file DJ-TiTo-23.8.html —
+    then created the folder and wrote reports about an empty project)."""
+    try:
+        p = ctx.guard.resolve(path)
+    except Exception:
+        return ""
+    parent = p.parent
+    if not parent.is_dir():
+        return ""
+    want = p.name.lower()
+    hits = []
+    try:
+        for it in parent.iterdir():
+            n = it.name.lower()
+            if n == want or n.startswith(want + ".") or (Path(n).stem == Path(want).stem and n != want) or (len(want) > 3 and want in n):
+                kind = "folder" if it.is_dir() else f"file, {it.stat().st_size:,} B"
+                hits.append(f"{it} ({kind})")
+    except OSError:
+        return ""
+    if not hits:
+        return ""
+    return ("\nDID YOU MEAN: " + "; ".join(hits[:5]) +
+            "\nUse that exact path. Do not create a file or folder with the name the person used: what they mean already exists.")
+
+
+WRITE_TOOLS = {"write_file", "make_folder", "append_file", "edit_file", "move", "delete", "build_doc", "write_docx"}
+
+
 def call(ctx: Ctx, name: str, args: dict, limit: int = 3000) -> tuple[str, bool]:
     """Returns (result_text, ok)."""
     t = REGISTRY.get(name)
     if not t:
         return f"ERROR: unknown tool '{name}'. Available: {', '.join(REGISTRY)}", False
+    # a "step complete" with nothing read is a claim without proof (measured: three mission steps were "completed" by
+    # writing reports about files that were never read)
+    if name == "finish" and getattr(ctx, "missing", None) and getattr(ctx, "reads", 0) == 0:
+        return ("ERROR: nothing was read or produced yet, so nothing can be reported as done. Find and read the actual files "
+                "first (list_dir / find_files / read_file), then finish with what you found, citing them."), False
+    target = str(args.get("path", "")).strip().strip('"').rstrip("\\/").lower()
+    if name in ("make_folder", "write_file", "make_document") and getattr(ctx, "missing", None) and (
+            target in ctx.missing or any(target.startswith(m.rstrip("\\/") + sep) for m in ctx.missing for sep in ("\\", "/"))):
+        return ("DENIED: you looked for this path a moment ago and it did not exist. Creating it would invent the project. "
+                "Look for what the person meant (find_files with part of the name) instead."), False
     try:
         out = t.fn(ctx, **coerce_args(t, args))
         ok = True
+        if name in ("read_file", "find_files", "search_files"):
+            ctx.reads = getattr(ctx, "reads", 0) + 1
     except Denied as e:
         out, ok = f"DENIED: {e}", False
     except ToolError as e:
         out, ok = f"ERROR: {e}", False
     except Exception as e:  # never let one tool crash the session
         out, ok = f"ERROR: {type(e).__name__}: {e}", False
+    if not ok and args.get("path") and re.search(r"not a folder|not found|no such file|does not exist|cannot find", str(out), re.I):
+        hint = nearby(ctx, str(args["path"]))
+        if hint:   # something with that name exists: the person meant it, so creating the missing path is blocked
+            if not hasattr(ctx, "missing"):
+                ctx.missing = set()
+            ctx.missing.add(str(args["path"]).strip().strip('"').rstrip("\\/").lower())
+            out = str(out) + hint
     out = str(out)
     if len(out) > limit:
         out = out[:limit] + f"\n... (cut at {limit} chars; read in smaller pieces)"

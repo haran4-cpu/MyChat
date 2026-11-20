@@ -49,7 +49,7 @@ export async function tree(fs, { maxEntries = 400, maxDepth = 4 } = {}) {
 }
 const fmtSize = (b) => (b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB");
 
-const SYS = `You are MyChat Agent: a senior engineer and careful assistant. You DO have access to the person's MyChat folder (the workspace) through the tools below — never say you cannot see their files; look.
+const SYS = `You are MyChat Agent: a senior engineer and careful assistant. You DO have access to the person's MyChat folder (the workspace) through the tools below — never say you cannot see their files; look. You are not one company's model: MyChat routes each step to one of several models (Google Gemini, open models such as gpt-oss, Qwen, Llama, DeepSeek, Kimi, GLM, and a local model on the PC) and has answers reviewed by a different family. Never say you were made by Google, OpenAI or anyone else; if asked which model, say this and that the model that answered is shown under the answer.
 How you work (gather context → act → verify → repeat):
 0. In your first reply, put a short plan in "thought" (2-4 steps), then start. Use the WORKSPACE MAP: it tells you what each project is and where its real code is — go there directly.
 1. Understand what is asked and what "done" looks like.
@@ -180,6 +180,18 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   const proposed = [];   // changes the model "called" as if they were tools
   let by = "", calls = 0, last = null, raw = "";
   const skip = [];   // models that answered with nothing usable in this task: the next call goes elsewhere
+  // The name the person used is often not the exact path (measured 2026-11-20: "the project DJ-TiTo-23.8" was the file
+  // DJ-TiTo-23.8.html; a model looked for the folder 9 times, then invented the project). Point at what exists.
+  const didYouMean = async (p) => {
+    const rel = String(p || "").replace(/\\/g, "/").replace(/\/+$/, ""), i = rel.lastIndexOf("/");
+    const dir = i >= 0 ? rel.slice(0, i) : "", want = rel.slice(i + 1).toLowerCase();
+    if (!want) return "";
+    let items = []; try { items = await fs.list(dir); } catch { return ""; }
+    const stem = (n) => n.replace(/\.[^.]+$/, "");
+    const hits = items.filter((it) => { const n = it.name.toLowerCase(); return n !== want && (n.startsWith(want + ".") || stem(n) === stem(want) || (want.length > 3 && n.includes(want))); })
+      .slice(0, 5).map((it) => `${dir ? dir + "/" : ""}${it.name}${it.dir ? "/" : ""}`);
+    return hits.length ? `\nDID YOU MEAN: ${hits.join(", ")} — use that exact path; what the person named already exists, never create it.` : "";
+  };
   const runTool = async (name, args = {}) => {
     if (OPS.includes(name) && args && args.path) {   // models often "call" a change; keep it as a proposed change
       const { ops: ok } = checkOps([{ op: name, ...args }]);
@@ -192,11 +204,13 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
         if (args.path && /\.(zip|apk|jar)(!\/|$)/i.test(args.path)) return (await reader.files(args.path, { limit: 400 })).map((f) => `${f.path}  (${fmtSize(f.size)})`).join("\n") || "(empty)";
         const sub = args.path ? safeRel(args.path) : "";
         if (args.path && !sub) return "unsafe path";
+        if (sub) { let ok = true; try { ok = (await fs.list(sub)).length > 0 || !!(await fs.exists?.(sub)); } catch { ok = false; }
+          if (!ok) { const h = await didYouMean(sub); if (h) return `${sub}: no such folder.` + h; } }
         return await tree(sub ? subFs(fs, sub) : fs, { maxEntries: 400, maxDepth: 5 });
       }
       if (name === "read") {
         const t = await reader.text(args.path);
-        if (t == null) return `${args.path}: not found or not a text file`;
+        if (t == null) return `${args.path}: not found or not a text file` + await didYouMean(args.path);
         reads.add(args.path); seen.set(args.path, t);
         const lines = t.split("\n"), from = Math.max(1, Number(args.from) || 1), to = Math.min(lines.length, Number(args.to) || from + 1499);
         return `${args.path} — lines ${from}-${to} of ${lines.length}\n` + lines.slice(from - 1, to).map((l, i) => `${from + i}| ${l}`).join("\n");

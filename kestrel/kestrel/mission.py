@@ -134,8 +134,12 @@ class MissionRunner:
     def plan(self, m: Mission):
         m.log("planning")
         self._state(m)
+        # Plan from what exists, not blind (measured 2026-11-20: a blind plan for "study my project DJ-TiTo-23.8" asked
+        # for config files, dependencies and database schemas — the project was one HTML file)
         msgs = [{"role": "system", "content": doctrine.PLANNER},
-                {"role": "user", "content": f"Goal:\n{m.d['goal']}\n\nWorkspace: {self.guard.workspace}"}]
+                {"role": "user", "content": f"Goal:\n{m.d['goal']}\n\nWorkspace: {self.guard.workspace}\n\n{_ground(self.guard.workspace, m.d['goal'])}\n\n"
+                 "Plan only steps that fit what actually exists above. If the goal names something, use the exact matching path. "
+                 "Never plan to create the thing the person asked you to study."}]
         last_err = ""
         for attempt in range(3):
             try:
@@ -263,3 +267,29 @@ class MissionRunner:
 
     def pause(self):
         self.stop.set()
+
+
+def _ground(ws, goal: str, limit: int = 160) -> str:
+    """A real listing of the workspace (2 levels) plus the paths whose names match words of the goal."""
+    from pathlib import Path
+    ws = Path(ws)
+    lines, hits = [], []
+    words = [w.lower() for w in re.findall(r"[\w.\-]{4,}", goal or "")]
+    try:
+        for p in sorted(ws.rglob("*")):
+            rel = p.relative_to(ws)
+            if any(part.startswith(".") or part in ("node_modules", "__pycache__", ".git") for part in rel.parts):
+                continue
+            n = p.name.lower()
+            if words and any(w in n for w in words) and len(hits) < 20:
+                hits.append(f"{rel}{'/' if p.is_dir() else f'  ({p.stat().st_size:,} B)'}")
+            if len(rel.parts) <= 2 and len(lines) < limit:
+                lines.append(f"{rel}{'/' if p.is_dir() else ''}")
+            if len(lines) >= limit and len(hits) >= 20:
+                break
+    except OSError:
+        pass
+    out = "WHAT EXISTS (2 levels):\n" + ("\n".join(lines) or "(empty)")
+    if hits:
+        out += "\n\nPATHS MATCHING THE GOAL:\n" + "\n".join(hits)
+    return out

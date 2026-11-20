@@ -303,6 +303,32 @@ class AgentTests(unittest.TestCase):
         s.run("make a folder")
         self.assertTrue((Path(cfg["workspace"]) / "newdir").is_dir())
 
+    def test_missing_project_name_points_to_the_real_file(self):
+        # measured 2026-11-20: "DJ-TiTo-23.8" was the file DJ-TiTo-23.8.html; the model tried the folder 9 times,
+        # created it and wrote reports about an empty project
+        s, cfg, events, dec = self.session()
+        ws = Path(cfg["workspace"])
+        (ws / "DJ-TiTo-23.8.html").write_text("<html><body>decks</body></html>")
+        out, ok = tools.call(s.ctx, "list_dir", {"path": "DJ-TiTo-23.8"})
+        self.assertFalse(ok)
+        self.assertIn("DID YOU MEAN", out)
+        self.assertIn("DJ-TiTo-23.8.html", out)
+        out, ok = tools.call(s.ctx, "make_folder", {"path": "DJ-TiTo-23.8"})
+        self.assertFalse(ok)
+        self.assertFalse((ws / "DJ-TiTo-23.8").exists())
+        out, ok = tools.call(s.ctx, "write_file", {"path": "DJ-TiTo-23.8/report.txt", "content": "x"})
+        self.assertFalse(ok)
+        out, ok = tools.call(s.ctx, "finish", {"summary": "done"})
+        self.assertFalse(ok)
+        out, ok = tools.call(s.ctx, "read_file", {"path": "DJ-TiTo-23.8.html"})
+        self.assertTrue(ok, out)
+        out, ok = tools.call(s.ctx, "finish", {"summary": "read the file"})
+        self.assertTrue(ok, out)
+        # a genuinely new name is still allowed
+        out, ok = tools.call(s.ctx, "list_dir", {"path": "brand-new"})
+        out, ok = tools.call(s.ctx, "make_folder", {"path": "brand-new"})
+        self.assertTrue(ok, out)
+
     def test_edit_file_uniqueness(self):
         s, cfg, events, dec = self.session()
         ws = Path(cfg["workspace"])

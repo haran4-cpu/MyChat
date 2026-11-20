@@ -287,3 +287,18 @@ test("native tool calls with an empty text are taken as the agent's tool calls",
   assert.equal(r.steps[0].tool, "read");
   assert.match(r.answer, /buy milk/);
 });
+
+test("a project named without its extension is found: tree/read point at the real file instead of an empty folder", async () => {
+  const fs = memoryFs({ "Projects/DJ-TiTo-23.8.html": "<html>decks</html>", "Projects/notes.txt": "x" });
+  let n = 0, seen = "";
+  const gw = { async chat(req) {
+    n++;
+    if (n === 1) return { content: '{"tool":"tree","args":{"path":"Projects/DJ-TiTo-23.8"}}', provider: "p", model: "m" };
+    if (n === 2) seen = req.messages.at(-1).content;
+    if (n === 2) return { content: '{"tool":"read","args":{"path":"Projects/DJ-TiTo-23.8.html"}}', provider: "p", model: "m" };
+    return { content: '{"final":"It is one HTML file (Projects/DJ-TiTo-23.8.html:1)."}', provider: "p", model: "m" };
+  } };
+  const r = await runAgent(gw, { goal: "study my project DJ-TiTo-23.8", fs, plan: false, maxSteps: 5 });
+  assert.match(seen, /DID YOU MEAN: Projects\/DJ-TiTo-23\.8\.html/);
+  assert.match(r.answer, /HTML file/);
+});
