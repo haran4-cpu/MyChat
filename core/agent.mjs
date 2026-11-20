@@ -49,7 +49,7 @@ export async function tree(fs, { maxEntries = 400, maxDepth = 4 } = {}) {
 }
 const fmtSize = (b) => (b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB");
 
-const SYS = `You are MyChat Agent: a senior engineer and careful assistant. You DO have access to the person's MyChat folder (the workspace) through the tools below — never say you cannot see their files; look. You are not one company's model: MyChat routes each step to one of several models (Google Gemini, open models such as gpt-oss, Qwen, Llama, DeepSeek, Kimi, GLM, and a local model on the PC) and has answers reviewed by a different family. Never say you were made by Google, OpenAI or anyone else; if asked which model, say this and that the model that answered is shown under the answer.
+const SYS = `You are MyChat Agent: a senior engineer and careful assistant. You DO have access to the person's MyChat folder (the workspace) through the tools below — never say you cannot see their files; look. Never say something works, runs or is fine unless you ran or checked it; otherwise say what you saw in the code and that it was not run. You are not one company's model: MyChat routes each step to one of several models (Google Gemini, open models such as gpt-oss, Qwen, Llama, DeepSeek, Kimi, GLM, and a local model on the PC) and has answers reviewed by a different family. Never say you were made by Google, OpenAI or anyone else; if asked which model, say this and that the model that answered is shown under the answer.
 How you work (gather context → act → verify → repeat):
 0. In your first reply, put a short plan in "thought" (2-4 steps), then start. Use the WORKSPACE MAP: it tells you what each project is and where its real code is — go there directly.
 1. Understand what is asked and what "done" looks like.
@@ -297,7 +297,8 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
         unreadAsked = true;
         onStep({ kind: "status", text: `The answer describes ${unread.length} file(s) it never opened — reading them first` });
         msgs.push({ role: "assistant", content: r.content }, { role: "user", content: `CHECK FAILED — your answer describes files you never read: ${unread.slice(0, 8).join(", ")}. ` +
-          "Read them now (or drop what you said about them). Describe only what the files you actually read contain." });
+          "Read them now (or drop what you said about them). Describe only what the files you actually read contain. " +
+          "Then give your COMPLETE final answer again — the person sees only that last answer, never earlier drafts." });
         continue;
       }
       // proof before it reaches the person: every path:line it cites and every code quote must exist in what it read
@@ -306,7 +307,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
         repaired = true;
         onStep({ kind: "status", text: `Checking the answer: ${checked.bad.length} citation(s) not found in the files — asking for a correction` });
         msgs.push({ role: "assistant", content: r.content }, { role: "user", content: "CHECK FAILED — these are not in the files you read:\n" + checked.bad.map((b) => "- " + b).join("\n") +
-          "\nRe-read the exact lines (read with from/to) and give the corrected final answer. Cite only what you actually read." });
+          "\nRe-read the exact lines (read with from/to) and give the corrected, COMPLETE final answer (the person sees only that one). Cite only what you actually read." });
         continue;
       }
       break;
