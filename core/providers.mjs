@@ -160,6 +160,7 @@ export const MODEL_PRIORS = [
   [/mistral.*(large|medium)/i, { code: 0.75, reason: 0.72, chat: 0.8, vision: 0.6, fast: 0.5 }],
   [/llama.?4/i, { code: 0.68, reason: 0.65, chat: 0.75, vision: 0.8, long: 0.8, fast: 0.75 }],
   [/llama.*(70b|405b)/i, { code: 0.65, reason: 0.65, chat: 0.72, fast: 0.6 }],
+  [/allam/i, { code: 0.2, reason: 0.3, chat: 0.35, long: 0.2, fast: 0.4 }],   // Arabic-specialist 7B: measured answering Hebrew in Arabic
   [/gemma/i, { code: 0.55, reason: 0.55, chat: 0.65, vision: 0.6, fast: 0.7 }],
   [/(8b|7b|mini|small|nano|lite)/i, { code: 0.45, reason: 0.4, chat: 0.55, fast: 0.95 }],
 ];

@@ -42,6 +42,7 @@ function build() {
                      extraProviders: settings.extraProviders || {},
                      log: (m) => fs.appendFileSync(F("gateway.log"), new Date().toISOString() + " " + m + "\n") });
   gw.stats.load(readJson("stats.json", {}));
+  gw.importState(readJson("gateway-state.json", {}));
   gw.refreshModels().catch(() => {});
 }
 // A key saved under the wrong provider by an older version (e.g. a new "AQ." Gemini key filed as SambaNova) moves to its
@@ -56,7 +57,8 @@ function build() {
   if (moved) writeJson("keys.json", keys);
 })();
 build();
-setInterval(() => { try { writeJson("stats.json", gw.stats.toJSON()); } catch { /* ignore */ } }, 30000).unref();
+const saveState = () => { try { writeJson("stats.json", gw.stats.toJSON()); writeJson("gateway-state.json", gw.exportState()); } catch { /* ignore */ } };
+setInterval(saveState, 30000).unref();
 
 const MODEL_IDS = [...Object.keys(MODES).map((m) => "mychat/" + m), "mychat/private"];
 const truthFor = (privateData) => (privateData ? undefined : { search, ledger });
@@ -271,6 +273,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/diag") return send(res, 200, await search.diagnose());
     if (req.method === "GET" && url.pathname === "/bench") return send(res, 200, bench ? bench.state : { running: false });
     if (req.method === "POST" && url.pathname === "/admin/shutdown") {   // used by the Open WebUI function to reload updated code
+      saveState();
       send(res, 200, { ok: true });
       setTimeout(() => process.exit(0), 150);
       return;

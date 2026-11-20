@@ -96,6 +96,12 @@ class Stats {
   load(obj) { for (const [k, v] of Object.entries(obj || {})) this.m.set(k, v); }
 }
 
+/** More Arabic letters than Hebrew ones (the answer to a Hebrew question came back in the wrong script). */
+export function wrongScript(t) {
+  const ar = (t.match(/[\u0600-\u06FF]/g) || []).length, he = (t.match(/[\u0590-\u05FF]/g) || []).length;
+  return ar > 3 && ar > he;
+}
+
 /** OpenAI-style request -> Gemini native generateContent body. */
 // Account has no money: park the provider. NOT plain "billing" (Gemini's ordinary quota message says "check your plan and billing").
 const BILLING_RX = /insufficient.{0,12}(balance|credit|funds)|purchase pre-?paid credits|payment required|out of credits|exceeded your monthly included credits/i;
@@ -280,6 +286,7 @@ export class Gateway {
           if (hp >= 0) score += 1.2 - hp * 0.05;
           else if ((this.pins.heBad || []).includes(id + ":" + model)) score *= 0.1;
         }
+        if (lang === "he" && st.heWrong && !(this.pins.he || []).includes(id + ":" + model)) score *= 0.05;   // caught answering in Arabic
         out.push({ provider: id, model, score, family: family(model) });
       }
     }
@@ -290,6 +297,14 @@ export class Gateway {
     const perProvider = {}, first = [], rest = [];
     for (const c of out) ((perProvider[c.provider] = (perProvider[c.provider] || 0) + 1) <= 3 ? first : rest).push(c);
     return [...first, ...rest].slice(0, limit);
+  }
+
+  /** Pauses survive a restart (measured: after an update the gateway forgot that Groq and OpenRouter were out for the day). */
+  exportState() { return { parked: this.parked, quotaStrikes: this.quotaStrikes }; }
+  importState(o) {
+    const now = Date.now();
+    for (const [id, v] of Object.entries(o?.parked || {})) if (v && v.until > now) this.parked[id] = v;
+    Object.assign(this.quotaStrikes, o?.quotaStrikes || {});
   }
 
   /** A 429 from several different models of one account within 2 minutes means the account (not the model) is out:
@@ -352,9 +367,9 @@ export class Gateway {
     if (!Object.keys(this.models).length) await this.refreshModels();
     const task = opt.task || classify(req.messages);
     this.pickExplore(task);
+    const lang = /[\u0590-\u05FF]/.test(lastUserText(req.messages)) ? "he" : "";
     let list = this.candidates(task, { needTools: !!req.tools?.length, needVision: hasImages(req.messages),
-                                       privateData: opt.privateData, exclude: opt.exclude, families: opt.families,
-                                       lang: /[\u0590-\u05FF]/.test(lastUserText(req.messages)) ? "he" : "" });
+                                       privateData: opt.privateData, exclude: opt.exclude, families: opt.families, lang });
     if (opt.prefer) {
       const [pp, ...mm] = opt.prefer.split(":"), pm = mm.join(":");
       list = [{ provider: pp, model: pm, score: 99, family: family(pm) }, ...list.filter((c) => !(c.provider === pp && c.model === pm))];
@@ -376,11 +391,23 @@ export class Gateway {
         ? [...req.messages, { role: "assistant", content: partial },
            { role: "user", content: "Your previous answer was cut off. Continue exactly where it stopped, without repeating anything." }]
         : req.messages;
+      // Hebrew question: hold the first words back until the script is clear. Measured 2026-11-20: a small Arabic
+      // model answered "what is the capital of Canada?" (in Hebrew) with an Arabic text about Bitcoin.
+      let held = "", passed = lang !== "he" || !!partial;
+      const flush = (final) => {
+        const letters = (held.match(/\p{L}/gu) || []).length;
+        if (!final && letters < 12 && held.length < 80) return;
+        if (wrongScript(held)) { const e = new Error("answered a Hebrew question in another script (Arabic)"); e.wrongLang = true; throw e; }
+        passed = true; partial += held; if (held) opt.onDelta?.(held); held = "";
+      };
+      const sink = (d) => { if (passed) { partial += d; opt.onDelta?.(d); } else { held += d; flush(false); } };
       try {
-        const r = await this._call(c, { ...req, messages }, opt, (d) => { partial += d; opt.onDelta?.(d); });
+        const r = await this._call(c, { ...req, messages }, opt, sink);
+        if (!passed) flush(true);
         attempts.push({ ...c, ok: true, ms: r.ms });
         return { ...r, content: partial || r.content, provider: c.provider, model: c.model, task, attempts, ms: Date.now() - t0 };
       } catch (e) {
+        if (e.wrongLang) { const st = this.stats.get(c.provider, c.model); st.heWrong = (st.heWrong || 0) + 1; }
         attempts.push({ ...c, ok: false, error: String(e.message || e).slice(0, 200) });
         this.log(`fail ${c.provider}:${c.model}: ${e.message}`);
         if (e.fatal) break;
@@ -461,6 +488,7 @@ export class Gateway {
         // answer is kept and continued by the next model).
         const idle = () => { clearTimeout(idleTimer); idleTimer = setTimeout(() => ctl.abort(), this.idleTimeoutMs); };
         idle();
+        try {
         for (;;) {
           let value, done;
           try { ({ value, done } = await reader.read()); }
@@ -496,9 +524,11 @@ export class Gateway {
             }
           }
         }
+        } finally { clearTimeout(idleTimer); }   // an error mid-stream (provider error, wrong script) must not leave the timer alive
       }
     } catch (e) {
       clearTimeout(firstTimer);
+      ctl.abort();
       this.stats.failure(c.provider, c.model, e, 30000);
       throw e;
     } finally {

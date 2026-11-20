@@ -304,3 +304,28 @@ test("image, computer-use and live-audio models are not chat models", async () =
   for (const m of ["gemini-3-flash-preview", "gemini-flash-lite-latest", "openai/gpt-oss-120b", "nvidia/nemotron-3-ultra-550b-a55b:free"])
     assert.ok(!NOT_CHAT.test(m), m);
 });
+
+test("a Hebrew question answered in Arabic is held back, failed over, and that model is demoted for Hebrew", async () => {
+  const w = await mockWorld({
+    a: { "allam-2-7b": { text: "بيتكوين هي عملة افتراضية تم إنشاؤها في عام 2008" } },
+    b: { "good-model": { text: "אוטווה" } },
+  });
+  const g = only(["a", "b"])(gwFor(w, ["a", "b"]));
+  const seen = [];
+  const r = await g.chat({ messages: [{ role: "user", content: "מהי בירת קנדה? מילה אחת." }] }, { prefer: "a:allam-2-7b", onDelta: (d) => seen.push(d) });
+  assert.equal(r.model, "good-model");
+  assert.equal(seen.join(""), "אוטווה", "no Arabic reached the user");
+  assert.equal(g.stats.get("a", "allam-2-7b").heWrong, 1);
+  const c = g.candidates("chat", { lang: "he" });
+  assert.equal(c[0].model, "good-model");
+  w.srv.closeAllConnections(); w.srv.close();
+});
+
+test("pauses survive a restart; expired ones are dropped", () => {
+  const a = new Gateway({ keys: { groq: "k" }, allowKeyless: false, allowLocal: false });
+  a.parked.groq = { until: Date.now() + 3600e3, reason: "free daily limit reached" };
+  a.parked.gemini = { until: Date.now() - 1, reason: "old" };
+  const b = new Gateway({ keys: { groq: "k" }, allowKeyless: false, allowLocal: false });
+  b.importState(JSON.parse(JSON.stringify(a.exportState())));
+  assert.ok(b.parked.groq && !b.parked.gemini);
+});
