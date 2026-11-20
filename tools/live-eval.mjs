@@ -60,14 +60,13 @@ const BUGS = [
 ];
 const citedOk = async (text) => {   // every path:line it cites must exist and the line must be in range
   const cites = [...String(text).matchAll(/([\w./-]+\.(?:js|json|md)):(\d+)/g)];
-  let bad = 0;
-  for (const [, p, l] of cites) {
-    const cand = [p, "Projects/demo-app/" + p, "Projects/demo-app/src/" + path.basename(p)];
-    let ok = false;
-    for (const c of cand) { const t = await wfs.read(c).catch(() => null); if (t != null && Number(l) <= t.split("\n").length) { ok = true; break; } }
-    if (!ok) bad++;
+  const wrong = [];
+  for (const [whole, p, l] of cites) {
+    const match = Object.keys(files).find((k) => k === p || k.endsWith("/" + p.replace(/^\.?\//, "")));
+    const t = match ? files[match] : null;
+    if (t == null || Number(l) < 1 || Number(l) > t.split("\n").length) wrong.push(whole + (t == null ? " (no such file)" : ` (file has ${t.split("\n").length} lines)`));
   }
-  return { cites: cites.length, bad };
+  return { cites: cites.length, bad: wrong.length, wrong };
 };
 
 await gw.refreshModels(true);
@@ -90,7 +89,7 @@ await task("review", async () => {
   const found = BUGS.filter(([, rx]) => rx.test(r.answer));
   const c = await citedOk(r.answer);
   return { pass: found.length >= 3 && c.bad === 0 && !leaks(r.answer), score: found.length / BUGS.length, by: r.by,
-    detail: `found ${found.length}/${BUGS.length}: ${found.map((b) => b[0]).join("; ")} · citations ${c.cites} (${c.bad} wrong) · steps: ${r.steps.map((s) => s.tool).join(",")}\n${r.answer.slice(0, 900)}` };
+    detail: `found ${found.length}/${BUGS.length}: ${found.map((b) => b[0]).join("; ")} · citations ${c.cites} (${c.bad} wrong${c.bad ? ": " + c.wrong.join(", ") : ""}) · steps: ${r.steps.map((s) => s.tool).join(",")}\n${r.answer.slice(0, 900)}` };
 });
 
 await task("deep-read", async () => {
