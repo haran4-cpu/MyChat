@@ -43,3 +43,12 @@ test("Hebrew questions go to models measured good at Hebrew, away from ones that
                       { provider: "x", model: "b", acc: { chat: 0.7, code: 1, reason: 1 }, ms: { chat: 1, code: 1, reason: 1 }, he: 0.25 }]);
   assert.deepEqual(p.he, ["x:a"]); assert.deepEqual(p.heBad, ["x:b"]);
 });
+
+test("the benchmark gives the Truth Engine the same tools real chats get (evidence search, ledger)", async () => {
+  const { Bench } = await import("../pc/bench.mjs");
+  const tools = { search: { evidence: async () => [] }, ledger: null };
+  const b = new Bench({}, tools);
+  assert.equal(b.truthTools, tools);
+  const src = (await import("node:fs")).readFileSync(new URL("../pc/server.mjs", import.meta.url), "utf8");
+  assert.match(src, /new Bench\(gw, truthFor\(false\)\)/);
+});

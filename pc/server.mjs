@@ -261,7 +261,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/status") return send(res, 200, gw.status());
     if (req.method === "POST" && url.pathname === "/bench/start") {
       const b = await body(req);
-      bench = bench && bench.gw === gw ? bench : new Bench(gw);
+      bench = bench && bench.gw === gw ? bench : new Bench(gw, truthFor(false));
       const st = await bench.start({ truth: b.truth !== false, truthLimit: Number(b.truthLimit) || undefined, truthSet: b.truthSet || "hard",
         models: b.models !== false, ...(Array.isArray(b.modes) ? { modes: b.modes } : {}),
         onPins: (pins) => { if (b.apply !== false) { settings.pins = pins; writeJson("settings.json", settings); gw.pins = pins; } } });

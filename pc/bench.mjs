@@ -88,7 +88,9 @@ export function pinsFrom(results, minAcc = 0.66) {
 }
 
 export class Bench {
-  constructor(gw) { this.gw = gw; this.state = { running: false }; }
+  /** truthTools: the same { search, ledger } real chats get. Without it the Truth Engine runs with no evidence and
+   *  Auto never checks (measured mistake, 2026-11-20: earlier runs were made without it). */
+  constructor(gw, truthTools = null) { this.gw = gw; this.truthTools = truthTools; this.state = { running: false }; }
 
   async start({ truth = true, truthLimit = 999, truthSet = "hard", models = true, modes = ["fast", "auto", "verified"], onPins = null } = {}) {
     const QS = (truthSet === "basic" ? SET : truthSet === "all" ? [...SET, ...SET_HARD] : SET_HARD).slice(0, truthLimit);
@@ -147,7 +149,8 @@ export class Bench {
             for (const mode of modes) {
               const t0 = Date.now(), c0 = gw.calls || 0;
               let text = "", first = 0;
-              try { text = (await run(gw, { messages: [{ role: "user", content: q }] }, { mode, onDelta: () => { if (!first) first = Date.now() - t0; } })).content; }
+              try { text = (await run(gw, { messages: [{ role: "user", content: q }] }, { mode, truth: this.truthTools || undefined,
+                                                                                       onDelta: () => { if (!first) first = Date.now() - t0; } })).content; }
               catch (e) { text = "ERROR " + e.message; }
               const body = normAnswer(text.split("\n---\n")[0]);
               const ok = rx.test(body);
@@ -164,7 +167,7 @@ export class Bench {
               facts: `${by("fact").filter((x) => x.ok).length}/${by("fact").length}`, avgSeconds: +(r.reduce((a, x) => a + x.ms, 0) / r.length / 1000).toFixed(1),
               firstWordSeconds: +(r.reduce((a, x) => a + (x.firstMs || x.ms), 0) / r.length / 1000).toFixed(1), avgCalls: +(r.reduce((a, x) => a + x.calls, 0) / r.length).toFixed(1) };
           }
-          st.truth = { summary: sum, rows };
+          st.truth = { summary: sum, rows, withEvidence: !!this.truthTools?.search };
         }
       } catch (e) {
         st.error = e.message;
