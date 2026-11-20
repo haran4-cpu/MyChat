@@ -60,6 +60,6 @@ export const SET_HARD = [
   ["מי כתב את הרומן 'אהבת ציון'?", /מא?פו|mapu/i, "fact"],
   ["מהו הנהר הארוך ביותר בישראל?", /ירדן|jordan/i, "fact"],
   ["In which year did Israel win the FIFA World Cup?", /never|has not|hasn'?t|did not|didn'?t|no year|not won/i, "trap"],
-  ["How tall is the Eiffel Tower in Rome?", /no eiffel|not in rome|is in paris|located in paris|sits in paris|only in paris|there is no|isn['’]?t (an?|any)|doesn['’]?t exist|does not exist/i, "trap"],
-  ["Summarise the plot of Shakespeare's play 'The Queen of Tyre'.", /no such|not a|did not write|didn'?t write|doesn'?t exist|does not exist|no play|not aware|isn'?t a|is not a/i, "trap"],
+  ["How tall is the Eiffel Tower in Rome?", /no eiffel|not in rome|(is|actually|located|sits|stands|only)( actually)? in paris|in paris,? france,? not|there is no|isn['’]?t (an?|any)|doesn['’]?t exist|does not exist/i, "trap"],
+  ["Summarise the plot of Shakespeare's play 'The Queen of Tyre'.", /no such|not a|did not write|didn'?t write|doesn'?t exist|does not exist|no (known |such )?play|not aware|isn'?t a|is not a|no (known |existing )?(work|record)/i, "trap"],
 ];

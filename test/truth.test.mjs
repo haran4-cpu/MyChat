@@ -232,4 +232,9 @@ test("exact calendar: day counts are computed, not guessed (the leap day of 2024
   const rx = (q) => SET_HARD.find((x) => x[0].startsWith(q))[1];
   assert.match(normAnswer("There isn’t an Eiffel Tower in Rome at all."), rx("How tall is the Eiffel Tower in Rome"));
   assert.match("נכתב על ידי אברהם מפו", rx("מי כתב את הרומן"));
+  // measured 2026-11-20: two correct trap answers were scored wrong
+  assert.match(normAnswer("The Eiffel Tower is actually in Paris, France, not Rome, Italy."), rx("How tall is the Eiffel Tower in Rome"));
+  assert.match(normAnswer("There is no known play by William Shakespeare titled The Queen of Tyre."), rx("Summarise the plot"));
+  assert.doesNotMatch(normAnswer("The Eiffel Tower in Rome is 324 m tall."), rx("How tall is the Eiffel Tower in Rome"));
+  assert.doesNotMatch(normAnswer("The Queen of Tyre is a tragedy about a queen who"), rx("Summarise the plot"));
 });
