@@ -39,7 +39,18 @@ export async function challenge(gw, { answer, files, by = "", signal, privateDat
     checks = (parseJsonLoose(r.content)?.checks || []).filter((c) => c && c.pattern && c.claim).slice(0, 6);
     if (!checks.length) out.note = `${r.model} returned no usable checks: ${String(r.content).replace(/\s+/g, " ").slice(0, 120)}`;
   }
+  // a check must test ITS claim: the pattern has to share a word with the claim (measured on the PC: "the file has
+  // 12,312 lines" was "disproved" by finding /function\s+\w+/ — a check about something else)
+  const stem = (w) => w.toLowerCase().replace(/(ing|ed|es|s)$/, "");
+  const related = (c) => {
+    const cw = new Set((String(c.claim).match(/[A-Za-z_][\w-]{3,}/g) || []).map(stem));
+    const pw = (String(c.pattern).replace(/\\[a-zA-Z]/g, " ").match(/[A-Za-z_][\w-]{3,}/g) || []).map(stem);
+    return pw.some((w) => cw.has(w) || [...cw].some((x) => x.length > 4 && (x.includes(w) || w.includes(x))));
+  };
   for (const c of checks) {
+    // counts and sizes cannot be refuted by finding an unrelated pattern; behaviour claims ("cannot start without X")
+    // are legitimately refuted by a fallback pattern that shares no word with them, so only numeric claims are gated
+    if (/\d{2,}/.test(String(c.claim)) && !related(c)) { out.note = `a check unrelated to its claim was ignored (/${String(c.pattern).slice(0, 40)}/)`; continue; }
     const key = [...files.keys()].find((k) => k === c.file || k.endsWith("/" + String(c.file || "").replace(/^\.?\//, "")) || k.split("/").pop() === String(c.file || "").split("/").pop())
       || (files.size === 1 ? [...files.keys()][0] : null);
     if (!key) { out.note = `checker named a file that was not read: ${c.file}`; continue; }

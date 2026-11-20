@@ -424,3 +424,14 @@ test("an answer about a named file it never opened, or in the wrong language, is
   assert.match(asks[1], /not opened P\/app\.html/);
   assert.match(r.answer, /function f/);
 });
+
+test("challenge: a check that tests something else than its claim is ignored", async () => {
+  const { challenge } = await import("../core/challenge.mjs");
+  const files = new Map([["P/app.html", "function a() {}\nfunction b() {}\nel.innerHTML = x;"]]);
+  const gw = { async chat() { return { provider: "q", model: "m", content: JSON.stringify({ checks: [
+    { claim: "The file contains 12,312 lines of JavaScript", file: "P/app.html", pattern: "function\\s+\\w+\\s*\\(", refuted_if: "found" },
+    { claim: "the code never uses innerHTML", file: "P/app.html", pattern: "innerHTML", refuted_if: "found" }] }) }; } };
+  const r = await challenge(gw, { answer: "x".repeat(200), files, by: "p:gemini-x" });
+  assert.equal(r.tried, 1);
+  assert.deepEqual(r.refuted.map((x) => x.claim), ["the code never uses innerHTML"]);
+});
