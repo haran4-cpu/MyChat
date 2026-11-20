@@ -7,7 +7,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
-      - run: npm test
+      - name: Tests (failures become annotations, readable without signing in)
+        shell: bash
+        run: |
+          set +e
+          npm test 2>&1 | tee out.txt
+          status=${PIPESTATUS[0]}
+          grep -E -A12 "^not ok|^# Subtest.*\n?not ok" out.txt | grep -E "not ok|error:|expected|actual|message|at .*test\.mjs" | head -30 | while IFS= read -r l; do echo "::error::$l"; done
+          exit $status
 
   phone-ui:
     # The phone app used like a person uses it (type, send, switch modes, approve, undo) in Chrome at phone size,
