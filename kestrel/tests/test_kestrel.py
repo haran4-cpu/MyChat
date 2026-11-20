@@ -968,6 +968,11 @@ class CloudBrainTests(unittest.TestCase):
     def test_router_uses_cloud_only_inside_an_allowed_task_and_falls_back_to_local(self):
         from kestrel import llm
         url, _ = self._gateway([], status=500)
+        home = Path(tempfile.mkdtemp())                       # a MyChat install with a key, independent of this machine
+        (home / "token").write_text("tok", encoding="utf-8")
+        old_home = os.environ.get("MYCHAT_HOME")
+        os.environ["MYCHAT_HOME"] = str(home)
+        self.addCleanup(lambda: os.environ.__setitem__("MYCHAT_HOME", old_home) if old_home else os.environ.pop("MYCHAT_HOME", None))
         cfg = {"ollama_url": "http://127.0.0.1:9", "keep_alive": "1m", "num_ctx": 4096, "one_model_at_a_time": False,
                "models": {"agent": "a", "coder": "c"}, "fallback_models": {"agent": "a", "coder": "c"},
                "online": {"enabled": True, "backend": "mychat", "base_url": url, "use_for": ["agent", "coder"], "model": "mychat/auto"}}
