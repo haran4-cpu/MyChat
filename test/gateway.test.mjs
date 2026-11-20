@@ -452,3 +452,14 @@ test("Max tries a strong untried model before the only proven lite one", async (
   assert.equal(g.candidates("code", { quality: true })[0].model, "gemini-3-pro");   // Max: strength first
   w.srv.close();
 });
+
+test("Max: a benchmark pin on a lite model does not outrank a stronger proven model", async () => {
+  const w = await mockWorld({ a: { "gemini-flash-lite-latest": { text: "x" } }, b: { "openai/gpt-oss-120b": { text: "y" }, "moonshotai/kimi-k2-instruct": { text: "z" } } });
+  const g = only(["a", "b"])(gwFor(w, ["a", "b"]));
+  await g.refreshModels();
+  for (const [p, m] of [["a", "gemini-flash-lite-latest"], ["b", "moonshotai/kimi-k2-instruct"]]) for (let i = 0; i < 20; i++) g.stats.success(p, m, 400, 100);
+  g.pins = { code: ["a:gemini-flash-lite-latest"] };
+  assert.equal(g.candidates("code")[0].model, "gemini-flash-lite-latest");
+  assert.equal(g.candidates("code", { quality: true })[0].model, "moonshotai/kimi-k2-instruct");
+  w.srv.close();
+});

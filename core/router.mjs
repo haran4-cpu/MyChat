@@ -329,7 +329,9 @@ export class Gateway {
         const lim = this.limits[id];                        // provider says it is nearly out of requests: go elsewhere first
         if (lim && lim.resetAt > now && lim.remaining <= 2) score *= 0.25;
         const pin = (this.pins[task] || []).indexOf(id + ":" + model);
-        if (pin >= 0) score += 1 - pin * 0.05;            // measured winners first
+        // measured winners first — in Max only a nudge: the benchmark rewards speed, Max wants strength (measured on the
+        // PC: a pinned flash-lite model kept drafting every Max answer)
+        if (pin >= 0) score += (1 - pin * 0.05) * (quality ? 0.15 : 1);
         if (lang === "he" && this.pins.he) {               // measured: some fast models answer Hebrew with gibberish or in Arabic
           const hp = this.pins.he.indexOf(id + ":" + model);
           if (hp >= 0) score += 1.2 - hp * 0.05;
