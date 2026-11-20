@@ -274,3 +274,16 @@ test("an empty final answer is not accepted: the agent asks another model", asyn
   assert.match(r.answer, /a\.txt/);
   assert.deepEqual(seenExclude.at(-1), ["p:empty-model"]);
 });
+
+test("native tool calls with an empty text are taken as the agent's tool calls", async () => {
+  const fs = memoryFs({ "notes.txt": "buy milk" });
+  let n = 0;
+  const gw = { async chat() {
+    n++;
+    if (n === 1) return { content: "", tool_calls: [{ id: "c1", type: "function", function: { name: "read", arguments: '{"path":"notes.txt"}' } }], provider: "p", model: "m" };
+    return { content: '{"final":"notes.txt says: buy milk (notes.txt:1)"}', provider: "p", model: "m" };
+  } };
+  const r = await runAgent(gw, { goal: "what does notes.txt say?", fs, plan: false, maxSteps: 5 });
+  assert.equal(r.steps[0].tool, "read");
+  assert.match(r.answer, /buy milk/);
+});

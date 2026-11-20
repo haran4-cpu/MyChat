@@ -251,8 +251,15 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     if (signal?.aborted) throw new Error("stopped");
     compact(msgs);
     const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData, exclude: skip });
-    calls++; by = `${r.provider}:${r.model}`; raw = String(r.content).slice(0, 300);
-    last = parseJson(r.content);
+    calls++; by = `${r.provider}:${r.model}`; raw = String(r.content || "").slice(0, 300) || (r.tool_calls?.length ? "(native tool calls) " + JSON.stringify(r.tool_calls).slice(0, 250) : "");
+    // Some providers turn the tool list in our prompt into native function calls with an empty text (measured
+    // 2026-11-20: a free channel answered every agent task that way, in 1 s). Same meaning: take them as tool calls.
+    last = !String(r.content || "").trim() && r.tool_calls?.length
+      ? { calls: r.tool_calls.slice(0, 4).map((tc) => { let a = {}; try { a = JSON.parse(tc.function?.arguments || "{}"); } catch { /* keep {} */ } return { tool: tc.function?.name, args: a }; }) }
+      : parseJson(r.content);
+    if (!last && !String(r.content || "").trim() && skip.length < 3 && step < maxSteps - 1) {
+      skip.push(by); onStep({ kind: "status", text: `${r.model.split("/").pop()} sent nothing — asking another model` }); continue;
+    }
     // an empty "final" with nothing proposed is not an answer (measured 2026-11-20: a free channel answered every agent
     // task in 1 s with an empty final). Ask once more, from another model.
     if (last && last.final != null && !String(last.final).trim() && !(Array.isArray(last.ops) && last.ops.length) && skip.length < 3 && step < maxSteps - 1) {
