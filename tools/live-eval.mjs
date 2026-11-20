@@ -161,3 +161,5 @@ const md = [`## MyChat live evaluation — ${pass}/${results.length} passed`, ""
 if (process.env.GITHUB_STEP_SUMMARY) await fs.appendFile(process.env.GITHUB_STEP_SUMMARY, md + "\n");
 await fs.writeFile("live-eval.json", JSON.stringify({ at: new Date().toISOString(), pass, total: results.length, results }, null, 2));
 console.log(`\n${pass}/${results.length} passed`);
+// readable from the checks API without signing in (annotations)
+for (const r of results) console.log(`::notice title=${r.name} ${r.pass ? "PASS" : "FAIL"}::${r.seconds}s · ${String(r.by || "").slice(0, 120)} · ${String(r.detail || "").replace(/\s+/g, " ").slice(0, 300)}`);
