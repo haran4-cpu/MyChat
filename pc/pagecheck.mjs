@@ -94,7 +94,7 @@ export async function checkPage(file, o = {}) {
   };
   try {
     let target = null;
-    for (let i = 0; i < 100 && !target && !dead; i++) { const t = await raw("Target.getTargets"); target = t.result?.targetInfos?.find((x) => x.type === "page"); if (!target) await sleep(150); }
+    for (let i = 0; i < 200 && !target && !dead; i++) { const t = await raw("Target.getTargets"); target = t.result?.targetInfos?.find((x) => x.type === "page"); if (!target) await sleep(150); }   // up to 30 s: a busy CI runner starts Chrome slowly
     if (!target) throw new Error("the browser did not start");
     session = (await raw("Target.attachToTarget", { targetId: target.targetId, flatten: true })).result.sessionId;
     await Promise.all(["Runtime.enable", "Page.enable", "Log.enable", "Network.enable"].map((m) => send(m)));

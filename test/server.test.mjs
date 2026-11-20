@@ -77,7 +77,8 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
     fs.writeFileSync(path.join(home, "agent", "plan-fix1.json"), JSON.stringify({ id: "fix1", goal: "fix load", root: work, rootIndex: 0, at: Date.now(),
       ops: [{ op: "edit", path: "app.html", old: "const d = null;", new: "const d = { x: 1 };", why: "d was null" }] }));
     const jv = await (await fetch(u + "/agent/apply", { method: "POST", headers: H, body: JSON.stringify({ id: "fix1" }) })).json();
-    assert.equal(jv.verify?.[0]?.before, 1, JSON.stringify(jv.verify));
+    assert.equal(jv.verify?.[0]?.failed, null, "the browser ran: " + JSON.stringify(jv.verify));
+    assert.equal(jv.verify[0].before, 1, JSON.stringify(jv.verify));
     assert.equal(jv.verify[0].after, 0);
     assert.match(jv.verify[0].fixed[0], /reading 'x'/);
     assert.match(fs.readFileSync(path.join(work, "app.html"), "utf8"), /x: 1/);
