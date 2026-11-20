@@ -250,7 +250,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   for (let step = 0; step < maxSteps; step++) {
     if (signal?.aborted) throw new Error("stopped");
     compact(msgs);
-    const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData, exclude: skip });
+    const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData, exclude: skip, quality: true });
     calls++; by = `${r.provider}:${r.model}`; raw = String(r.content || "").slice(0, 300) || (r.tool_calls?.length ? "(native tool calls) " + JSON.stringify(r.tool_calls).slice(0, 250) : "");
     // Some providers turn the tool list in our prompt into native function calls with an empty text (measured
     // 2026-11-20: a free channel answered every agent task that way, in 1 s). Same meaning: take them as tool calls.
@@ -308,7 +308,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     // out of steps mid-work: one last call, no tools, to write the answer from everything gathered (never raw protocol)
     msgs.push({ role: "user", content: "No more tool calls. Write your final answer now from what you have read, as plain markdown (not JSON). Cite path:line only for lines you actually read." });
     try {
-      const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData, exclude: skip });
+      const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData, exclude: skip, quality: true });
       calls++; by = `${r.provider}:${r.model}`; raw = String(r.content).slice(0, 300);
       const j = parseJson(r.content);
       last = { ...(last || {}), final: j?.final ?? (/"(thought|tool|calls)"\s*:/.test(r.content) ? "(The model did not produce a readable answer; please try again.)" : r.content) };
