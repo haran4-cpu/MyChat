@@ -55,7 +55,8 @@ const numbered = (piece) => piece.text.split("\n").map((l, i) => `${piece.from +
 const MAP_SYS = `You read ONE PART of a larger set of files for a question. Report only what this part shows.
 Reply with JSON only: {"summary":"2-4 sentences: what these files are and do","notes":[{"path":"file path","line":<line number>,"quote":"exact text copied from that line (or a short exact snippet)","note":"what it means for the question","severity":"high|medium|low|info"}]}
 Rules: every note needs a quote copied character-for-character from the files shown (lines are shown as "N| text"; do not copy the "N| " prefix).
-No quote, no note. Prefer few, specific, important notes over many vague ones (max 12). If this part is irrelevant, return an empty notes list.`;
+No quote, no note. Prefer few, specific, important notes over many vague ones (max 12). If this part is irrelevant, return an empty notes list.
+For code: check security (injection, secrets stored in plain text e.g. localStorage/logs, XSS, missing auth), correctness (off-by-one, wrong conditions, unhandled errors) and data loss before anything else.`;
 
 const REDUCE_SYS = `You write the final answer from verified notes taken from the files. Each note was checked: its quote really appears at that place.
 Use only these notes and summaries; do not invent files, code or problems that are not in them. Cite places as path:line.

@@ -66,7 +66,7 @@ console.log("models available:", Object.entries(gw.models).map(([k, v]) => `${k}
 
 await task("chat-he", async () => {
   const r = await run(gw, { messages: [{ role: "user", content: "מהי בירת קנדה? תשובה קצרה." }] }, { mode: "auto", truth: { search } });
-  return { pass: /אוטווה|Ottawa/i.test(r.content), score: /אוטווה/.test(r.content) ? 1 : 0.5, by: r.provider + ":" + r.model, detail: r.content.slice(0, 200) };
+  return { pass: /אוטא?ווה|Ottawa/i.test(r.content), score: /אוטא?ווה/.test(r.content) ? 1 : 0.5, by: r.provider + ":" + r.model, detail: r.content.slice(0, 200) };
 });
 
 await task("access", async () => {

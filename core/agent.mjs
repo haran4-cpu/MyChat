@@ -72,6 +72,17 @@ OPS (proposed changes, applied only after approval):
   {"op":"extract","path":"Inbox/app.zip","to":"Projects/app","why":"..."}   (unpack an archive)
 Never repeat a tool call with the same arguments. Be direct and specific, no filler. If something cannot be done, say exactly why and what would make it possible.`;
 
+// What a senior reviewer checks, in order (measured: free models found the off-by-one and the SQL injection but
+// called an API key kept in localStorage merely "a browser API used in Node").
+const REVIEW_GUIDE = `
+CODE REVIEW METHOD (this request is a review): read every source file, then check each one systematically:
+- Security: injection (SQL, shell, HTML/XSS), secrets or tokens stored in plain text (localStorage, files, logs, URLs), missing auth checks, unsafe eval.
+- Correctness: off-by-one and boundary errors, wrong conditions, null/undefined, unhandled promise errors, race conditions.
+- Data: loss or corruption, wrong units, money as floats.
+- Robustness and performance: missing error handling, unbounded loops or memory, blocking calls.
+Report each real problem with severity, path:line, the exact code, why it matters, and the fix. Do not pad with style nits.`;
+const REVIEW_RX = /(review|audit|bugs?|security|vulnerab|באגים|ביקורת|בדיקת קוד|סקירת קוד|חולשות|אבטחה)/i;
+
 export const TOOL_DOCS = {
   tree: ["{\"path\":\"optional sub-folder or archive\"}", "the folder (or an archive) as an indented listing"],
   read: ["{\"path\":\"file or archive!/inner/file\",\"from\":1,\"to\":400}", "a text file with line numbers (lines optional)"],
@@ -143,7 +154,7 @@ export function workspaceReader(fs) {
 export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, search, fetchText, runJs, onStep = () => {}, evaluate }) {
   const reader = workspaceReader(fs);
   const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate));
-  const sys = SYS.replace("__TOOLS__", avail.map((t) => `  ${t} ${TOOL_DOCS[t][0]} — ${TOOL_DOCS[t][1]}`).join("\n"));
+  const sys = SYS.replace("__TOOLS__", avail.map((t) => `  ${t} ${TOOL_DOCS[t][0]} — ${TOOL_DOCS[t][1]}`).join("\n")) + (REVIEW_RX.test(goal) ? REVIEW_GUIDE : "");
   const { workspaceMap } = await import("./projects.mjs");
   const [map, listing] = await Promise.all([workspaceMap(fs).catch(() => ""), tree(fs, { maxEntries: 150, maxDepth: 2 })]);
   const msgs = [{ role: "system", content: sys }, ...history.slice(-8),
