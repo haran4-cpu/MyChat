@@ -26,7 +26,8 @@ jobs:
           mkdir -p shots; st=0
           for s in stale dead max agent; do
             node tools/ui-shot.mjs $s shots/$s 2>&1 | tee shots/$s.log || st=1
-            grep "^FAIL" shots/$s.log | while IFS= read -r l; do echo "::error::$s: $l"; done
+            { grep -E "^FAIL|no chrome|Error" shots/$s.log || true; } | while IFS= read -r l; do echo "::error::$s: $l"; done
+            echo "::notice::$s: $(tail -1 shots/$s.log)"
           done
           exit $st
       - uses: actions/upload-artifact@v4

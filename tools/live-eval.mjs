@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { Gateway } from "../core/router.mjs";
 import { run } from "../core/reason.mjs";
+import { family } from "../core/router.mjs";
 import { Search } from "../core/search.mjs";
 import { runAgent, apply } from "../core/agent.mjs";
 import { study } from "../core/digest.mjs";
@@ -83,6 +84,23 @@ console.log("models available:", Object.entries(gw.models).map(([k, v]) => `${k}
 await task("chat-he", async () => {
   const r = await run(gw, { messages: [{ role: "user", content: "מהי בירת קנדה? תשובה קצרה." }] }, { mode: "auto", truth: { search } });
   return { pass: /אוטא?ווה|Ottawa/i.test(r.content), score: /אוטא?ווה/.test(r.content) ? 1 : 0.5, by: r.provider + ":" + r.model, detail: r.content.slice(0, 200) };
+});
+
+await task("modes", async () => {   // the switch must change what happens, on real models
+  const q = { messages: [{ role: "user", content: "Write a JavaScript function median(xs) that returns the median of a numeric array (even and odd lengths, does not change the input). Code only, then one line on complexity." }] };
+  const c0 = gw.calls || 0;
+  const fast = await run(gw, q, { mode: "fast" });
+  const c1 = gw.calls || 0;
+  const max = await run(gw, q, { mode: "max" });
+  const c2 = gw.calls || 0;
+  const fams = new Set((max.trace || []).filter((t) => t.by).map((t) => family(t.by.split(":").slice(1).join(":"))));
+  // the code must actually work: run it
+  const code = (/```(?:js|javascript)?\n([\s\S]*?)```/.exec(max.content) || [])[1] || "";
+  let works = false;
+  try { const median = new Function(code + "\nreturn median;")(); const a = [5, 1, 3]; works = median(a) === 3 && median([4, 1, 3, 2]) === 2.5 && a.join() === "5,1,3"; } catch { /* no */ }
+  const reviewed = /reviewed/.test(max.route || "");
+  return { pass: fast.route === "fastest model" && c1 - c0 === 1 && reviewed && fams.size >= 2 && works, score: (reviewed ? 0.4 : 0) + (fams.size >= 2 ? 0.2 : 0) + (works ? 0.4 : 0),
+    by: (max.trace || []).map((t) => t.by).filter(Boolean).join(" → "), detail: `fast: 1 call (${fast.model}); max: ${c2 - c1} calls, route "${max.route}", families ${[...fams].join("+")}, code runs: ${works}` };
 });
 
 await task("access", async () => {
