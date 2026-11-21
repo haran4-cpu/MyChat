@@ -137,7 +137,11 @@ function chatOps(o) {
       const r = await smartFetch(o.remote + "/agent/apply", { method: "POST", headers: H, body: JSON.stringify({ id: o.id, approve: pick }) });
       o.journal = await r.json();
       if (!r.ok) { toast("✗ " + (o.journal.error?.message || "could not apply on the PC")); o.journal = null; return; }
-    } else o.journal = await applyOps(await workspace(), { id: o.id, goal: o.goal, ops: o.ops }, pick);
+    } else {
+      const journal = await applyOps(await workspace(), { id: o.id, goal: o.goal, ops: o.ops, preview: o.preview, enforcePreview: true }, pick);
+      if (journal.error && !journal.steps.length) return toast(journal.error);
+      o.journal = journal;
+    }
     saveChats(); renderChat();
   } }, "Approve and apply")));
   return wrap;

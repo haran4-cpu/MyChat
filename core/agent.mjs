@@ -104,7 +104,7 @@ export const TOOL_DOCS = {
   web_search: ["{\"query\":\"...\"}", "web results with excerpts"],
   fetch: ["{\"url\":\"https://...\"}", "a web page as text"],
   outline: ["{\"path\":\"file\"}", "a parser-built map of a code file: every function/class/method with its exact line range, event handlers, element ids — read this FIRST for big files, then read only the ranges you need"],
-  run_page: ["{\"path\":\"app.html\",\"clicks\":25}", "RUNS an HTML app in a real headless browser on the PC: load errors, every error after pressing each reachable button (with file:line), screenshots. The only way to say whether a page works"],
+  run_page: ["{\"path\":\"app.html\",\"clicks\":1,\"expectedText\":{\"selector\":\"#result\",\"text\":\"1\"}}", "Runs an HTML app in a headless browser. Reports load/click errors. Optional expectedText checks the selected text after the requested number of clicks against a value derived from the user's requirement."],
   compare: ["{\"a\":\"older file/folder/zip\",\"b\":\"newer one\"}", "what REALLY changed between two versions: files added/removed/changed, functions added/removed/rewritten (computed, not guessed). Use it to check a handoff's claims (\"fixed X\") against the facts; with run_page on both versions you also see which errors appeared or disappeared"],
   look: ["{\"image\":\"screen\" | \"last_run\" | \"path/to.png\",\"question\":\"...\"}", "a vision model LOOKS at a picture and answers: the person's screen (only when they asked about their screen), the last run_page screenshot, or an image file"],
   skill_search: ["{\"query\":\"what kind of task\"}", "find expert procedures for this kind of task (review, debugging, security, testing, audio…) in a library of ~1,000 open-source skills"],
@@ -254,7 +254,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
       if (name === "run_page") {
         if (!/\.html?$/i.test(String(args.path || ""))) return "run_page needs an .html file";
         onStep({ kind: "status", text: `Running ${args.path} in a headless browser…` });
-        const rr = await runPage(String(args.path), { clicks: args.clicks });
+        const rr = await runPage(String(args.path), { clicks: args.clicks, expectedText: args.expectedText });
         if (rr.shots?.length) lastShot = rr.shots.at(-1);
         const out = String(rr.text);
         for (const m of out.matchAll(/[\w.-]+\.\w{2,12}/g)) observed.add(m[0].toLowerCase());
@@ -594,6 +594,17 @@ export async function requireCurrentPreview(fs, plan, index, currentText) {
   if (expected.baseFingerprint !== await fingerprint(actual)) throw new Error(`${op.path}: changed since preview. Create a fresh preview.`);
 }
 
+export async function checkPlanPreviews(fs, plan, selected = null) {
+  const paths = new Set();
+  for (const [index, op] of plan.ops.entries()) {
+    if ((selected && !selected.includes(index)) || !isTextChange(op.op)) continue;
+    const key = op.path.toLowerCase();
+    if (paths.has(key)) throw new Error(`${op.path}: preview each successive text change separately`);
+    paths.add(key);
+    await requireCurrentPreview(fs, plan, index);
+  }
+}
+
 /** What each op will do, with a line diff for files that change. */
 export async function preview(fs, ops) {
   const out = [];
@@ -663,6 +674,10 @@ export function lineDiff(a, b, context = 3) {
 export async function apply(fs, p, approved = null) {
   const pick = approved ? new Set(approved) : null;
   const journal = { id: p.id, goal: p.goal, summary: p.summary, at: Date.now(), steps: [] };
+  if (p.enforcePreview) {
+    try { await checkPlanPreviews(fs, p, approved); }
+    catch (error) { return { ...journal, error: error.message }; }
+  }
   for (const [k, o] of p.ops.entries()) {
     if (pick && !pick.has(k)) continue;
     try {

@@ -33,9 +33,11 @@ const SKILLS = { search: (q) => skillSearch(q), load: (id) => skillLoad(id) };
 const pageRunner = (rootPath) => async (rel, o = {}) => {
   const base = fs.realpathSync(rootPath), abs = path.resolve(base, String(rel).replace(/^[\\/]+/, ""));
   if (!abs.startsWith(base + path.sep) || !fs.existsSync(abs)) throw new Error(`${rel}: not found in this folder`);
-  return checkPage(abs, { clicks: o.clicks ?? 25, outDir: path.join(HOME, "runs") });
+  const real = fs.realpathSync(abs), relative = path.relative(base, real);
+  if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw new Error(`${rel}: outside this folder`);
+  return checkPage(real, { clicks: o.clicks ?? 25, expectedText: o.expectedText, outDir: path.join(HOME, "runs") });
 };
-import { plan as agentPlan, preview as agentPreview, apply as agentApply, undo as agentUndo, tree as agentTree, isTextChange, requireCurrentPreview } from "../core/agent.mjs";
+import { plan as agentPlan, preview as agentPreview, apply as agentApply, undo as agentUndo, tree as agentTree, checkPlanPreviews } from "../core/agent.mjs";
 
 const HOME = process.env.MYCHAT_HOME || path.join(process.env.APPDATA || path.join(os.homedir(), ".config"), "MyChat");
 const PORT = Number(process.env.MYCHAT_PORT || 11500);
@@ -385,14 +387,7 @@ async function agentRoute(req, res, url) {
     }
     const adapter = nodeFs(p.root);
     try {
-      const paths = new Set();
-      for (const [index, op] of p.ops.entries()) {
-        if ((pick && !pick.includes(index)) || !isTextChange(op.op)) continue;
-        const key = op.path.toLowerCase();
-        if (paths.has(key)) throw new Error(`${op.path}: preview each successive text change separately`);
-        paths.add(key);
-        await requireCurrentPreview(adapter, p, index);
-      }
+      await checkPlanPreviews(adapter,p,pick);
     } catch (error) {
       return send(res, 409, { error: { message: error.message } });
     }
