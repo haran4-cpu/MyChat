@@ -104,7 +104,7 @@ export const TOOL_DOCS = {
   web_search: ["{\"query\":\"...\"}", "web results with excerpts"],
   fetch: ["{\"url\":\"https://...\"}", "a web page as text"],
   outline: ["{\"path\":\"file\"}", "a parser-built map of a code file: every function/class/method with its exact line range, event handlers, element ids — read this FIRST for big files, then read only the ranges you need"],
-  run_page: ["{\"path\":\"app.html\",\"clicks\":25}", "RUNS an HTML app in a real headless browser on the PC: load errors, every error after pressing each reachable button (with file:line), screenshots. The only way to say whether a page works"],
+  run_page: ["{\"path\":\"app.html\",\"clicks\":1,\"expectedText\":{\"selector\":\"#result\",\"text\":\"1\"}}", "Runs an HTML app in a headless browser. Reports load/click errors. Optional expectedText checks the selected text after the requested number of clicks against a value derived from the user's requirement."],
   compare: ["{\"a\":\"older file/folder/zip\",\"b\":\"newer one\"}", "what REALLY changed between two versions: files added/removed/changed, functions added/removed/rewritten (computed, not guessed). Use it to check a handoff's claims (\"fixed X\") against the facts; with run_page on both versions you also see which errors appeared or disappeared"],
   look: ["{\"image\":\"screen\" | \"last_run\" | \"path/to.png\",\"question\":\"...\"}", "a vision model LOOKS at a picture and answers: the person's screen (only when they asked about their screen), the last run_page screenshot, or an image file"],
   skill_search: ["{\"query\":\"what kind of task\"}", "find expert procedures for this kind of task (review, debugging, security, testing, audio…) in a library of ~1,000 open-source skills"],
@@ -254,7 +254,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
       if (name === "run_page") {
         if (!/\.html?$/i.test(String(args.path || ""))) return "run_page needs an .html file";
         onStep({ kind: "status", text: `Running ${args.path} in a headless browser…` });
-        const rr = await runPage(String(args.path), { clicks: args.clicks });
+        const rr = await runPage(String(args.path), { clicks: args.clicks, expectedText: args.expectedText });
         if (rr.shots?.length) lastShot = rr.shots.at(-1);
         const out = String(rr.text);
         for (const m of out.matchAll(/[\w.-]+\.\w{2,12}/g)) observed.add(m[0].toLowerCase());
@@ -571,6 +571,40 @@ export async function plan(gw, opts) {
 
 export const newId = () => new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14) + "-" + Math.random().toString(36).slice(2, 6);
 
+export const isTextChange = (op) => ["write", "append", "edit"].includes(op);
+
+async function fingerprint(text) {
+  if (text === null) return null;
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export async function requireCurrentPreview(fs, plan, index, currentText) {
+  const op = plan.ops[index];
+  const expected = plan.preview?.[index];
+  if (!expected || !Object.hasOwn(expected, "baseFingerprint") || expected.path !== op.path || expected.op !== op.op) {
+    throw new Error(`${op.path}: create a fresh preview before applying this change`);
+  }
+  let actual = currentText;
+  if (actual === undefined) {
+    const exists = await fs.exists(op.path);
+    actual = exists ? await fs.read(op.path) : null;
+    if (exists && actual === null) throw new Error(`${op.path}: current file is not readable text`);
+  }
+  if (expected.baseFingerprint !== await fingerprint(actual)) throw new Error(`${op.path}: changed since preview. Create a fresh preview.`);
+}
+
+export async function checkPlanPreviews(fs, plan, selected = null) {
+  const paths = new Set();
+  for (const [index, op] of plan.ops.entries()) {
+    if ((selected && !selected.includes(index)) || !isTextChange(op.op)) continue;
+    const key = op.path.toLowerCase();
+    if (paths.has(key)) throw new Error(`${op.path}: preview each successive text change separately`);
+    paths.add(key);
+    await requireCurrentPreview(fs, plan, index);
+  }
+}
+
 /** What each op will do, with a line diff for files that change. */
 export async function preview(fs, ops) {
   const out = [];
@@ -579,6 +613,7 @@ export async function preview(fs, ops) {
     const item = { ...o, exists };
     if (o.op === "write" || o.op === "append") {
       const before = exists ? await fs.read(o.path).catch(() => null) : "";
+      if (!exists || before !== null) item.baseFingerprint = await fingerprint(exists ? before : null);
       const after = o.op === "append" ? (before || "") + o.content : o.content;
       item.diff = before == null ? null : lineDiff(before || "", after);
       item.stats = item.diff ? { added: item.diff.filter((l) => l[0] === "+").length, removed: item.diff.filter((l) => l[0] === "-").length } : null;
@@ -589,6 +624,7 @@ export async function preview(fs, ops) {
       try {
         if (before == null) throw new Error(`${o.path} does not exist or is not text`);
         const { after, line } = editText(before, o);
+        item.baseFingerprint = await fingerprint(before);
         item.diff = [`@@ line ${line}`, ...lineDiff(o.old, o.new, 2)];
         item.stats = { added: item.diff.filter((l) => l[0] === "+").length, removed: item.diff.filter((l) => l[0] === "-").length, line };
         item.unchanged = after === before;
@@ -638,6 +674,10 @@ export function lineDiff(a, b, context = 3) {
 export async function apply(fs, p, approved = null) {
   const pick = approved ? new Set(approved) : null;
   const journal = { id: p.id, goal: p.goal, summary: p.summary, at: Date.now(), steps: [] };
+  if (p.enforcePreview) {
+    try { await checkPlanPreviews(fs, p, approved); }
+    catch (error) { return { ...journal, error: error.message }; }
+  }
   for (const [k, o] of p.ops.entries()) {
     if (pick && !pick.has(k)) continue;
     try {
@@ -647,14 +687,20 @@ export async function apply(fs, p, approved = null) {
       } else if (o.op === "write" || o.op === "append") {
         const prev = exists ? await fs.read(o.path) : null;
         if (exists && prev == null) throw new Error(`${o.path} is not a text file; not changed`);
+        if (p.enforcePreview) await requireCurrentPreview(fs, p, k, prev);
         await ensureParent(fs, o.path, journal);
-        await fs.write(o.path, o.op === "append" ? (prev || "") + o.content : o.content);
-        journal.steps.push({ op: "write", path: o.path, prev });
+        const after = o.op === "append" ? (prev || "") + o.content : o.content;
+        const writtenFingerprint = await fingerprint(after);
+        await fs.write(o.path, after);
+        journal.steps.push({ op: "write", path: o.path, prev, writtenFingerprint });
       } else if (o.op === "edit") {
         const prev = exists ? await fs.read(o.path) : null;
         if (prev == null) throw new Error(`${o.path} does not exist or is not text`);
-        await fs.write(o.path, editText(prev, o).after);
-        journal.steps.push({ op: "write", path: o.path, prev });
+        if (p.enforcePreview) await requireCurrentPreview(fs, p, k, prev);
+        const after = editText(prev, o).after;
+        const writtenFingerprint = await fingerprint(after);
+        await fs.write(o.path, after);
+        journal.steps.push({ op: "write", path: o.path, prev, writtenFingerprint });
       } else if (o.op === "move") {
         if (!exists) throw new Error(`${o.path} does not exist`);
         if (await fs.exists(o.to)) throw new Error(`${o.to} already exists; not overwritten`);
@@ -697,6 +743,9 @@ export async function undo(fs, journal) {
   for (const s of [...journal.steps].reverse()) {
     try {
       if (s.op === "write") {
+        if (s.writtenFingerprint && await fingerprint(await fs.read(s.path)) !== s.writtenFingerprint) {
+          throw new Error(`${s.path} changed after this plan was applied; kept current contents`);
+        }
         if (s.prev == null) {
           if (await fs.exists(s.path)) { const t = `${TRASH}/undo-${journal.id}/${s.path}`; await ensureParent(fs, t, null); await fs.move(s.path, t); }
         } else await fs.write(s.path, s.prev);

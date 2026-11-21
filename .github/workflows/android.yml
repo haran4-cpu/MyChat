@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
     paths: ["app/**", "core/**", ".github/workflows/android.yml"]
+  pull_request:
+    paths: ["app/**", "core/**", ".github/workflows/android.yml"]
   workflow_dispatch: {}
 
 permissions:
@@ -18,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      HAS_KS: ${{ secrets.MYCHAT_KEYSTORE_B64 != '' }}
+      HAS_KS: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && secrets.MYCHAT_KEYSTORE_B64 != '' }}
     defaults:
       run:
         working-directory: app
@@ -73,7 +75,7 @@ jobs:
         run: mkdir -p ~/.android && echo "$KS" | base64 -d > ~/.android/debug.keystore
 
       - name: Signing key (cache)
-        if: env.HAS_KS != 'true'
+        if: env.HAS_KS != 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/cache@v4
         with:
           path: ~/.android/debug.keystore
@@ -101,6 +103,7 @@ jobs:
           path: MyChat-${{ github.run_number }}.apk
 
       - name: Publish to Releases
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         working-directory: .
         env:
           GH_TOKEN: ${{ github.token }}

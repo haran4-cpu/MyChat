@@ -40,6 +40,10 @@ const RISKY = /delete|remove|erase|clear all|reset all|wipe|logout|log out|sign 
  * -> { ok, title, loadMs, errors: [{ when, text, where }], clicked: [{ label, newErrors }], skipped, failedRequests, shots: [], text }
  */
 export async function checkPage(file, o = {}) {
+  const expected = o.expectedText;
+  if (expected && (typeof expected.selector !== "string" || !expected.selector.trim() || expected.selector.length > 180 || typeof expected.text !== "string" || expected.text.length > 500)) {
+    throw new Error("expectedText requires a short CSS selector and expected text");
+  }
   const exe = findBrowser();
   if (!exe) throw new Error("no Edge or Chrome found on this computer");
   const clicks = Math.max(0, Math.min(Number(o.clicks ?? 25), 80));
@@ -151,7 +155,10 @@ export async function checkPage(file, o = {}) {
     await shot("after-clicks");
     const uniqueErrors = [];
     for (const e of errors) if (!uniqueErrors.some((u) => u.text === e.text && u.where === e.where)) uniqueErrors.push({ ...e, count: errors.filter((x) => x.text === e.text && x.where === e.where).length });
-    const r = { ok: !uniqueErrors.length, file, url, title, loadMs, info, errors: uniqueErrors, clicked, skipped, buttonsFound, failedRequests: [...new Set(failed)].slice(0, 10), shots, browser: path.basename(exe) };
+    const actual = expected ? (await ev(`document.querySelector(${JSON.stringify(expected.selector)})?.textContent?.trim() ?? null`) ?? null) : null;
+    if (dead) throw new Error("Browser exited before verification completed");
+    const acceptance = expected ? {selector:expected.selector,expected:expected.text,actual,ok:actual===expected.text} : null;
+    const r = { ok: !uniqueErrors.length && (!acceptance || acceptance.ok), acceptance, file, url, title, loadMs, info, errors: uniqueErrors, clicked, skipped, buttonsFound, failedRequests: [...new Set(failed)].slice(0, 10), shots, browser: path.basename(exe) };
     r.text = reportText(r);
     return r;
   } finally {
@@ -169,6 +176,7 @@ export function reportText(r) {
     `Page: ${r.info?.buttons ?? "?"} buttons, ${r.info?.inputs ?? "?"} inputs, ${r.info?.canvases ?? "?"} canvases, ${r.info?.textChars ?? "?"} characters of text`,
     `Pressed ${r.clicked.length} buttons a person could reach (each re-checked after the page changed)${r.skipped.length ? ` (not pressed, destructive names: ${r.skipped.slice(0, 6).join(", ")})` : ""}.`,
     r.errors.length ? `ERRORS (${r.errors.length} distinct):` : "No errors: nothing thrown and nothing logged as an error while loading and pressing the buttons.",
+    r.acceptance ? `Acceptance ${r.acceptance.ok ? "PASS" : "FAIL"} at ${r.acceptance.selector}: wanted ${JSON.stringify(r.acceptance.expected)}, found ${JSON.stringify(r.acceptance.actual)}.` : "",
     ...r.errors.slice(0, 25).map((e) => `- [${e.when}] ${e.text}${e.where ? `  @ ${e.where}` : ""}${e.count > 1 ? ` (×${e.count})` : ""}`),
     bad.length ? `Buttons followed by errors: ${bad.map((c) => `"${c.label}" (+${c.newErrors})`).join(", ")}` : "",
     r.failedRequests.length ? `Failed loads (offline or missing files): ${r.failedRequests.join(", ")}` : "",

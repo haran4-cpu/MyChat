@@ -74,7 +74,7 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
   const roots = await (await fetch(u + "/agent/roots", { method: "POST", headers: H, body: JSON.stringify({ roots: [{ path: work }, { path: work + "-missing" }] }) })).json();
   assert.equal(roots.roots.length, 1);
   assert.match((await (await fetch(u + "/agent/tree?root=0", { headers: H })).json()).tree, /a\.txt/);
-  assert.equal((await fetch(u + "/agent/undo", { method: "POST", headers: H, body: JSON.stringify({ id: "latest" }) })).status, 404);
+  assert.equal((await fetch(u + "/agent/undo", { method: "POST", headers: H, body: JSON.stringify({ id: "latest" }) })).status, 400);
   // a file attached in the chat lands in the chat folder's Inbox, never overwriting
   const up = await (await fetch(u + "/agent/inbox", { method: "POST", headers: H, body: JSON.stringify({ name: "notes.txt", data: Buffer.from("PELICAN-42").toString("base64") }) })).json();
   assert.match(up.path, /^Inbox\/\d{4}-\d\d-\d\d\/notes\.txt$/);
@@ -92,8 +92,11 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
   const { findBrowser } = await import("../pc/pagecheck.mjs");
   if (findBrowser()) {
     fs.writeFileSync(path.join(work, "app.html"), '<!doctype html><title>A</title><button id="b">Load</button><script>\nfunction load() {\n  const d = null;\n  return d.x;\n}\ndocument.getElementById("b").addEventListener("click", load);\n</script>');
+    const ops = [{ op: "edit", path: "app.html", old: "const d = null;", new: "const d = { x: 1 };", why: "d was null" }];
+    const {preview} = await import("../core/agent.mjs");
+    const {nodeFs} = await import("../pc/agentfs.mjs");
     fs.writeFileSync(path.join(home, "agent", "plan-fix1.json"), JSON.stringify({ id: "fix1", goal: "fix load", root: work, rootIndex: 0, at: Date.now(),
-      ops: [{ op: "edit", path: "app.html", old: "const d = null;", new: "const d = { x: 1 };", why: "d was null" }] }));
+      ops, preview: await preview(nodeFs(work), ops) }));
     const jv = await (await fetch(u + "/agent/apply", { method: "POST", headers: H, body: JSON.stringify({ id: "fix1" }) })).json();
     assert.equal(jv.verify?.[0]?.failed, null, "the browser ran: " + JSON.stringify(jv.verify));
     assert.equal(jv.verify[0].before, 1, JSON.stringify(jv.verify));

@@ -33,9 +33,11 @@ const SKILLS = { search: (q) => skillSearch(q), load: (id) => skillLoad(id) };
 const pageRunner = (rootPath) => async (rel, o = {}) => {
   const base = fs.realpathSync(rootPath), abs = path.resolve(base, String(rel).replace(/^[\\/]+/, ""));
   if (!abs.startsWith(base + path.sep) || !fs.existsSync(abs)) throw new Error(`${rel}: not found in this folder`);
-  return checkPage(abs, { clicks: o.clicks ?? 25, outDir: path.join(HOME, "runs") });
+  const real = fs.realpathSync(abs), relative = path.relative(base, real);
+  if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw new Error(`${rel}: outside this folder`);
+  return checkPage(real, { clicks: o.clicks ?? 25, expectedText: o.expectedText, outDir: path.join(HOME, "runs") });
 };
-import { plan as agentPlan, preview as agentPreview, apply as agentApply, undo as agentUndo, tree as agentTree } from "../core/agent.mjs";
+import { plan as agentPlan, preview as agentPreview, apply as agentApply, undo as agentUndo, tree as agentTree, checkPlanPreviews } from "../core/agent.mjs";
 
 const HOME = process.env.MYCHAT_HOME || path.join(process.env.APPDATA || path.join(os.homedir(), ".config"), "MyChat");
 const PORT = Number(process.env.MYCHAT_PORT || 11500);
@@ -144,7 +146,7 @@ async function brainRun(oreq, opts) {
   if (r.ops?.length) {
     agentSave("plan", r.planId, { id: r.planId, goal: lastText(oreq.messages), ops: r.ops, preview: r.preview, root: root.path, rootIndex: Number(settings.chatRoot) || 0, at: Date.now(), answer: r.content });
     const list = (r.preview || r.ops).map((o, i) => `${i + 1}. ${o.label || o.op + " " + o.path}`).join("\n");
-    const extra = `\n\n**Proposed changes** (nothing changed yet):\n${list}\n\nReply **/approve** to apply all, **/approve 1,3** for some — **/undo** reverses it afterwards.`;
+    const extra = `\n\n**Proposed changes** (nothing changed yet):\n${list}\n\nReply **/approve ${r.planId}** to apply all, or **/approve ${r.planId} 1,3** for selected changes. Use **/undo ${r.planId}** to undo this plan.`;
     r.content += extra; opts.onDelta?.(extra);
   }
   return r;
@@ -320,6 +322,7 @@ const rootAt = (i) => { const r = agentRoots()[Number(i) || 0]; if (!r) throw ne
 const agentFile = (kind, id) => path.join(AGENT_DIR, `${kind}-${String(id).replace(/[^\w-]/g, "")}.json`);
 const agentSave = (kind, id, v) => fs.writeFileSync(agentFile(kind, id), JSON.stringify(v));
 const agentLoad = (kind, id) => { try { return JSON.parse(fs.readFileSync(agentFile(kind, id), "utf8")); } catch { return null; } };
+let agentMutationActive = false;
 function agentHistory(n = 30) {
   return fs.readdirSync(AGENT_DIR).filter((f) => f.startsWith("journal-")).map((f) => { try { return JSON.parse(fs.readFileSync(path.join(AGENT_DIR, f), "utf8")); } catch { return null; } })
     .filter(Boolean).sort((a, b) => b.at - a.at).slice(0, n)
@@ -372,16 +375,26 @@ async function agentRoute(req, res, url) {
     return send(res, 200, p);
   }
   if (url.pathname === "/agent/apply" && req.method === "POST") {
-    const p = b.id === "latest" ? latestPlan() : agentLoad("plan", b.id);
+    if (!validPlanId(b.id)) return send(res, 400, { error: { message: "Specify the plan ID from the preview." } });
+    const p = agentLoad("plan", b.id);
     if (!p) return send(res, 404, { error: { message: "plan not found" } });
     if (agentLoad("journal", p.id)) return send(res, 409, { error: { message: "this plan was already applied (use undo first)" } });
     // Proof around the change: every HTML app that is about to change is run before and after, and the difference in
     // errors is reported (fixed / still there / new). "Fixed" becomes a measured fact, not the model's word.
-    const pick = Array.isArray(b.approve) ? b.approve.map(Number) : null;
+    const pick = Array.isArray(b.approve) ? b.approve : null;
+    if (b.approve !== undefined && (!pick || !pick.length || pick.some(i => !Number.isInteger(i) || i < 0 || i >= p.ops.length))) {
+      return send(res, 400, { error: { message: "Select at least one valid change from this plan." } });
+    }
+    const adapter = nodeFs(p.root);
+    try {
+      await checkPlanPreviews(adapter,p,pick);
+    } catch (error) {
+      return send(res, 409, { error: { message: error.message } });
+    }
     const pages = [...new Set((p.ops || []).filter((o, i) => (!pick || pick.includes(i)) && /\.html?$/i.test(o.path) && ["write", "edit"].includes(o.op)).map((o) => o.path))].slice(0, 3);
     const run = pageRunner(p.root), before = {};
     if (b.verify !== false) for (const f of pages) before[f] = await run(f, { clicks: 30 }).catch((e) => ({ failed: e.message }));
-    const j = await agentApply(nodeFs(p.root), p, pick);
+    const j = await agentApply(adapter, { ...p, enforcePreview: true }, pick);
     j.root = p.root;
     if (pages.length && b.verify !== false) {
       j.verify = [];
@@ -397,8 +410,8 @@ async function agentRoute(req, res, url) {
     return send(res, 200, j);
   }
   if (url.pathname === "/agent/undo" && req.method === "POST") {
-    const id = b.id === "latest" ? agentHistory(50).find((h) => !h.undone)?.id : b.id;
-    const j = id && agentLoad("journal", id);
+    if (!validPlanId(b.id)) return send(res, 400, { error: { message: "Specify the ID of the plan to undo." } });
+    const j = agentLoad("journal", b.id);
     if (!j) return send(res, 404, { error: { message: "nothing to undo" } });
     if (j.undone) return send(res, 409, { error: { message: "already undone" } });
     const r = await agentUndo(nodeFs(j.root), j);
@@ -409,9 +422,8 @@ async function agentRoute(req, res, url) {
   if (url.pathname === "/agent/plan" && req.method === "GET") return send(res, 200, agentLoad("plan", url.searchParams.get("id")) || {});
   return send(res, 404, { error: { message: "not found" } });
 }
-function latestPlan() {
-  const f = fs.readdirSync(AGENT_DIR).filter((x) => x.startsWith("plan-")).map((x) => ({ x, t: fs.statSync(path.join(AGENT_DIR, x)).mtimeMs })).sort((a, b) => b.t - a.t)[0];
-  return f ? JSON.parse(fs.readFileSync(path.join(AGENT_DIR, f.x), "utf8")) : null;
+function validPlanId(id) {
+  return typeof id === "string" && /^[a-z0-9][a-z0-9-]{0,79}$/i.test(id) && id.toLowerCase() !== "latest";
 }
 
 // ---------------------------------------------------------------- System: services and updates (through the supervisor)
@@ -552,7 +564,14 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { running: st.running, total: st.total });
     }
     if (req.method === "POST" && url.pathname === "/bench/stop") return send(res, 200, bench ? bench.stop() : { running: false });
-    if (url.pathname.startsWith("/agent/")) return await agentRoute(req, res, url);
+    if (url.pathname.startsWith("/agent/")) {
+      const changesFiles = req.method === "POST" && ["/agent/apply", "/agent/undo"].includes(url.pathname);
+      if (!changesFiles) return await agentRoute(req, res, url);
+      if (agentMutationActive) return send(res, 409, { error: { message: "Another file change is already running." } });
+      agentMutationActive = true;
+      try { return await agentRoute(req, res, url); }
+      finally { agentMutationActive = false; }
+    }
     if (req.method === "POST" && url.pathname === "/jobs") return send(res, 200, startJob(await body(req)));
     if (req.method === "GET" && url.pathname.startsWith("/jobs/")) {
       const j = getJob(url.pathname.slice(6));

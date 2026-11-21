@@ -112,10 +112,17 @@ try {
   const seen = [];
   const fake = { chat: async (req) => { seen.push(req.messages.at(-1).content); return { provider: "t", model: "t", content: JSON.stringify(replies.shift()) }; } };
   const r = await A.runAgent(fake, { goal: "what is it?", fs });
-  const j = await A.apply(fs, r);
+  const plan = { ...r, preview: await A.preview(fs, r.ops), enforcePreview: true };
+  await fs.write("notes.md", "written after preview");
+  const stale = await A.apply(fs, plan);
+  agent.stalePreview = !!stale.error && stale.steps.length === 0 && (await fs.read("notes.md")) === "written after preview";
+  plan.preview = await A.preview(fs, r.ops);
+  const j = await A.apply(fs, plan);
   const applied = (await fs.read("notes.md")) === "- milk\n";
+  await fs.write("notes.md", "manual edit");
   const u = await A.undo(fs, j);
-  agent.ok = applied && u.ok && !(await fs.exists("notes.md")) && /1\| # Demo/.test(seen[1]) && r.answer === "Demo app.";
+  agent.undoKeptEdits = !u.ok && (await fs.read("notes.md")) === "manual edit";
+  agent.ok = applied && agent.stalePreview && agent.undoKeptEdits && /1\| # Demo/.test(seen[1]) && r.answer === "Demo app.";
   agent.kind = fs.kind;
   // 3. key transfer text round-trips with its code
   const K = await import("./core/accounts.mjs");

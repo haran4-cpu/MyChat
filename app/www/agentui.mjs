@@ -142,7 +142,8 @@ export function agentView(root, { el, md, toast, gw, tools, prefill, keepAlive }
     wrap.append(el("div", { class: "actions" }, el("button", { class: "btn", type: "button", onclick: async () => {
       const approved = boxes.map((b, i) => (b.checked ? i : -1)).filter((i) => i >= 0);
       if (!approved.length) return toast("Nothing selected");
-      const j = await apply(fs, { id: t.planId, goal: t.goal, ops: t.ops }, approved);
+      const j = await apply(fs, { id: t.planId, goal: t.goal, ops: t.ops, preview: t.preview, enforcePreview: true }, approved);
+      if (j.error && !j.steps.length) return toast(j.error, 5000);
       t.journal = j; journals.save(j); sessions.save(session); draw();
     } }, "Approve and apply")));
     return wrap;
