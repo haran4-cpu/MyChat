@@ -354,3 +354,12 @@ setInterval(async () => {
     if (h.startedAt !== bootedAt && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) location.reload();
   } catch { /* restarting */ }
 }, 15000);
+
+// "Open chat" opens your Open WebUI app (the one installed on this PC) when there is one; otherwise a browser tab
+document.addEventListener("click", async (e) => {
+  const a = e.target.closest?.('a[href^="http://127.0.0.1:8080"]');
+  if (!a || e.ctrlKey || e.shiftKey || e.metaKey) return;
+  e.preventDefault();
+  try { const r = await api("/system/open-chat", {}); if (r.opened) { toast("Opening the Open WebUI app"); return; } } catch { /* fall back */ }
+  window.open(a.href, "_blank", "noopener");
+});

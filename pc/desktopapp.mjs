@@ -74,3 +74,26 @@ export function launch({ home, url }) {
   if (!edge) throw new Error("Microsoft Edge was not found");
   execFile(edge, [`--app=${url}`, "--window-size=1360,900"], { windowsHide: false }).unref?.();
 }
+
+/** The Open WebUI app installed on this PC (a browser web-app shortcut, e.g. from Edge or Avast Browser): open the
+ *  chat in it instead of a browser tab. Returns the shortcut used, or null when there is none. */
+export function findChatApp() {
+  if (process.platform !== "win32") return null;
+  const roots = [path.join(process.env.APPDATA || "", "Microsoft", "Windows", "Start Menu", "Programs"),
+    path.join(process.env.ProgramData || "C:\\ProgramData", "Microsoft", "Windows", "Start Menu", "Programs"),
+    path.join(process.env.USERPROFILE || "", "Desktop"), path.join(process.env.USERPROFILE || "", "OneDrive")];
+  const walk = (d, depth) => {
+    let items = []; try { items = fs.readdirSync(d, { withFileTypes: true }); } catch { return null; }
+    for (const it of items) if (it.isFile() && /^open ?webui.*\.lnk$/i.test(it.name)) return path.join(d, it.name);
+    if (depth > 0) for (const it of items) if (it.isDirectory() && !/^(node_modules|\.)/.test(it.name)) { const f = walk(path.join(d, it.name), depth - 1); if (f) return f; }
+    return null;
+  };
+  for (const r of roots) { const f = walk(r, r.endsWith("OneDrive") ? 1 : 3); if (f) return f; }
+  return null;
+}
+export function openChatApp() {
+  const lnk = findChatApp();
+  if (!lnk) return null;
+  execFile("cmd.exe", ["/c", "start", "", lnk], { windowsHide: true });
+  return lnk;
+}

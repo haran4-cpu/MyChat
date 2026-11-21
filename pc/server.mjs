@@ -26,7 +26,7 @@ import { nodeFs } from "./agentfs.mjs";
 import { checkPage } from "./pagecheck.mjs";
 import { skillSearch, skillLoad } from "./skills.mjs";
 import { captureScreen, askImage } from "./see.mjs";
-import { iconPng, manifest as appManifest, installShortcuts, launch as launchApp } from "./desktopapp.mjs";
+import { iconPng, manifest as appManifest, installShortcuts, launch as launchApp, openChatApp } from "./desktopapp.mjs";
 const SKILLS = { search: (q) => skillSearch(q), load: (id) => skillLoad(id) };
 
 /** run_page for the agent, limited to one root folder (the path must stay inside it). */
@@ -579,6 +579,10 @@ const server = http.createServer(async (req, res) => {
       const code = transferCode(), payload = { ...readJson("keys.json", {}) };
       if (b.withPc && settings.phoneLink?.enabled) payload.__pc = { urls: linkUrls().map((u) => u.url), token };
       return send(res, 200, { code, text: await exportKeys(payload, code) });
+    }
+    // "Open chat": your installed Open WebUI app when there is one, otherwise the page asks the browser to open it
+    if (url.pathname === "/system/open-chat" && req.method === "POST") {
+      try { const lnk = openChatApp(); return send(res, 200, { opened: !!lnk, app: lnk }); } catch (e) { return send(res, 200, { opened: false, error: e.message }); }
     }
     if (url.pathname === "/system/desktop-app" && req.method === "POST") {
       const b = await body(req), appUrl = `http://127.0.0.1:${PORT}/`;
