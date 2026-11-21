@@ -359,6 +359,39 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(ok, out)
         self.assertEqual((ws / "f.py").read_text(), "x = 1\nx = 2\n")
 
+    @unittest.skipUnless(shutil.which("node"), "Node is required for JavaScript parsing")
+    def test_javascript_edits_are_checked_before_write(self):
+        s, cfg, events, _ = self.session()
+        p = Path(cfg["workspace"]) / "sample.mjs"
+        original = "export const n = 1;\n"
+        p.write_text(original)
+        out, ok = tools.call(s.ctx, "edit_file", {"path": p.name, "old": original.strip(), "new": "export const = 1;"})
+        self.assertFalse(ok, out)
+        self.assertIn("SyntaxError", out)
+        self.assertEqual(p.read_text(), original)
+        out, ok = tools.call(s.ctx, "edit_file", {"path": p.name, "old": "n = 1", "new": "n = 2"})
+        self.assertTrue(ok, out)
+        tools.finish(s.ctx, "done")
+        checks = s.ctx.finished["checks"]
+        self.assertEqual([(c["check"], c["status"]) for c in checks],
+                         [("JavaScript syntax", "rejected"), ("JavaScript syntax", "passed")])
+
+    def test_anchored_editor_retries_only_the_replacement(self):
+        from kestrel.coder import propose_edit
+        from types import SimpleNamespace
+
+        replies = iter(['{"replacement":"x ="}', '{"replacement":"x = 2"}'])
+        calls = []
+
+        def chat(role, messages, tools, **options):
+            calls.append((list(messages), options["fmt"]))
+            return SimpleNamespace(content=next(replies), model="fake", seconds=0, output_tokens=3)
+
+        patch, _ = propose_edit(SimpleNamespace(chat=chat), "x = 1\n", "set x to 2", ".py", "x = 1")
+        self.assertEqual(patch, {"old": "x = 1", "replacement": "x = 2"})
+        self.assertEqual(calls[0][1]["required"], ["replacement"])
+        self.assertIn("Python syntax", calls[1][0][-1]["content"])
+
     def test_skill_search(self):
         s, cfg, events, dec = self.session()
         out, ok = tools.call(s.ctx, "skill_search", {"query": "root cause debugging failing test"})
@@ -476,7 +509,7 @@ class IntegrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             calculate("__import__('os')")
 
-    def test_quick_edit_with_code_model_and_rollback(self):
+    def test_quick_edit_with_code_model_and_preflight(self):
         home, cfg, g, audit, dec = make_env("allow")
         s = Session(cfg, g, Router(cfg), None, None)
         ws = Path(cfg["workspace"])
@@ -489,11 +522,13 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(req["model"], "qwen2.5-coder:3b")
         self.assertEqual(req["format"]["required"], ["old", "replacement"])
         self.assertEqual(req["options"]["temperature"], 0)
-        # an edit that breaks the file is rolled back
-        FAKE.script += [{"content": json.dumps({"old": "return 3.14 * r * r", "replacement": "return (3.14 * r * r"})}]
+        before = (ws / "m.py").read_bytes()
+        bad = {"content": json.dumps({"old": "return 3.14 * r * r", "replacement": "return (3.14 * r * r"})}
+        FAKE.script += [bad, bad]
         out, ok = tools.call(s.ctx, "quick_edit", {"path": "m.py", "instruction": "break it"}, limit=5000)
         self.assertFalse(ok)
-        self.assertIn("rolled back", out)
+        self.assertIn("Rejected before writing: Python syntax", out)
+        self.assertEqual((ws / "m.py").read_bytes(), before)
         self.assertEqual(verify.check_file(ws / "m.py"), "")
 
     def test_one_model_at_a_time(self):

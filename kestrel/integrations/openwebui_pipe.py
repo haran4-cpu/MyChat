@@ -173,6 +173,14 @@ class Pipe:
                             files = ((d.get("finished") or {}).get("files")) or []
                             if files:
                                 yield "\n\n**Files:** " + " · ".join(self._file_link(f) for f in files[:20])
+                            checks = d.get("checks") or []
+                            if checks:
+                                yield "\n\n**Verification**\n" + "\n".join(
+                                    "- " + " · ".join(str(c.get(k, "")).replace("\n", " ").replace("<", "&lt;")
+                                                        for k in ("check", "status", "target", "detail") if c.get(k))
+                                    for c in checks[:20])
+                            elif files:
+                                yield "\n\n**Verification:** no tool check recorded for this turn."
                             segment = ""
                         elif k == "error":
                             yield f"\n\n**Kestrel error:** {d.get('message')}"

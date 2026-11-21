@@ -28,7 +28,8 @@ TOOL RULES
   do not retry the same thing - explain what you need and why.
 - Read big files in slices (read_file start/lines). Search with search_files before guessing locations.
 - Documents: make_document builds .docx .xlsx .pptx .pdf .html from Markdown. Text formats: write_file.
-- Small code fixes: quick_edit (fast code model, verified). Arithmetic: calc (exact; never compute numbers in your head).
+- Small code fixes: read the target and pass an exact unique anchor to quick_edit when possible. A syntax check is separate from a behavior test.
+- Arithmetic: calc (exact; never compute numbers in your head).
 - If you see an outline of earlier work, use recall with the message ids when you need the exact text.
 - Call one tool at a time and wait for its result. When the task is complete, call finish with a summary and evidence.
 - Answer in the user's language. Code, identifiers and file names stay in English."""

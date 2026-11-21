@@ -157,6 +157,7 @@ class Session:
         """One user turn. Returns {"text", "finished", "steps"}."""
         self.add_user(text)
         self.ctx.finished = None
+        self.ctx.verification.clear()
         max_steps = max_steps or int(self.cfg["max_steps_per_turn"])
         think = self.cfg["think_when_acting"] if think is None else think
         last_calls: list[str] = []
@@ -210,8 +211,9 @@ class Session:
                 break
         else:
             final = final or "(step limit reached; ask me to continue)"
-        self.emit("answer", {"text": final, "finished": self.ctx.finished})
-        return {"text": final, "finished": self.ctx.finished, "steps": step + 1}
+        answer = {"text": final, "finished": self.ctx.finished, "checks": self.ctx.verification[-20:]}
+        self.emit("answer", answer)
+        return {**answer, "steps": step + 1}
 
 
 def _preview_args(args: dict) -> dict:

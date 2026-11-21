@@ -125,6 +125,8 @@ function onEvent(ev){
       if(cur&&cur.textContent.trim()===String(d.text).trim()){cur.innerHTML=linkify(d.text)}
       else if(d.text){add(linkify(d.text),'msg bot')}
       if(d.finished&&d.finished.files&&d.finished.files.length)add('Files: '+d.finished.files.map(f=>linkify(f)).join('<br>'),'msg sys');
+      if(d.checks?.length)add(`<details open><summary>Verification</summary>${d.checks.map(c=>`<div>${esc(c.check)} · ${esc(c.status)} · ${esc(c.target)}${c.detail?' · '+esc(c.detail):''}</div>`).join('')}</details>`,'msg sys');
+      else if(d.finished?.files?.length)add('Verification: no tool check recorded for this turn.','msg sys');
       cur=null;think=null;break;
     case 'approval':showApproval(d);break;
     case 'approval_done':{const e=document.getElementById('ap_'+d.id);if(e){e.querySelector('.row').innerHTML=`<span class="small">decision: ${esc(d.decision)}</span>`;e.style.opacity=.6}break}

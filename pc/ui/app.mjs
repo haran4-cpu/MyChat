@@ -138,6 +138,7 @@ function renderPlan(out) {
 function changeReceipt(j, id) {
   return el("div", { class: "card stack" }, el("h3", {}, j.undone ? "Undone" : j.error ? "Partly done" : "Applied"),
     el("div", {}, `${j.steps.filter(s => !s.auto).length} change(s) recorded.`), j.error ? el("div", { class: "pill bad" }, j.error) : null,
+    j.preflight?.length ? el("ul", {}, j.preflight.map(v => el("li", { dir: "auto" }, `${v.path} · ${v.syntax ? "file and syntax checked" : "file matched preview"}`))) : null,
     (j.verify || []).map(v => el("details", { open: true }, el("summary", {}, v.failed ? `${v.path} · browser check incomplete` : `${v.path} · browser errors ${v.before} → ${v.after}`),
       v.failed ? el("div", { class: "pill bad" }, v.failed) : el("ul", {}, [...v.fixed.map(x => "Fixed: " + x), ...v.new.map(x => "New: " + x), ...v.still.map(x => "Still present: " + x)].map(x => el("li", {}, x))))),
     j.undone ? null : undoBtn(id, () => agent()));

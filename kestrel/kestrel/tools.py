@@ -65,6 +65,7 @@ class Ctx:
         self.router = router
         self.session = None
         self.files_touched: list[str] = []
+        self.verification: list[dict] = []
         self.finished: dict | None = None
 
 
@@ -194,15 +195,27 @@ def find_files(ctx: Ctx, name, path="."):
     return "\n".join(out) or "nothing found"
 
 
+def _write_checked_source(ctx: Ctx, path, content: str, preview: str):
+    name, issue = verify.check_source(Path(path).suffix.lower(), content)
+    if issue:
+        ctx.verification.append({"check": name, "target": str(ctx.guard.resolve(str(path))), "status": "rejected", "detail": issue})
+        raise ToolError(f"Rejected before writing: {name}: {issue}")
+    p = ctx.guard.write_bytes(str(path), content.encode("utf-8"), preview=preview)
+    ctx.files_touched.append(str(p))
+    issue = "" if name else verify.check_file(p)
+    ctx.verification.append({"check": name or "File inspection", "target": str(p),
+                             "status": "failed" if issue else "passed" if name else "unchecked",
+                             "detail": issue or ("" if name else "No language parser ran")})
+    return p, (f"CHECK FAILED: {issue}" if issue else f"check: {name} passed" if name else "No language parser ran")
+
+
 @tool("write_file", "Create or overwrite a text file (code, md, html, csv, json...). Old version is backed up.",
       {"path": S("file path"), "content": S("full file content")}, ["path", "content"])
 def write_file(ctx: Ctx, path, content):
     if not isinstance(content, str):
         content = json.dumps(content, indent=2, ensure_ascii=False)
-    p = ctx.guard.write_bytes(path, content.encode("utf-8"), preview=content)
-    ctx.files_touched.append(str(p))
-    issues = verify.check_file(p)
-    return f"wrote {p} ({len(content):,} chars)" + (f"\nCHECK FAILED: {issues}" if issues else "\ncheck: ok")
+    p, result = _write_checked_source(ctx, path, content, content)
+    return f"wrote {p} ({len(content):,} chars)\n{result}"
 
 
 @tool("edit_file", "Replace one exact, unique snippet in a file. Read the file first.",
@@ -222,10 +235,8 @@ def edit_file(ctx: Ctx, path, old, new):
     if n > 1:
         raise ToolError(f"old text appears {n} times; include more surrounding lines to make it unique")
     out = text.replace(old, new, 1)
-    p = ctx.guard.write_bytes(str(p), out.encode("utf-8"), preview=f"--- old\n{old}\n+++ new\n{new}")
-    ctx.files_touched.append(str(p))
-    issues = verify.check_file(p)
-    return f"edited {p}" + (f"\nCHECK FAILED: {issues}" if issues else "\ncheck: ok")
+    p, result = _write_checked_source(ctx, p, out, f"--- old\n{old}\n+++ new\n{new}")
+    return f"edited {p}\n{result}"
 
 
 @tool("make_document",
@@ -276,9 +287,12 @@ def run_command(ctx: Ctx, command, cwd=".", timeout=120):
                            stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         ctx.guard.audit.record("command", command=command, cwd=str(wd), result="timeout")
+        ctx.verification.append({"check": "Command exit", "target": command[:240], "status": "failed", "detail": "timeout"})
         raise ToolError(f"timed out after {timeout}s")
     out = _decode(r.stdout) + ("\n[stderr]\n" + _decode(r.stderr) if r.stderr else "")
     ctx.guard.audit.record("command", command=command, cwd=str(wd), exit=r.returncode)
+    ctx.verification.append({"check": "Command exit", "target": command[:240],
+                             "status": "passed" if r.returncode == 0 else "failed", "detail": f"exit {r.returncode}"})
     if len(out) > 6000:
         out = out[:2500] + f"\n... ({len(out) - 5000:,} chars cut) ...\n" + out[-2500:]
     return f"exit code {r.returncode}\n{out}"
@@ -356,24 +370,26 @@ def calc(ctx: Ctx, expression):
 
 @tool("quick_edit",
       "Fast focused code fix in ONE file using the code model: give the file and a one-sentence instruction. "
-      "It finds the exact snippet, replaces it, checks syntax. Best for small fixes; use edit_file for multi-part changes.",
-      {"path": S("file path"), "instruction": S("what to change, one sentence")}, ["path", "instruction"])
-def quick_edit(ctx: Ctx, path, instruction):
-    from .coder import propose_edit
+      "For a known target, supply the exact unique anchor from the file so the code model returns only its replacement.",
+      {"path": S("file path"), "instruction": S("what to change, one sentence"), "anchor": S("optional exact unique source snippet")}, ["path", "instruction"])
+def quick_edit(ctx: Ctx, path, instruction, anchor=None):
+    from .coder import EditError, propose_edit
     p = ctx.guard.check_read(path)
     if not p.is_file():
         raise ToolError(f"not a file: {p}")
     source = p.read_text(encoding="utf-8")
-    proposal, info = propose_edit(ctx.router, source, instruction, p.suffix.lower())
+    try:
+        proposal, info = propose_edit(ctx.router, source, instruction, p.suffix.lower(), anchor)
+    except EditError as error:
+        ctx.verification.append({"check": "Proposed code edit", "target": str(p), "status": "rejected", "detail": str(error)})
+        raise ToolError(f"Rejected before writing: {error}") from error
     updated = source.replace(proposal["old"], proposal["replacement"], 1)
     preview = f"--- old\n{proposal['old']}\n+++ new\n{proposal['replacement']}"
-    p = ctx.guard.write_bytes(str(p), updated.encode("utf-8"), preview=preview)
-    ctx.files_touched.append(str(p))
-    issues = verify.check_file(p)
-    if issues:  # roll the change back: never leave a file broken by a quick edit
-        ctx.guard.write_bytes(str(p), source.encode("utf-8"), preview="(automatic rollback of a broken quick_edit)")
-        raise ToolError(f"edit rejected and rolled back - it broke the file: {issues}")
-    return f"edited {p} with {info}\n{preview}\ncheck: ok"
+    p, result = _write_checked_source(ctx, p, updated, preview)
+    if result.startswith("CHECK FAILED:"):
+        ctx.guard.write_bytes(str(p), source.encode("utf-8"), preview="(rollback of failed file inspection)")
+        raise ToolError(f"Edit rolled back: {result}")
+    return f"edited {p} with {info}\n{preview}\n{result}"
 
 
 def _proof_cli(*args: str, timeout: int = 150) -> str:
@@ -411,8 +427,10 @@ def run_page(ctx: Ctx, path, clicks=25):
 @tool("finish", "Call when the task (or mission step) is complete. Give a short summary and the evidence.",
       {"summary": S("what was done"), "evidence": S("how you verified it (checks, outputs, files)")}, ["summary"])
 def finish(ctx: Ctx, summary, evidence=""):
-    ctx.finished = {"summary": summary, "evidence": evidence, "files": list(dict.fromkeys(ctx.files_touched))}
-    return "ok"
+    checks = ctx.verification[-20:]
+    ctx.finished = {"summary": summary, "evidence": evidence, "files": list(dict.fromkeys(ctx.files_touched)),
+                    "checks": checks}
+    return "Recorded summary and tool checks" if checks else "Recorded summary; no tool check recorded"
 
 
 # ---------------------------------------------------------------------------

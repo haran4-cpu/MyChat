@@ -174,7 +174,9 @@ class MissionRunner:
             s["status"] = "pending"
             return False
         files = list(dict.fromkeys((fin or {}).get("files", []) or self.session.ctx.files_touched))
-        problems = []
+        latest = {item["target"]: item for item in res.get("checks", []) if item["check"] != "Command exit"}
+        problems = [f"{item['target']}: {item['check']} rejected: {item['detail']}" for item in latest.values()
+                    if item["status"] == "rejected"]
         for f in files:  # deterministic verification, outside the model
             issue = verify.check_file(Path(f))
             if issue:
