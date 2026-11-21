@@ -454,3 +454,10 @@ test("look: the run screenshot is shown to a vision model; the screen only when 
   await runAgent(b.gw, { goal: b.goal, fs, plan: false, maxSteps: 5, runPage, see, noChallenge: true });
   assert.deepEqual(calls.sort(), ["/runs/a-after.png", "screen"]);
 });
+
+test("citation check: web addresses with ports are not file citations", async () => {
+  const { checkClaims } = await import("../core/agent.mjs");
+  const r = await checkClaims("The gateway is at http://127.0.0.1:11500 and Kestrel at 127.0.0.1:8765; config.json:2 sets the port.", new Map([["config.json", "{\n \"port\": 1\n}"]]), { text: async () => null });
+  assert.deepEqual(r.bad, []);
+  assert.equal(r.total, 1);
+});

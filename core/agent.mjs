@@ -495,7 +495,8 @@ export async function checkClaims(answer, seen, reader) {
     if (k) return seen.get(k);
     try { return await reader.text(p); } catch { return null; }
   };
-  for (const m of answer.matchAll(/([\w./!-]+\.[A-Za-z0-9]{1,6}):(\d+)(?:[-–](\d+))?/g)) {
+  // an extension starts with a letter: "127.0.0.1:11500" is an address, not file 127.0.0.1 at line 11500 (measured)
+  for (const m of answer.matchAll(/(?<![\w/])([\w./!-]+\.[A-Za-z][A-Za-z0-9]{0,5}):(\d+)(?:[-–](\d+))?/g)) {
     total++;
     const t = await find(m[1]);
     if (t == null) bad.push(`${m[1]}:${m[2]} (no such file)`);
@@ -504,7 +505,7 @@ export async function checkClaims(answer, seen, reader) {
   // code quoted on the same line as a citation is a claim about the file (a fix suggested elsewhere is not)
   const all = squash([...seen.values()].join("\n"));
   if (seen.size) for (const line of answer.split("\n")) {
-    if (!/[\w./!-]+\.[A-Za-z0-9]{1,6}:\d+/.test(line)) continue;
+    if (!/[\w./!-]+\.[A-Za-z][A-Za-z0-9]{0,5}:\d+/.test(line)) continue;
     // inline code spans are the odd pieces between backticks (a regex over the line paired the END of one span with
     // the START of the next and "quoted" the prose between them — measured on the PC)
     const parts = line.split("`");
