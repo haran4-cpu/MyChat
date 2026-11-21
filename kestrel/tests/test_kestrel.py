@@ -359,6 +359,39 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(ok, out)
         self.assertEqual((ws / "f.py").read_text(), "x = 1\nx = 2\n")
 
+    @unittest.skipUnless(shutil.which("node"), "Node is required for JavaScript parsing")
+    def test_javascript_edits_are_checked_before_write(self):
+        s, cfg, events, _ = self.session()
+        p = Path(cfg["workspace"]) / "sample.mjs"
+        original = "export const n = 1;\n"
+        p.write_text(original)
+        out, ok = tools.call(s.ctx, "edit_file", {"path": p.name, "old": original.strip(), "new": "export const = 1;"})
+        self.assertFalse(ok, out)
+        self.assertIn("SyntaxError", out)
+        self.assertEqual(p.read_text(), original)
+        out, ok = tools.call(s.ctx, "edit_file", {"path": p.name, "old": "n = 1", "new": "n = 2"})
+        self.assertTrue(ok, out)
+        tools.finish(s.ctx, "done")
+        checks = s.ctx.finished["checks"]
+        self.assertEqual([(c["check"], c["status"]) for c in checks],
+                         [("JavaScript syntax", "rejected"), ("JavaScript syntax", "passed")])
+
+    def test_anchored_editor_retries_only_the_replacement(self):
+        from kestrel.coder import propose_edit
+        from types import SimpleNamespace
+
+        replies = iter(['{"replacement":"x ="}', '{"replacement":"x = 2"}'])
+        calls = []
+
+        def chat(role, messages, tools, **options):
+            calls.append((list(messages), options["fmt"]))
+            return SimpleNamespace(content=next(replies), model="fake", seconds=0, output_tokens=3)
+
+        patch, _ = propose_edit(SimpleNamespace(chat=chat), "x = 1\n", "set x to 2", ".py", "x = 1")
+        self.assertEqual(patch, {"old": "x = 1", "replacement": "x = 2"})
+        self.assertEqual(calls[0][1]["required"], ["replacement"])
+        self.assertIn("Python syntax", calls[1][0][-1]["content"])
+
     def test_skill_search(self):
         s, cfg, events, dec = self.session()
         out, ok = tools.call(s.ctx, "skill_search", {"query": "root cause debugging failing test"})

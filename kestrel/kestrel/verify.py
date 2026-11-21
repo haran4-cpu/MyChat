@@ -7,12 +7,53 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
+import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
 _OOXML_MAIN = {".docx": "word/document.xml", ".xlsx": "xl/workbook.xml", ".pptx": "ppt/presentation.xml"}
+
+
+JS_INPUT_TYPES = {".mjs": ("module",), ".cjs": ("commonjs",), ".js": ("module", "commonjs")}
+
+
+def check_source(ext: str, source: str) -> tuple[str, str]:
+    """Return (check name, diagnostic). No name means this format was not parsed."""
+    try:
+        if ext == ".py":
+            ast.parse(source)
+            return "Python syntax", ""
+        if ext in (".json", ".ipynb"):
+            json.loads(source.removeprefix("\ufeff"))
+            return "JSON syntax", ""
+    except SyntaxError as e:
+        return "Python syntax", f"line {e.lineno}: {e.msg}"
+    except json.JSONDecodeError as e:
+        return "JSON syntax", f"line {e.lineno}, column {e.colno}: {e.msg}"
+    if ext not in JS_INPUT_TYPES:
+        return "", ""
+    node = shutil.which("node")
+    if node is None:
+        return "JavaScript syntax", "Node.js unavailable for syntax check"
+    diagnostic = "JavaScript parser rejected the source"
+    for kind in JS_INPUT_TYPES[ext]:
+        try:
+            r = subprocess.run([node, "--check", f"--input-type={kind}"], input=source.encode("utf-8"),
+                               capture_output=True, timeout=8, env={**os.environ, "NODE_OPTIONS": ""})
+        except (OSError, subprocess.TimeoutExpired):
+            return "JavaScript syntax", "Node.js syntax check could not complete"
+        if r.returncode == 0:
+            return "JavaScript syntax", ""
+        lines = r.stderr.decode("utf-8", "replace").splitlines()
+        message = next((line for line in lines if line.startswith("SyntaxError:")), None)
+        if message:
+            location = next((line for line in lines if line.startswith("[stdin]:")), "")
+            diagnostic = f"{location.removeprefix('[stdin]:')}: {message}" if location else message
+    return "JavaScript syntax", diagnostic
 
 
 def check_file(p: Path) -> str:
@@ -26,10 +67,9 @@ def check_file(p: Path) -> str:
     try:
         if p.stat().st_size == 0:
             return "file is empty"
-        if ext == ".py":
-            ast.parse(p.read_text(encoding="utf-8"), filename=str(p))
-        elif ext in (".json", ".ipynb"):
-            json.loads(p.read_text(encoding="utf-8"))
+        if ext in (".py", ".json", ".ipynb", *JS_INPUT_TYPES):
+            name, error = check_source(ext, p.read_text(encoding="utf-8"))
+            return f"{name} error: {error}" if error else ""
         elif ext in (".xml", ".svg"):
             ET.parse(p)
         elif ext in _OOXML_MAIN:
@@ -67,7 +107,7 @@ def check_file(p: Path) -> str:
                 bad = z.testzip()
                 if bad:
                     return f"corrupt member {bad}"
-        elif ext in (".js", ".mjs", ".ts", ".css", ".java", ".c", ".cpp", ".cs", ".go", ".rs"):
+        elif ext in (".ts", ".css", ".java", ".c", ".cpp", ".cs", ".go", ".rs"):
             t = p.read_text(encoding="utf-8", errors="replace")
             src = re.sub(r"//[^\n]*|/\*.*?\*/|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`", "", t, flags=re.S)
             for o, c in ("{}", "()", "[]"):

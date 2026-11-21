@@ -123,6 +123,17 @@ try {
   const u = await A.undo(fs, j);
   agent.undoKeptEdits = !u.ok && (await fs.read("notes.md")) === "manual edit";
   agent.ok = applied && agent.stalePreview && agent.undoKeptEdits && /1\| # Demo/.test(seen[1]) && r.answer === "Demo app.";
+  const phone = await import("./agentui.mjs");
+  const edits = [{op:"write",path:"broken.json",content:'{ "x": }'}, {op:"write",path:"correct.json",content:'{"x":1}'}];
+  const phonePlan = {id:"phone-check",ops:edits,preview:await A.preview(fs, edits)};
+  const phoneChecks = await A.reviewPlanPreviews(fs, phonePlan);
+  let blocked = false;
+  try { await phone.applyPhonePlan(fs, phonePlan, [0,1]); } catch { blocked = true; }
+  const untouched = !(await fs.exists("broken.json")) && !(await fs.exists("correct.json"));
+  const journal = await phone.applyPhonePlan(fs, phonePlan, [1]);
+  agent.verification = blocked && untouched && phoneChecks[0].status === "blocked" && phoneChecks[1].syntax &&
+    journal.preflight[0]?.syntax && (await fs.read("correct.json")) === '{"x":1}';
+  agent.ok = agent.ok && agent.verification;
   agent.kind = fs.kind;
   // 3. key transfer text round-trips with its code
   const K = await import("./core/accounts.mjs");

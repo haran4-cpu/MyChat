@@ -2,9 +2,9 @@
 import { init, state, ask, setKey, settings, saveSettings, smartFetch, brain, pcLink, assistant, pollJob } from "./engine.mjs";
 import { detectKeys, validateKey, identifyPlainKey, pkcePair, openRouterAuthUrl, openRouterExchange, CONNECT, SEARCH_KEYS, exportKeys, importKeys, transferCode, BUNDLE_PREFIX } from "./core/accounts.mjs";
 import { SEARCH_PROVIDERS, Search } from "./core/search.mjs";
-import { agentView, filesView, hostTools } from "./agentui.mjs";
+import { agentView, filesView, hostTools, checkLabel, verificationReceipt, applyPhonePlan } from "./agentui.mjs";
 import { workspace, importFiles } from "./files.mjs";
-import { workspaceReader, apply as applyOps, undo as undoOps } from "./core/agent.mjs";
+import { workspaceReader, undo as undoOps, reviewPlanPreviews } from "./core/agent.mjs";
 import { study } from "./core/digest.mjs";
 import { md } from "./markdown.mjs";
 
@@ -117,6 +117,8 @@ function chatOps(o) {
   const wrap = el("div", { class: "card opsbox" }, el("b", {}, "Proposed changes"));
   if (o.journal) {
     wrap.append(el("p", {}, `${o.journal.undone ? "Undone" : "Applied"}: ${o.journal.steps.length} change(s)${o.journal.error ? " — stopped at: " + o.journal.error : ""}`));
+    const receipt = verificationReceipt(el, o.journal);
+    if (receipt) wrap.append(receipt);
     if (!o.journal.undone) wrap.append(el("button", { class: "btn ghost", type: "button", onclick: async () => {
       const r = o.remote ? await (await smartFetch(o.remote + "/agent/undo", { method: "POST", headers: { Authorization: "Bearer " + state.settings.pc.token, "Content-Type": "application/json" }, body: JSON.stringify({ id: o.id }) })).json()
                          : await undoOps(await workspace(), o.journal);
@@ -125,8 +127,10 @@ function chatOps(o) {
     return wrap;
   }
   const boxes = (o.preview || o.ops).map((p, i) => {
-    const cb = el("input", { type: "checkbox", checked: !p.unchanged });
-    wrap.append(el("label", { class: "row" }, cb, el("span", { class: "grow", dir: "auto" }, `${i + 1}. ${p.label || p.op + " " + p.path}${p.stats ? `  +${p.stats.added} −${p.stats.removed}` : ""}`)));
+    const check = o.checks?.[i], blocked = check?.status === "blocked" || !!p.error;
+    const cb = el("input", { type: "checkbox", checked: !p.unchanged && !blocked, disabled: blocked || p.unchanged });
+    wrap.append(el("label", { class: "row" }, cb, el("span", { class: "grow", dir: "auto" }, `${i + 1}. ${p.label || p.op + " " + p.path}${p.stats ? `  +${p.stats.added} −${p.stats.removed}` : ""}`,
+      checkLabel(check) ? el("small", {}, checkLabel(check)) : null)));
     return cb;
   });
   wrap.append(el("div", { class: "actions" }, el("button", { class: "btn", type: "button", onclick: async () => {
@@ -138,9 +142,11 @@ function chatOps(o) {
       o.journal = await r.json();
       if (!r.ok) { toast("✗ " + (o.journal.error?.message || "could not apply on the PC")); o.journal = null; return; }
     } else {
-      const journal = await applyOps(await workspace(), { id: o.id, goal: o.goal, ops: o.ops, preview: o.preview, enforcePreview: true }, pick);
-      if (journal.error && !journal.steps.length) return toast(journal.error);
-      o.journal = journal;
+      try {
+        const journal = await applyPhonePlan(await workspace(), o, pick);
+        if (journal.error && !journal.steps.length) return toast(journal.error);
+        o.journal = journal;
+      } catch (error) { return toast(error.message, 5000); }
     }
     saveChats(); renderChat();
   } }, "Approve and apply")));
@@ -273,7 +279,7 @@ async function resumeJob() {
     const r = await pollJob(p.base, p.id, {});
     chat.messages.push({ role: "assistant", content: r.content });
     chat.meta[chat.messages.length - 1] = { mode: r.mode, trace: r.trace, claims: r.claims, sources: r.sources };
-    if (r.ops?.length) chat.meta[chat.messages.length - 1].ops = { id: r.planId, goal: chat.messages.at(-2).content, ops: r.ops, preview: r.preview, remote: p.base };
+    if (r.ops?.length) chat.meta[chat.messages.length - 1].ops = { id: r.planId, goal: chat.messages.at(-2).content, ops: r.ops, preview: r.preview, checks: r.checks, remote: p.base };
     localStorage.removeItem("mychat.pendingJob"); saveChats();
     if (current === chat) renderChat();
   } catch (e) { toast("✗ " + e.message, 5000); }
@@ -340,7 +346,8 @@ async function send(text, filesAgain) {
     const versionsBefore = carry; carry = null;
     current.meta[k] = { mode: r.mode, route: r.route, trace: r.trace, claims: r.claims, sources: r.sources, ms: Date.now() - t0,
       ...(steps.length || r.steps?.length ? { steps: steps.length ? steps : r.steps.filter((x) => x.tool).map((x) => `${x.tool} ${JSON.stringify(x.args || {}).slice(0, 100)}`) } : {}) };
-    if (r.ops?.length) current.meta[k].ops = { id: r.planId, goal: text, ops: r.ops, preview: r.preview, remote: r.remote || null };
+    if (r.ops?.length) current.meta[k].ops = { id: r.planId, goal: text, ops: r.ops, preview: r.preview,
+      checks: r.remote ? r.checks : await reviewPlanPreviews(await workspace(), r), remote: r.remote || null };
     if (versionsBefore) { const vs = [...versionsBefore, { content: r.content, meta: { ...current.meta[k] } }]; current.meta[k].versions = vs; current.meta[k].vi = vs.length - 1; }
   } catch (e) {
     if (running.signal.aborted) current.messages.push({ role: "assistant", content: acc || "Stopped." });

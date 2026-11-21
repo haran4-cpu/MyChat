@@ -612,6 +612,21 @@ export async function checkPlanPreviews(fs, plan, selected = null, validateText 
   }
 }
 
+export async function reviewPlanPreviews(fs, plan, validateText = null) {
+  const checks = [];
+  for (const [index, op] of plan.ops.entries()) {
+    if (!isTextChange(op.op)) { checks.push({ status: "unchecked" }); continue; }
+    try {
+      await checkPlanPreviews(fs, plan, [index], validateText);
+      const syntax = /\.json$/i.test(op.path) || !!validateText && /\.[cm]?js$/i.test(op.path);
+      checks.push({ status: "passed", syntax });
+    } catch (error) {
+      checks.push({ status: "blocked", message: plan.preview?.[index]?.error || error.message });
+    }
+  }
+  return checks;
+}
+
 /** What each op will do, with a line diff for files that change. */
 export async function preview(fs, ops) {
   const out = [];

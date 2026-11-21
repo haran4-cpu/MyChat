@@ -1,7 +1,7 @@
 // Phone screens for the Agent and Files. Same engine as the PC (core/agent.mjs): the agent thinks and uses tools
 // (tree, read, search — also inside ZIP/APK archives — study, calc, web search, fetch, run_js), shows its steps, keeps
 // each conversation, and only PROPOSES changes: you approve, it applies, Undo puts everything back.
-import { runAgent, preview, apply, undo, TRASH } from "./core/agent.mjs";
+import { runAgent, preview, apply, undo, TRASH, checkPlanPreviews, reviewPlanPreviews, isTextChange } from "./core/agent.mjs";
 import { evaluate } from "./core/exact.mjs";
 import { htmlToText } from "./core/search.mjs";
 import { isArchiveName, isZip, extractZip } from "./core/zip.mjs";
@@ -18,6 +18,26 @@ const store = (key, max) => ({
   remove(id) { localStorage.setItem(key, JSON.stringify(this.all().filter((x) => x.id !== id))); },
 });
 const sessions = store("mychat.agent.sessions", 30), journals = store("mychat.agent.journals", 30);
+
+export function checkLabel(check) {
+  if (!check || check.status === "unchecked") return "";
+  return check.status === "blocked" ? `Blocked: ${check.message}` : check.syntax ? "File and syntax checked" : "File matches preview";
+}
+
+export function verificationReceipt(el, journal) {
+  const results = [...(journal.preflight || []).map(c => `${c.path}: ${c.syntax ? "file and syntax checked" : "file matched preview"}`),
+    ...(journal.verify || []).map(c => `${c.path}: ${c.failed ? `browser check incomplete (${c.failed})` : `browser errors ${c.before} → ${c.after}`}`)];
+  return results.length ? el("details", { open: true }, el("summary", {}, "Verification"),
+    el("ul", {}, ...results.map(r => el("li", { dir: "auto" }, r)))) : null;
+}
+
+export async function applyPhonePlan(fs, plan, approved) {
+  await checkPlanPreviews(fs, plan, approved);
+  const journal = await apply(fs, { ...plan, enforcePreview: true }, approved);
+  journal.preflight = approved.flatMap(i => isTextChange(plan.ops[i].op)
+    ? [{ path: plan.ops[i].path, syntax: /\.json$/i.test(plan.ops[i].path) }] : []);
+  return journal;
+}
 
 // ---------------------------------------------------------------- host tools for the agent on the phone
 export function hostTools({ search, fetch: f }) {
@@ -95,7 +115,10 @@ export function agentView(root, { el, md, toast, gw, tools, prefill, keepAlive }
         const r = await runAgent(gw(), { goal: text, fs, history, signal: running.signal, ...tools(),
           onStep: (s) => { status.append(stepEl(s)); status.scrollTop = status.scrollHeight; if (s.kind !== "status") turn.steps.push(s); } });
         Object.assign(turn, { answer: r.answer, ops: r.ops, rejected: r.rejected, by: r.by, calls: r.calls, planId: r.id, ms: Date.now() - turn.at });
-        if (r.ops.length) turn.preview = await preview(fs, r.ops);
+        if (r.ops.length) {
+          turn.preview = await preview(fs, r.ops);
+          turn.checks = await reviewPlanPreviews(fs, turn);
+        }
       } catch (e) { turn.answer = (running.signal.aborted ? "Stopped." : "✗ " + e.message); }
       if (!session.title) session.title = text.slice(0, 70);
       session.turns.push(turn); session.at = Date.now();
@@ -124,6 +147,8 @@ export function agentView(root, { el, md, toast, gw, tools, prefill, keepAlive }
     const wrap = el("div", { class: "opsbox" }, el("b", {}, "Proposed changes"));
     if (t.journal) {
       wrap.append(el("p", {}, `${t.journal.undone ? "Undone" : "Applied"}: ${t.journal.steps.length} change(s)` + (t.journal.error ? ` — stopped at: ${t.journal.error}` : "")));
+      const receipt = verificationReceipt(el, t.journal);
+      if (receipt) wrap.append(receipt);
       if (!t.journal.undone) wrap.append(el("button", { class: "btn ghost", type: "button", onclick: async () => {
         const r = await undo(fs, t.journal); t.journal.undone = Date.now(); journals.save(t.journal); sessions.save(session); toast(r.ok ? "Undone" : r.problems.join("; "), 5000); draw();
       } }, "Undo"));
@@ -131,20 +156,24 @@ export function agentView(root, { el, md, toast, gw, tools, prefill, keepAlive }
     }
     const boxes = [];
     (t.preview || t.ops).forEach((o, i) => {
-      const cb = el("input", { type: "checkbox", checked: !o.unchanged });
+      const check = t.checks?.[i], blocked = check?.status === "blocked" || !!o.error;
+      const cb = el("input", { type: "checkbox", checked: !o.unchanged && !blocked, disabled: blocked || o.unchanged });
       boxes.push(cb);
       const diff = o.diff ? el("pre", { class: "diff" }, o.diff.slice(0, 200).join("\n")) : null;
       if (diff) diff.hidden = (t.preview || []).length > 3;
       wrap.append(el("div", { class: "op" }, el("label", { class: "row" }, cb, el("div", { class: "grow" },
-        el("span", {}, `${i + 1}. ${o.label || o.op + " " + o.path}${o.stats ? `  +${o.stats.added} −${o.stats.removed}` : ""}`), o.why ? el("small", { dir: "auto" }, o.why) : null),
+        el("span", {}, `${i + 1}. ${o.label || o.op + " " + o.path}${o.stats ? `  +${o.stats.added} −${o.stats.removed}` : ""}`), o.why ? el("small", { dir: "auto" }, o.why) : null,
+        checkLabel(check) ? el("small", { dir: "auto" }, checkLabel(check)) : null),
         diff ? el("button", { class: "mini", type: "button", onclick: (e) => { e.preventDefault(); diff.hidden = !diff.hidden; } }, "Show") : null), diff));
     });
     wrap.append(el("div", { class: "actions" }, el("button", { class: "btn", type: "button", onclick: async () => {
       const approved = boxes.map((b, i) => (b.checked ? i : -1)).filter((i) => i >= 0);
       if (!approved.length) return toast("Nothing selected");
-      const j = await apply(fs, { id: t.planId, goal: t.goal, ops: t.ops, preview: t.preview, enforcePreview: true }, approved);
-      if (j.error && !j.steps.length) return toast(j.error, 5000);
-      t.journal = j; journals.save(j); sessions.save(session); draw();
+      try {
+        const j = await applyPhonePlan(fs, { id: t.planId, goal: t.goal, ops: t.ops, preview: t.preview }, approved);
+        if (j.error && !j.steps.length) return toast(j.error, 5000);
+        t.journal = j; journals.save(j); sessions.save(session); draw();
+      } catch (error) { toast(error.message, 5000); }
     } }, "Approve and apply")));
     return wrap;
   }
