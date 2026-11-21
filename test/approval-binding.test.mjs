@@ -43,6 +43,14 @@ test('approval and undo operate on the exact selected proposal', async () => {
     const conflict = await (await send('undo','second')).json();
     assert.equal(conflict.ok,false);
     assert.equal(await fs.readFile(path.join(root,'second.txt'),'utf8'),'manual edits after apply');
+    for (const [name,content] of [['broken.mjs','export const = 1;'],['broken.json','{"alpha":}']]) {
+      const plan = {id:'broken',root,ops:[{op:'write',path:name,content}]};
+      plan.preview = await preview(nodeFs(root),plan.ops);
+      await fs.writeFile(path.join(home,'agent','plan-broken.json'),JSON.stringify(plan));
+      const rejected = await send('apply','broken');
+      assert.equal(rejected.status,409);
+      await assert.rejects(fs.stat(path.join(root,name)),{code:'ENOENT'});
+    }
   } finally {
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));

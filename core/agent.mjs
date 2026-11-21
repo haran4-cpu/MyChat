@@ -592,16 +592,23 @@ export async function requireCurrentPreview(fs, plan, index, currentText) {
     if (exists && actual === null) throw new Error(`${op.path}: current file is not readable text`);
   }
   if (expected.baseFingerprint !== await fingerprint(actual)) throw new Error(`${op.path}: changed since preview. Create a fresh preview.`);
+  return actual;
 }
 
-export async function checkPlanPreviews(fs, plan, selected = null) {
+export async function checkPlanPreviews(fs, plan, selected = null, validateText = null) {
   const paths = new Set();
   for (const [index, op] of plan.ops.entries()) {
     if ((selected && !selected.includes(index)) || !isTextChange(op.op)) continue;
     const key = op.path.toLowerCase();
     if (paths.has(key)) throw new Error(`${op.path}: preview each successive text change separately`);
     paths.add(key);
-    await requireCurrentPreview(fs, plan, index);
+    const before = await requireCurrentPreview(fs, plan, index);
+    const after = op.op === "edit" ? editText(before ?? "", op).after : op.op === "append" ? (before ?? "") + op.content : op.content;
+    if (/\.json$/i.test(op.path)) {
+      try { JSON.parse(after.replace(/^\uFEFF/, "")); }
+      catch { throw new Error(`${op.path}: proposed JSON is invalid`); }
+    }
+    if (validateText) await validateText(op.path, after);
   }
 }
 
