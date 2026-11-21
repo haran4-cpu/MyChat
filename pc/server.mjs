@@ -11,6 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Gateway } from "../core/router.mjs";
 import { run, MODES } from "../core/reason.mjs";
@@ -323,6 +324,22 @@ const agentFile = (kind, id) => path.join(AGENT_DIR, `${kind}-${String(id).repla
 const agentSave = (kind, id, v) => fs.writeFileSync(agentFile(kind, id), JSON.stringify(v));
 const agentLoad = (kind, id) => { try { return JSON.parse(fs.readFileSync(agentFile(kind, id), "utf8")); } catch { return null; } };
 let agentMutationActive = false;
+
+function validateJavaScript(filename, source) {
+  const extension = path.extname(filename).toLowerCase();
+  const types = extension === ".mjs" ? ["module"] : extension === ".cjs" ? ["commonjs"] : extension === ".js" ? ["module", "commonjs"] : [];
+  let diagnostic;
+  for (const type of types) {
+    const result = spawnSync(process.execPath,["--check",`--input-type=${type}`],{
+      input:source,encoding:"utf8",windowsHide:true,timeout:4000,maxBuffer:64*1024,
+      env:{...process.env,NODE_OPTIONS:""},
+    });
+    if (result.error) throw new Error(`${filename}: JavaScript verification did not complete`);
+    if (result.status === 0) return;
+    diagnostic = result.stderr?.split(/\r?\n/).find(line=>line.startsWith("SyntaxError:"));
+  }
+  if (types.length) throw new Error(`${filename}: ${diagnostic || "proposed JavaScript did not pass the syntax check"}`);
+}
 function agentHistory(n = 30) {
   return fs.readdirSync(AGENT_DIR).filter((f) => f.startsWith("journal-")).map((f) => { try { return JSON.parse(fs.readFileSync(path.join(AGENT_DIR, f), "utf8")); } catch { return null; } })
     .filter(Boolean).sort((a, b) => b.at - a.at).slice(0, n)
@@ -387,7 +404,7 @@ async function agentRoute(req, res, url) {
     }
     const adapter = nodeFs(p.root);
     try {
-      await checkPlanPreviews(adapter,p,pick);
+      await checkPlanPreviews(adapter,p,pick,validateJavaScript);
     } catch (error) {
       return send(res, 409, { error: { message: error.message } });
     }
