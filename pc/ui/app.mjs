@@ -49,10 +49,12 @@ async function home() {
 }
 
 // ------------------------------------------------------------------------------------------------ Agent
-let agentState = { plan: null, root: 0 };
+let agentState = { plan: null, root: null };
 async function agent() {
   const v = view(); v.replaceChildren(el("h1", {}, "Agent"));
   const { roots, chatRoot } = await api("/agent/roots");
+  if (!roots[agentState.root]) agentState.root = chatRoot || 0;
+  const planId = new URLSearchParams(location.hash.split("?")[1]).get("plan");
   const sel = el("select", { "aria-label": "Folder", onchange: () => { agentState.root = Number(sel.value); showTree(); } },
     roots.map((r, i) => el("option", { value: i, selected: i === agentState.root }, r.path + (r.private ? "  (private: local models only)" : ""))));
   const goal = el("textarea", { dir: "auto", placeholder: "What should change? e.g. “Sort the files in Downloads-copy into folders by type”, “Add a README to every project”, “Rename the photos by date”…" });
@@ -68,6 +70,13 @@ async function agent() {
   v.append(el("div", { class: "card stack" }, el("label", { class: "sub" }, "Folder"), sel, treeBox, goal,
     el("div", { class: "row" }, el("span", { class: "sub grow" }, "Step 1 plans only. You approve each change in step 2. Deleted items go to a trash folder."), planBtn)), out);
   showTree();
+  if (planId) {
+    try {
+      agentState.plan = await api("/agent/plan?id=" + encodeURIComponent(planId));
+      renderPlan(out);
+      out.scrollIntoView({ block: "start" });
+    } catch (error) { out.replaceChildren(el("div", { class: "pill bad", role: "alert" }, error.message)); }
+  }
   v.append(el("h2", {}, "Folders the agent may use"), foldersCard(roots, chatRoot || 0));
   v.append(el("h2", {}, "History"), await historyCard());
 }
@@ -82,15 +91,32 @@ function renderPlan(out) {
     p.steps?.length ? el("details", {}, el("summary", {}, `${p.steps.length} tool steps · ${p.calls || "?"} model calls`),
       el("pre", { class: "tree" }, p.steps.map((s) => `🔧 ${s.tool} ${JSON.stringify(s.args || {}).slice(0, 140)}${s.thought ? "\n   💭 " + s.thought.slice(0, 200) : ""}`).join("\n"))) : null,
     el("div", { class: "sub" }, `By ${p.by}${p.reads?.length ? " · read " + p.reads.slice(0, 8).join(", ") : ""}`));
+  card.prepend(el("div", { class: "sub", dir: "auto" }, p.root));
+  if (p.journal) { out.append(card, changeReceipt(p.journal, p.id)); return; }
   if (!p.ops.length) { out.append(card); return; }
   card.append(el("h3", {}, "Proposed changes"));
   const list = el("ul", { class: "ops" });
+  const textPaths = new Set();
   p.preview.forEach((o, i) => {
-    const cb = el("input", { type: "checkbox", checked: !o.unchanged, "data-i": i });
+    const check = p.checks?.[i];
+    const blocked = check?.status === "blocked";
+    const textPath = ["write", "edit", "append"].includes(o.op) ? o.path.toLowerCase() : null;
+    const checked = !blocked && !o.unchanged && (!textPath || !textPaths.has(textPath));
+    if (checked && textPath) textPaths.add(textPath);
+    const cb = el("input", { type: "checkbox", checked, disabled: blocked || o.unchanged, "data-i": i });
+    if (textPath) cb.addEventListener("change", () => {
+      if (!cb.checked) return;
+      for (const other of list.querySelectorAll("input:checked")) {
+        const candidate = p.preview[Number(other.dataset.i)];
+        if (other !== cb && ["write", "edit", "append"].includes(candidate.op) && candidate.path.toLowerCase() === textPath) other.checked = false;
+      }
+    });
     list.append(el("li", {}, el("label", {}, cb, el("div", { class: "grow" },
       el("div", {}, el("b", {}, o.label), o.stats ? el("span", { class: "sub" }, `  +${o.stats.added} −${o.stats.removed}`) : null,
         o.unchanged ? el("span", { class: "pill" }, " no change") : null, o.targetExists ? el("span", { class: "pill bad" }, " target exists") : null),
-      o.why ? el("div", { class: "why", dir: "auto" }, o.why) : null)),
+      o.why ? el("div", { class: "why", dir: "auto" }, o.why) : null,
+      blocked ? el("div", { class: "pill bad", role: "status" }, check.message)
+        : check?.status === "passed" ? el("div", { class: "sub" }, check.syntax ? "Current file and proposed syntax checked" : "Current file matches preview") : null)),
       o.diff ? el("details", { open: p.preview.length <= 3 }, el("summary", {}, o.exists ? "Show the change" : "Show the new file"), diffPre(o.diff)) : null));
   });
   card.append(list);
@@ -100,13 +126,21 @@ function renderPlan(out) {
     if (!approve.length) return toast("Nothing selected");
     try {
       const j = await api("/agent/apply", { id: p.id, approve });
-      out.replaceChildren(el("div", { class: "card stack" }, el("h3", {}, j.error ? "Partly done" : "Done"),
-        el("div", {}, `${j.steps.length} change(s) made.`), j.error ? el("div", { class: "pill bad" }, j.error) : null,
-        el("div", { class: "row" }, el("span", { class: "sub grow" }, "Not what you wanted? Undo puts everything back."), undoBtn(p.id, () => agent()))));
+      out.replaceChildren(changeReceipt(j, p.id));
     } catch (e) { toast(e.message, 5000); }
   }) }, "Approve and apply selected");
-  card.append(el("div", { class: "row" }, el("button", { class: "btn", onclick: () => { agentState.plan = null; out.replaceChildren(); } }, "Discard"), applyBtn));
+  const updateApproval = () => { applyBtn.disabled = !list.querySelector("input:checked"); };
+  list.addEventListener("change", updateApproval);
+  updateApproval();
+  card.append(el("div", { class: "row" }, el("button", { class: "btn", onclick: () => { agentState.plan = null; out.replaceChildren(); if (location.hash.includes("?plan=")) location.hash = "agent"; } }, "Close preview"), applyBtn));
   out.append(card);
+}
+function changeReceipt(j, id) {
+  return el("div", { class: "card stack" }, el("h3", {}, j.undone ? "Undone" : j.error ? "Partly done" : "Applied"),
+    el("div", {}, `${j.steps.filter(s => !s.auto).length} change(s) recorded.`), j.error ? el("div", { class: "pill bad" }, j.error) : null,
+    (j.verify || []).map(v => el("details", { open: true }, el("summary", {}, v.failed ? `${v.path} · browser check incomplete` : `${v.path} · browser errors ${v.before} → ${v.after}`),
+      v.failed ? el("div", { class: "pill bad" }, v.failed) : el("ul", {}, [...v.fixed.map(x => "Fixed: " + x), ...v.new.map(x => "New: " + x), ...v.still.map(x => "Still present: " + x)].map(x => el("li", {}, x))))),
+    j.undone ? null : undoBtn(id, () => agent()));
 }
 const undoBtn = (id, after) => {
   const b = el("button", { class: "btn danger", onclick: () => busy(b, async () => {

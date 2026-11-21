@@ -38,7 +38,7 @@ const pageRunner = (rootPath) => async (rel, o = {}) => {
   if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw new Error(`${rel}: outside this folder`);
   return checkPage(real, { clicks: o.clicks ?? 25, expectedText: o.expectedText, outDir: path.join(HOME, "runs") });
 };
-import { plan as agentPlan, preview as agentPreview, apply as agentApply, undo as agentUndo, tree as agentTree, checkPlanPreviews } from "../core/agent.mjs";
+import { plan as agentPlan, preview as agentPreview, apply as agentApply, undo as agentUndo, tree as agentTree, checkPlanPreviews, isTextChange } from "../core/agent.mjs";
 
 const HOME = process.env.MYCHAT_HOME || path.join(process.env.APPDATA || path.join(os.homedir(), ".config"), "MyChat");
 const PORT = Number(process.env.MYCHAT_PORT || 11500);
@@ -147,7 +147,7 @@ async function brainRun(oreq, opts) {
   if (r.ops?.length) {
     agentSave("plan", r.planId, { id: r.planId, goal: lastText(oreq.messages), ops: r.ops, preview: r.preview, root: root.path, rootIndex: Number(settings.chatRoot) || 0, at: Date.now(), answer: r.content });
     const list = (r.preview || r.ops).map((o, i) => `${i + 1}. ${o.label || o.op + " " + o.path}`).join("\n");
-    const extra = `\n\n**Proposed changes** (nothing changed yet):\n${list}\n\nReply **/approve ${r.planId}** to apply all, or **/approve ${r.planId} 1,3** for selected changes. Use **/undo ${r.planId}** to undo this plan.`;
+    const extra = `\n\n**Proposed changes** (waiting for approval):\n${list}\n\n[Review this exact plan on the PC](http://127.0.0.1:${PORT}/#agent?plan=${encodeURIComponent(r.planId)}). In chat, use **/approve ${r.planId}** or specify change numbers, for example **/approve ${r.planId} 1,3**. Use **/undo ${r.planId}** to undo this plan.`;
     r.content += extra; opts.onDelta?.(extra);
   }
   return r;
@@ -340,6 +340,20 @@ function validateJavaScript(filename, source) {
   }
   if (types.length) throw new Error(`${filename}: ${diagnostic || "proposed JavaScript did not pass the syntax check"}`);
 }
+async function reviewPlan(p) {
+  const adapter = nodeFs(p.root);
+  const checks = [];
+  for (const [index, op] of p.ops.entries()) {
+    if (!isTextChange(op.op)) { checks.push({ status: "unchecked" }); continue; }
+    try {
+      await checkPlanPreviews(adapter, p, [index], validateJavaScript);
+      checks.push({ status: "passed", syntax: /\.(?:json|[cm]?js)$/i.test(op.path) });
+    } catch (error) {
+      checks.push({ status: "blocked", message: p.preview?.[index]?.error || error.message });
+    }
+  }
+  return { ...p, checks };
+}
 function agentHistory(n = 30) {
   return fs.readdirSync(AGENT_DIR).filter((f) => f.startsWith("journal-")).map((f) => { try { return JSON.parse(fs.readFileSync(path.join(AGENT_DIR, f), "utf8")); } catch { return null; } })
     .filter(Boolean).sort((a, b) => b.at - a.at).slice(0, n)
@@ -389,7 +403,7 @@ async function agentRoute(req, res, url) {
     p.root = root.path; p.rootIndex = Number(b.root) || 0;
     p.preview = await agentPreview(afs, p.ops);
     agentSave("plan", p.id, p);
-    return send(res, 200, p);
+    return send(res, 200, await reviewPlan(p));
   }
   if (url.pathname === "/agent/apply" && req.method === "POST") {
     if (!validPlanId(b.id)) return send(res, 400, { error: { message: "Specify the plan ID from the preview." } });
@@ -436,7 +450,15 @@ async function agentRoute(req, res, url) {
     return send(res, 200, { ...r, id: j.id, goal: j.goal });
   }
   if (url.pathname === "/agent/history") return send(res, 200, { history: agentHistory() });
-  if (url.pathname === "/agent/plan" && req.method === "GET") return send(res, 200, agentLoad("plan", url.searchParams.get("id")) || {});
+  if (url.pathname === "/agent/plan" && req.method === "GET") {
+    const id = url.searchParams.get("id");
+    const p = validPlanId(id) && agentLoad("plan", id);
+    if (!p) return send(res, 404, { error: { message: "Plan not found. Create a new preview." } });
+    const journal = agentLoad("journal", id);
+    if (!journal) return send(res, 200, await reviewPlan(p));
+    const { steps, verify, error, undone } = journal;
+    return send(res, 200, { ...p, journal: { steps: steps.map(({ auto }) => ({ auto })), verify, error, undone } });
+  }
   return send(res, 404, { error: { message: "not found" } });
 }
 function validPlanId(id) {

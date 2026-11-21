@@ -305,12 +305,12 @@ class Pipe:
             roots = (await client.get(base + "/agent/roots", headers=H, timeout=20)).json().get("roots", [])
             return "### Folders the agent may use\n\n" + "\n".join(f"{i + 1}. `{r['path']}`" + (" — private (local models only)" if r.get("private") else "") for i, r in enumerate(roots)) + \
                    f"\n\nSwitch with **/folder C:\\path** (any folder), name a folder in a message to focus one request, or manage the list at [MyChat → Agent]({base}/#agent)."
-        root = 0
+        selection = {}
         mm = re.match(r"^\s*#(\d+)\s+", t)
         if mm:
-            root, t = int(mm.group(1)) - 1, t[mm.end():]
+            selection["root"], t = int(mm.group(1)) - 1, t[mm.end():]
         await self._status(emitter, "Working: reading, searching, thinking… (nothing changes until you approve)")
-        r = await client.post(base + "/agent/plan", json={"goal": t, "root": root, "history": history or []}, headers=H, timeout=600)
+        r = await client.post(base + "/agent/plan", json={"goal": t, **selection, "history": history or []}, headers=H, timeout=600)
         p = r.json()
         await self._status(emitter, "Plan ready", True)
         if r.status_code != 200:
@@ -322,9 +322,12 @@ class Pipe:
         if not p.get("ops"):
             return "\n".join(out + [f"\n_By {p.get('by', '')}_"])
         out += ["", f"### Proposed changes in `{p.get('root')}`", ""]
+        checks = p.get("checks") or []
         for i, o in enumerate(p.get("preview", []), 1):
             stats = f" (+{o['stats']['added']} −{o['stats']['removed']})" if o.get("stats") else ""
             out.append(f"**{i}. {o['label']}**{stats}" + (f" — {o['why']}" if o.get("why") else ""))
+            if i <= len(checks) and checks[i - 1].get("status") == "blocked":
+                out.append(f"**Blocked:** {checks[i - 1]['message']}")
             if o.get("diff"):
                 lim = 40 if len(p.get("preview", [])) <= 3 else 12
                 body = "\n".join(o["diff"][:lim]) + (f"\n… {len(o['diff']) - lim} more lines (full view in MyChat → Agent)" if len(o["diff"]) > lim else "")
@@ -332,8 +335,7 @@ class Pipe:
         if p.get("rejected"):
             out.append(f"_Refused {len(p['rejected'])} unsafe step(s)._")
         plan_id = p.get("id", "")
-        out += ["", f"Reply **/approve {plan_id}** to apply all or **/approve {plan_id} 1,3** for selected changes. "
-                f"Review the plan at [MyChat → Agent]({base}/#agent). To undo it, use **/undo {plan_id}**.",
+        out += ["", f"[Review this exact plan]({base}/#agent?plan={urllib.parse.quote(plan_id)}) to check the proposed changes and approve the ones you choose.",
                 f"\n_Planned by {p.get('by', '')}_"]
         return "\n".join(out)
 
