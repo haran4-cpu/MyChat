@@ -116,14 +116,33 @@ const seeHost = () => async (img, q) => {
 };
 const hostTools = () => ({ search, skills: SKILLS, see: seeHost(), evaluate: (e) => evaluate(e).toString(12),
   fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } });
+/** Any folder on the PC can be the working folder: named in the message (C:\\…, a file means its folder), or the one
+ *  chosen as the chat folder. Only system folders and MyChat's own data (keys) are refused. */
+const FORBIDDEN_ROOT = (p) => {
+  const n = path.resolve(p).toLowerCase(), home = path.resolve(HOME).toLowerCase();
+  return n === home || n.startsWith(home + path.sep) || home.startsWith(n + path.sep) && n.length < 4 ||
+    /^[a-z]:\\(windows|program files|program files \(x86\)|programdata)(\\|$)/i.test(n) || /\\appdata\\(roaming|local)\\mychat(\\|$)/i.test(n) ||
+    /^[a-z]:\\?$/i.test(n) || /\\\.ssh(\\|$)/i.test(n);
+};
+function folderFromText(text) {
+  for (const m of String(text || "").matchAll(/[A-Za-z]:\\[^\r\n"'<>|*?]+/g)) {
+    let p = m[0].replace(/[\s.,;:)\]]+$/, "");
+    for (let k = 0; k < 6 && p.length > 3; k++) {          // "C:\Projects\DJ TiTo\file.html and more" → longest existing prefix
+      if (fs.existsSync(p)) { const dir = fs.statSync(p).isDirectory() ? p : path.dirname(p); return FORBIDDEN_ROOT(dir) ? null : { path: dir, private: false, named: true }; }
+      p = p.replace(/\s+\S*$/, "");
+    }
+  }
+  return null;
+}
+const chatRoot = (text) => folderFromText(text) || agentRoots()[Number(settings.chatRoot) || 0] || agentRoots()[0];
 async function brainRun(oreq, opts) {
   if (oreq.tools?.length || oreq.response_format || settings.oneBrain === false) return run(gw, oreq, opts);
-  const root = agentRoots()[0];
+  const root = chatRoot(lastText(oreq.messages));
   const r = await respond(gw, { ...opts, messages: oreq.messages, fs: root ? nodeFs(root.path) : null,
     memory: root ? agentMemory(root.path) : null, tools: { ...hostTools(), ...(root ? { runPage: pageRunner(root.path) } : {}) }, privateData: opts.privateData || root?.private,
     onStep: (st) => opts.onStatus?.(st.kind === "tool" ? `🔧 ${st.tool} ${JSON.stringify(st.args || {}).slice(0, 90)}` : String(st.text || "").slice(0, 160)) });
   if (r.ops?.length) {
-    agentSave("plan", r.planId, { id: r.planId, goal: lastText(oreq.messages), ops: r.ops, preview: r.preview, root: root.path, rootIndex: 0, at: Date.now(), answer: r.content });
+    agentSave("plan", r.planId, { id: r.planId, goal: lastText(oreq.messages), ops: r.ops, preview: r.preview, root: root.path, rootIndex: Number(settings.chatRoot) || 0, at: Date.now(), answer: r.content });
     const list = (r.preview || r.ops).map((o, i) => `${i + 1}. ${o.label || o.op + " " + o.path}`).join("\n");
     const extra = `\n\n**Proposed changes** (nothing changed yet):\n${list}\n\nReply **/approve** to apply all, **/approve 1,3** for some — **/undo** reverses it afterwards.`;
     r.content += extra; opts.onDelta?.(extra);
@@ -310,14 +329,29 @@ async function agentRoute(req, res, url) {
   const b = req.method === "POST" ? await body(req) : {};
   if (url.pathname === "/agent/roots") {
     if (req.method === "POST") {
-      const roots = (b.roots || []).map((r) => ({ path: path.resolve(String(r.path || r)), private: !!r.private })).filter((r) => fs.existsSync(r.path));
-      settings.agentRoots = roots; writeJson("settings.json", settings);
+      const roots = (b.roots || []).map((r) => ({ path: path.resolve(String(r.path || r)), private: !!r.private })).filter((r) => fs.existsSync(r.path) && !FORBIDDEN_ROOT(r.path));
+      settings.agentRoots = roots;
+      if (b.chatRoot != null) settings.chatRoot = Math.max(0, Math.min(roots.length - 1, Number(b.chatRoot) || 0));
+      writeJson("settings.json", settings);
     }
-    return send(res, 200, { roots: agentRoots() });
+    return send(res, 200, { roots: agentRoots(), chatRoot: Number(settings.chatRoot) || 0 });
+  }
+  // "/folder C:\…" from a chat: work there from now on (added to the list if new)
+  if (url.pathname === "/agent/use" && req.method === "POST") {
+    const p = path.resolve(String(b.path || ""));
+    if (!fs.existsSync(p) || !fs.statSync(p).isDirectory()) return send(res, 400, { error: { message: `no such folder: ${p}` } });
+    if (FORBIDDEN_ROOT(p)) return send(res, 400, { error: { message: "that folder is protected (system or MyChat's own data)" } });
+    const roots = agentRoots().slice();
+    let i = roots.findIndex((r) => path.resolve(r.path).toLowerCase() === p.toLowerCase());
+    if (i < 0) { roots.push({ path: p, private: !!b.private }); i = roots.length - 1; }
+    settings.agentRoots = roots; settings.chatRoot = i; writeJson("settings.json", settings);
+    return send(res, 200, { roots, chatRoot: i });
   }
   if (url.pathname === "/agent/tree") return send(res, 200, { tree: await agentTree(nodeFs(rootAt(url.searchParams.get("root")).path)) });
   if (url.pathname === "/agent/plan" && req.method === "POST") {
-    const root = rootAt(b.root), afs = nodeFs(root.path);
+    const named = folderFromText(b.goal);
+    const root = named || (typeof b.root === "string" && /[\\/]/.test(b.root) && fs.existsSync(b.root) && !FORBIDDEN_ROOT(b.root) ? { path: path.resolve(b.root), private: false } : rootAt(b.root ?? settings.chatRoot));
+    const afs = nodeFs(root.path);
     const p = await agentPlan(gw, { goal: String(b.goal || "").slice(0, 4000), fs: afs, privateData: root.private, history: Array.isArray(b.history) ? b.history.slice(-8) : [], memory: agentMemory(root.path),
       search, skills: SKILLS, see: seeHost(), evaluate: (e) => evaluate(e).toString(12), runPage: pageRunner(root.path),
       fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } });
@@ -394,7 +428,7 @@ function serveUi(res, name) {
 // The phone can use this PC — its accounts, local models and folders — over the home Wi-Fi or Tailscale. A SEPARATE port
 // that serves only the API, only with the token: no pages, no keys, no settings. Repeated wrong tokens are blocked.
 const LINK_PORT = Number(process.env.MYCHAT_LINK_PORT || 11501);
-const LINK_ROUTES = /^\/(health|status|v1\/chat\/completions|v1\/models|agent\/(roots|tree|plan|apply|undo|history)|jobs(\/[\w-]+)?)$/;
+const LINK_ROUTES = /^\/(health|status|v1\/chat\/completions|v1\/models|agent\/(roots|tree|plan|apply|undo|history|use)|jobs(\/[\w-]+)?)$/;
 let linkServer = null;
 const strikes = new Map();
 function linkUrls() {

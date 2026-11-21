@@ -34,7 +34,7 @@ async function home() {
   const svc = sys?.supervisor?.services || [];
   v.append(el("div", { class: "grid" },
     el("div", { class: "card hero stack" }, el("h3", {}, "Chat"), el("div", { class: "sub" }, "Open WebUI with the MyChat models: Auto (instant answer, facts checked in the background), Fast, Max, Verified, Private."),
-      el("a", { class: "btn primary", href: "http://127.0.0.1:8080/", target: "_blank", rel: "noopener" }, "Open chat")),
+      el("a", { class: "btn primary", href: "http://127.0.0.1:8080/?model=mychat.auto", target: "_blank", rel: "noopener" }, "Open chat")),
     el("div", { class: "card stack" }, el("h3", {}, "Agent"), el("div", { class: "sub" }, "Organise, create and edit files and folders. You see every change before it happens, and every change can be undone."),
       el("a", { class: "btn", href: "#agent" }, "Start a task")),
     el("div", { class: "card stack" }, el("h3", {}, "Accounts"),
@@ -52,7 +52,7 @@ async function home() {
 let agentState = { plan: null, root: 0 };
 async function agent() {
   const v = view(); v.replaceChildren(el("h1", {}, "Agent"));
-  const { roots } = await api("/agent/roots");
+  const { roots, chatRoot } = await api("/agent/roots");
   const sel = el("select", { "aria-label": "Folder", onchange: () => { agentState.root = Number(sel.value); showTree(); } },
     roots.map((r, i) => el("option", { value: i, selected: i === agentState.root }, r.path + (r.private ? "  (private: local models only)" : ""))));
   const goal = el("textarea", { dir: "auto", placeholder: "What should change? e.g. “Sort the files in Downloads-copy into folders by type”, “Add a README to every project”, “Rename the photos by date”…" });
@@ -68,7 +68,7 @@ async function agent() {
   v.append(el("div", { class: "card stack" }, el("label", { class: "sub" }, "Folder"), sel, treeBox, goal,
     el("div", { class: "row" }, el("span", { class: "sub grow" }, "Step 1 plans only. You approve each change in step 2. Deleted items go to a trash folder."), planBtn)), out);
   showTree();
-  v.append(el("h2", {}, "Folders the agent may use"), foldersCard(roots));
+  v.append(el("h2", {}, "Folders the agent may use"), foldersCard(roots, chatRoot || 0));
   v.append(el("h2", {}, "History"), await historyCard());
 }
 
@@ -122,18 +122,22 @@ async function historyCard() {
     history.map((h) => el("tr", { class: h.undone ? "muted" : "" }, el("td", {}, ago(h.at)), el("td", { dir: "auto" }, h.goal, h.error ? el("div", { class: "sub" }, h.error) : null),
       el("td", {}, h.steps), el("td", {}, h.undone ? el("span", { class: "pill" }, "undone") : undoBtn(h.id, () => agent()))))));
 }
-function foldersCard(roots) {
+function foldersCard(roots, chatRoot = 0) {
   const rows = roots.map((r) => ({ ...r }));
+  let pick = chatRoot;
   const box = el("div", { class: "card stack" });
   const draw = () => {
-    box.replaceChildren(el("div", { class: "sub" }, "Only these folders (and what is inside them) can be read or changed. Private folders are handled by the local models on this PC only."));
-    rows.forEach((r, i) => box.append(el("div", { class: "row" }, el("code", { class: "grow" }, r.path),
+    box.replaceChildren(el("div", { class: "sub" }, "Any folder on this PC can be added (system folders and MyChat's own keys are always off-limits). ● marks the folder the chat works in. " +
+      "You can also focus one request on any folder by writing its path in the message (e.g. C:\\Music\\Sets …), or switch the chat's folder with /folder C:\\path. Private folders are handled by the local models only."));
+    rows.forEach((r, i) => box.append(el("div", { class: "row" },
+      el("input", { type: "radio", name: "chatroot", checked: i === pick, title: "the chat works in this folder", onchange: () => { pick = i; } }),
+      el("code", { class: "grow" }, r.path),
       el("label", { class: "sub" }, el("input", { type: "checkbox", checked: r.private, onchange: (e) => { r.private = e.target.checked; } }), " private"),
       el("button", { class: "btn small danger", onclick: () => { rows.splice(i, 1); draw(); } }, "Remove"))));
     const input = el("input", { type: "text", placeholder: "C:\\Users\\you\\Documents\\Something" });
     box.append(el("div", { class: "row" }, input, el("button", { class: "btn small", onclick: () => { if (input.value.trim()) { rows.push({ path: input.value.trim(), private: false }); draw(); } } }, "Add")),
       el("div", { class: "row" }, el("span", { class: "grow" }), el("button", { class: "btn primary small", onclick: async () => {
-        const r = await api("/agent/roots", { roots: rows }); toast(`${r.roots.length} folder(s) saved` + (r.roots.length < rows.length ? " (folders that don't exist were skipped)" : "")); agent();
+        const r = await api("/agent/roots", { roots: rows, chatRoot: pick }); toast(`${r.roots.length} folder(s) saved` + (r.roots.length < rows.length ? " (missing or protected folders were skipped)" : "")); agent();
       } }, "Save folders")));
   };
   draw();
@@ -141,7 +145,7 @@ function foldersCard(roots) {
 }
 
 // ------------------------------------------------------------------------------------------------ Accounts
-const FREE = ["openrouter", "gemini", "groq", "nvidia", "mistral", "cohere", "sambanova", "siliconflow", "huggingface", "cerebras", "github"];
+const FREE = ["openrouter", "gemini", "groq", "nvidia", "mistral", "cohere", "sambanova", "huggingface", "siliconflow", "vercel", "nebius", "cerebras", "github"];
 // The Google path: every free service that takes a Google sign-in (or a one-time check) and no card, best first.
 // Verified against public lists in Oct–Nov 2026: Gemini, Groq, OpenRouter, Mistral, NVIDIA, Cohere, SambaNova are free
 // without a card; GitHub Models was retired (July 2026); Cerebras now asks for a card.
@@ -153,6 +157,12 @@ const GOOGLE_PATH = [
   ["mistral", "Mistral Large, Devstral for code — Free mode, no card", "Continue with Google → API keys → Create new key → Copy"],
   ["cohere", "Command models — trial key", "Continue with Google → API keys → Copy the trial key"],
   ["sambanova", "Fast large open models, small free quota", "Sign in → API keys → Create → Copy"],
+  ["huggingface", "Thousands of open models through partner providers, small monthly credit", "Sign in (Google works) → new token with 'Make calls to Inference Providers' → Copy"],
+  ["siliconflow", "Qwen, DeepSeek, GLM — some models free", "Sign in → API keys → Create → Copy"],
+  ["vercel", "AI Gateway: many models, small monthly free credit", "Sign in → AI Gateway → API keys → Create → Copy"],
+  ["nebius", "Open models (DeepSeek, Qwen, Llama) — starter credit", "Sign in with Google → API keys → Create → Copy"],
+  ["cerebras", "Extremely fast; trial now asks for a card", "Sign in → API keys → Copy"],
+  ["github", "GitHub Models (reported retired July 2026) — try only if your key still answers", "github.com/settings/tokens → fine-grained token with Models access"],
 ];
 const PAID = ["anthropic", "openai", "deepseek", "xai", "moonshot", "zai", "together", "fireworks"];
 async function accounts() {
@@ -191,7 +201,7 @@ function googleCard(P, cat) {
   const done = GOOGLE_PATH.length - todo.length;
   const box = el("div", { class: "card hero stack" });
   const head = el("div", {}, el("h3", {}, "Connect with Google"),
-    el("div", { class: "sub" }, `${done} of ${GOOGLE_PATH.length} free services connected. Each opens with your Google account; copy the key there and come back — it is added by itself. No card, no payment.`));
+    el("div", { class: "sub" }, `${done} of ${GOOGLE_PATH.length} services connected. Each opens with your Google account (or one quick sign-up); copy the key there and come back — it is added by itself. The first seven need no card.`));
   box.append(head);
   if (!todo.length) { box.append(el("div", { class: "pill ok" }, "✓ All free Google services are connected")); return box; }
   const list = el("div", { class: "stack" });

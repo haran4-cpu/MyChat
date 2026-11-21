@@ -1,7 +1,7 @@
 """
 title: MyChat
 author: MyChat (multi-model gateway)
-version: 1.9.0
+version: 1.10.0
 required_open_webui_version: 0.6.0
 description: MyChat inside Open WebUI. Cloud and local models combined per task (Auto, Max, Consensus, Verified/Truth Engine, Fast, Private). Starts the MyChat gateway on this PC by itself; accounts and keys are managed from the "MyChat · Accounts" model without leaving Open WebUI.
 """
@@ -289,10 +289,18 @@ class Pipe:
                 lines += [f"- ✓ fixed: {x}" for x in v.get("fixed", [])[:5]] + [f"- ✗ new: {x}" for x in v.get("new", [])[:5]] + [f"- still: {x}" for x in v.get("still", [])[:3]]
             lines += ["", "Not what you wanted? Reply **/undo** and everything goes back."]
             return "\n".join(lines)
+        mf = re.match(r"^\s*/folder\s+(.+)$", t, re.I)
+        if mf:   # switch the folder the chat and the agent work in (any folder on this PC; system folders are protected)
+            r = await client.post(base + "/agent/use", json={"path": mf.group(1).strip().strip('"')}, headers=H, timeout=20)
+            j = r.json()
+            if r.status_code != 200:
+                return "✗ " + (j.get("error", {}) or {}).get("message", "could not use that folder")
+            cur = j["roots"][j["chatRoot"]]["path"]
+            return f"✓ Working in `{cur}` from now on. You can also name any folder in a message (C:\\…) to focus just that request."
         if t.lower() in ("/folders", "/agent"):
             roots = (await client.get(base + "/agent/roots", headers=H, timeout=20)).json().get("roots", [])
             return "### Folders the agent may use\n\n" + "\n".join(f"{i + 1}. `{r['path']}`" + (" — private (local models only)" if r.get("private") else "") for i, r in enumerate(roots)) + \
-                   f"\n\nAdd or change folders at [MyChat → Agent]({base}/#agent). Start a message with **#2** to use folder 2."
+                   f"\n\nSwitch with **/folder C:\\path** (any folder), name a folder in a message to focus one request, or manage the list at [MyChat → Agent]({base}/#agent)."
         root = 0
         mm = re.match(r"^\s*#(\d+)\s+", t)
         if mm:
@@ -366,7 +374,7 @@ class Pipe:
             low = last.strip().lower()
             # one assistant: the gateway itself decides when to look at your files (core/assistant.mjs), so normal
             # models stream through it; the Agent model and /agent stay as the explicit "work on my files" entry
-            if model == "agent" or low.startswith("/agent") or low.startswith("/approve") or low == "/undo" or low == "/folders":
+            if model == "agent" or low.startswith("/agent") or low.startswith("/approve") or low == "/undo" or low == "/folders" or low.startswith("/folder "):
                 goal = re.sub(r"^\s*/agent\b\s*", "", last) if low.startswith("/agent") and len(low) > 7 else last
                 try:
                     hist = [{"role": m.get("role"), "content": m.get("content")[:6000]} for m in msgs[:-1]

@@ -2,8 +2,11 @@
 // Every path is resolved inside the root and checked again after resolving (symlinks and junctions included).
 import fs from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import { safeRel } from "../core/agent.mjs";
 
+const DENY = [process.env.MYCHAT_HOME || path.join(process.env.APPDATA || path.join(os.homedir(), ".config"), "MyChat"), path.join(os.homedir(), ".ssh")]
+  .map((d) => path.resolve(d).toLowerCase());
 export function nodeFs(root) {
   const base = path.resolve(root);
   let realBase = null;
@@ -12,6 +15,8 @@ export function nodeFs(root) {
     if (r == null) throw new Error("path outside the workspace: " + rel);
     const p = path.resolve(base, r);
     if (p !== base && !p.startsWith(base + path.sep)) throw new Error("path outside the workspace: " + rel);
+    // MyChat's own data (keys, tokens, settings) is never readable by the agent, even inside a broad folder like C:\Users\you
+    for (const d of DENY) if (p.toLowerCase() === d || p.toLowerCase().startsWith(d + path.sep)) throw new Error("protected: MyChat's own data");
     // a symlink or junction inside the folder must not lead outside it: check the deepest part that exists
     realBase ||= await fs.realpath(base);
     let probe = p;

@@ -75,6 +75,12 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
   assert.equal(roots.roots.length, 1);
   assert.match((await (await fetch(u + "/agent/tree?root=0", { headers: H })).json()).tree, /a\.txt/);
   assert.equal((await fetch(u + "/agent/undo", { method: "POST", headers: H, body: JSON.stringify({ id: "latest" }) })).status, 404);
+  // any folder can become the chat's folder; MyChat's own data cannot
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "mychat-other-"));
+  const used = await (await fetch(u + "/agent/use", { method: "POST", headers: H, body: JSON.stringify({ path: other }) })).json();
+  assert.equal(used.roots[used.chatRoot].path, path.resolve(other));
+  assert.equal((await fetch(u + "/agent/use", { method: "POST", headers: H, body: JSON.stringify({ path: home }) })).status, 400, "MyChat's data is protected");
+  await fetch(u + "/agent/roots", { method: "POST", headers: H, body: JSON.stringify({ roots: [{ path: work }], chatRoot: 0 }) });
   assert.equal((await fetch(u + "/agent/tree?root=0")).status, 401, "agent API needs the token");
   // an approved change to an HTML app is measured: the app runs before and after, the error difference is reported
   const { findBrowser } = await import("../pc/pagecheck.mjs");

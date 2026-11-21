@@ -175,6 +175,22 @@ export const PROVIDERS = {
     free: "Small free monthly usage on starter models; pay per token beyond (Kimi, GLM, DeepSeek, gpt-oss 120B)",
     strengths: ["code", "reason", "chat"],
   },
+  vercel: {
+    name: "Vercel AI Gateway",
+    baseUrl: "https://ai-gateway.vercel.sh/v1",
+    keyUrl: "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%2Fapi-keys",
+    signIn: "Vercel account (Google or GitHub works)",
+    free: "Small monthly free credit; many providers' models through one key",
+    strengths: ["chat", "code", "reason"],
+  },
+  nebius: {
+    name: "Nebius AI Studio",
+    baseUrl: "https://api.studio.nebius.com/v1",
+    keyUrl: "https://studio.nebius.com/settings/api-keys",
+    signIn: "Google account",
+    free: "Starter credit; DeepSeek, Qwen, Llama and other open models",
+    strengths: ["chat", "code", "reason"],
+  },
   // keyless public gateways: always available, lowest priority, never get private context by default
   ovh: {
     name: "OVHcloud AI Endpoints (no key)",
