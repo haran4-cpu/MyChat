@@ -145,26 +145,25 @@ function foldersCard(roots, chatRoot = 0) {
 }
 
 // ------------------------------------------------------------------------------------------------ Accounts
-const FREE = ["openrouter", "gemini", "groq", "nvidia", "mistral", "cohere", "sambanova", "huggingface", "siliconflow", "vercel", "nebius", "cerebras", "github"];
+const FREE = ["openrouter", "gemini", "groq", "nvidia", "sambanova", "huggingface", "siliconflow", "vercel", "nebius", "cerebras", "github"];
 // The Google path: every free service that takes a Google sign-in (or a one-time check) and no card, best first.
-// Verified against public lists in Oct–Nov 2026: Gemini, Groq, OpenRouter, Mistral, NVIDIA, Cohere, SambaNova are free
+// Free without a card on this account (2026-11-21): Gemini, Groq, OpenRouter, NVIDIA; Mistral and Cohere asked for payment;
 // without a card; GitHub Models was retired (July 2026); Cerebras now asks for a card.
 const GOOGLE_PATH = [
   ["openrouter", "One click — Claude, GPT, Gemini, DeepSeek… free models daily", null],
   ["gemini", "Gemini Flash family + Gemma, long context, images", "Sign in with Google → Create API key → Copy"],
   ["groq", "Very fast open models (gpt-oss 120B, Qwen, Kimi)", "Continue with Google → Create API Key → Copy"],
   ["nvidia", "Strong open models free: DeepSeek, Kimi, Qwen3, GLM, MiniMax", "Sign in (Google works) → verify phone once → Generate API Key → Copy"],
-  ["mistral", "Mistral Large, Devstral — measured 2026-11-21: asked this account for payment, so it may not be free for you", "Continue with Google → API keys → Create new key → Copy"],
-  ["cohere", "Command models — trial key", "Continue with Google → API keys → Copy the trial key"],
   ["sambanova", "Fast large open models, small free quota", "Sign in → API keys → Create → Copy"],
   ["huggingface", "Thousands of open models through partner providers, small monthly credit", "Sign in (Google works) → new token with 'Make calls to Inference Providers' → Copy"],
   ["siliconflow", "Qwen, DeepSeek, GLM — some models free", "Sign in → API keys → Create → Copy"],
   ["vercel", "AI Gateway: many models, small monthly free credit", "Sign in → AI Gateway → API keys → Create → Copy"],
-  ["nebius", "Open models (DeepSeek, Qwen, Llama) — starter credit", "Sign in with Google → API keys → Create → Copy"],
+  ["nebius", "Token Factory: open models (DeepSeek, Qwen, Kimi, Llama) — starter credit", "Sign in with Google → API keys → Create → Copy"],
   ["cerebras", "Extremely fast; trial now asks for a card", "Sign in → API keys → Copy"],
   ["github", "GitHub Models (reported retired July 2026) — try only if your key still answers", "github.com/settings/tokens → fine-grained token with Models access"],
 ];
-const PAID = ["anthropic", "openai", "deepseek", "xai", "moonshot", "zai", "together", "fireworks"];
+// measured on this account 2026-11-21: Mistral and Cohere asked for payment — listed with the paid ones, not hidden
+const PAID = ["mistral", "cohere", "anthropic", "openai", "deepseek", "xai", "moonshot", "zai", "together", "fireworks"];
 async function accounts() {
   const v = view(); v.replaceChildren(el("h1", {}, "Accounts"));
   if (new URLSearchParams(location.search).get("connected")) toast("✓ OpenRouter connected");
@@ -201,7 +200,7 @@ function googleCard(P, cat) {
   const done = GOOGLE_PATH.length - todo.length;
   const box = el("div", { class: "card hero stack" });
   const head = el("div", {}, el("h3", {}, "Connect with Google"),
-    el("div", { class: "sub" }, `${done} of ${GOOGLE_PATH.length} services connected. Each opens with your Google account (or one quick sign-up); copy the key there and come back — it is added by itself. The first seven need no card.`));
+    el("div", { class: "sub" }, `${done} of ${GOOGLE_PATH.length} services connected. Each opens with your Google account (or one quick sign-up); copy the key there and come back — it is added by itself. Gemini, Groq, OpenRouter and NVIDIA need no card; Mistral and Cohere asked for payment, so they are under "Pay per use".`));
   box.append(head);
   if (!todo.length) { box.append(el("div", { class: "pill ok" }, "✓ All free Google services are connected")); return box; }
   const list = el("div", { class: "stack" });
@@ -226,7 +225,7 @@ async function huntClipboard() {
   if (!want || document.visibilityState !== "visible") return;
   let t = "";
   try { t = (await navigator.clipboard.readText()).trim(); } catch { toast("Paste the key in “Add a key” (the browser did not allow reading the clipboard)", 6000); sessionStorage.removeItem("mychat.hunt"); return; }
-  if (!t || t === lastClip || t.length > 400) return;
+  if (!t || t === lastClip || t.length > 2000) return;
   lastClip = t;
   const { results = [] } = await api("/connections/paste", { text: t });
   if (!results.length) return toast("The clipboard does not hold a key yet — copy the key and come back", 5000);

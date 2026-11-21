@@ -178,15 +178,15 @@ export const PROVIDERS = {
   vercel: {
     name: "Vercel AI Gateway",
     baseUrl: "https://ai-gateway.vercel.sh/v1",
-    keyUrl: "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%2Fapi-keys",
+    keyUrl: "https://vercel.com/d?to=%2F%5Bteam%5D%2F~%2Fai-gateway%2Fapi-keys",
     signIn: "Vercel account (Google or GitHub works)",
     free: "Small monthly free credit; many providers' models through one key",
     strengths: ["chat", "code", "reason"],
   },
   nebius: {
-    name: "Nebius AI Studio",
-    baseUrl: "https://api.studio.nebius.com/v1",
-    keyUrl: "https://studio.nebius.com/settings/api-keys",
+    name: "Nebius Token Factory",
+    baseUrl: "https://api.tokenfactory.nebius.com/v1",      // renamed from AI Studio; the old key page link was broken
+    keyUrl: "https://tokenfactory.nebius.com/settings/api-keys",
     signIn: "Google account",
     free: "Starter credit; DeepSeek, Qwen, Llama and other open models",
     strengths: ["chat", "code", "reason"],

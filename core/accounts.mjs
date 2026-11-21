@@ -43,6 +43,7 @@ export const KEY_SHAPES = [
   ["openrouter", /\bsk-or-v1-[A-Za-z0-9]{40,}\b/],
   ["anthropic", /\bsk-ant-api\d\d-[A-Za-z0-9_-]{40,}\b/],
   ["nvidia", /\bnvapi-[A-Za-z0-9_-]{40,}\b/],
+  ["vercel", /\bvck_[A-Za-z0-9_-]{20,}\b/],          // Vercel AI Gateway (measured: not recognised before)
   ["groq", /\bgsk_[A-Za-z0-9]{40,}\b/],
   ["google", /\bAIza[0-9A-Za-z_-]{35}\|[A-Za-z0-9:_-]{8,}/],   // Google Programmable Search: API_KEY|ENGINE_ID
   ["gemini", /\bAIza[0-9A-Za-z_-]{35}\b(?!\|)/],
@@ -64,7 +65,8 @@ export function detectKeys(text) {
   const out = [];
   const whole = String(text || "").trim();
   if (/^[a-f0-9]{40}$/.test(whole)) return [{ provider: "serper", key: whole }];                 // Serper: 40 hex
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(whole)) return [{ provider: "exa", key: whole }];
+  // a UUID is a SambaNova key or an Exa key (measured: a SambaNova key was taken for Exa and "not recognised")
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(whole)) return [{ provider: "sambanova", key: whole, alt: "exa" }];
   for (const [provider, rx] of KEY_SHAPES) {
     const g = new RegExp(rx.source, "g");
     for (const m of String(text || "").matchAll(g)) if (!out.some((o) => o.key === m[0])) out.push({ provider, key: m[0] });
@@ -105,7 +107,7 @@ export async function validateKey(provider, key, providers, fetchImpl = fetch) {
   }
 }
 
-export const PLAIN_KEY_PROVIDERS = ["mistral", "zai", "sambanova", "cohere", "siliconflow", "deepseek", "moonshot", "together"];
+export const PLAIN_KEY_PROVIDERS = ["sambanova", "nebius", "mistral", "zai", "cohere", "siliconflow", "deepseek", "moonshot", "together", "vercel"];
 export async function identifyPlainKey(key, providers, candidates = PLAIN_KEY_PROVIDERS, fetchImpl = fetch) {
   for (const c of candidates) {
     const v = await validateKey(c, key, providers, fetchImpl);
@@ -122,10 +124,10 @@ export const CONNECT = {
   nvidia: { how: "guided", note: "Free for prototyping (phone check once): DeepSeek, Kimi, Qwen3, GLM, MiniMax, Nemotron · ~40 requests/min" },
   groq: { how: "guided", note: "Google account · very fast" },
   anthropic: { how: "guided", note: "Claude directly · pay per use (Claude.ai subscriptions cannot be used by apps)" },
-  mistral: { how: "guided", note: "Google account · Free mode, no card: Mistral Large, Devstral (coding), Codestral" },
+  mistral: { how: "guided", note: "Asked this account for payment (measured 2026-11-21) · Mistral Large, Devstral, Codestral" },
   huggingface: { how: "guided", note: "Token with 'Make calls to Inference Providers'" },
   zai: { how: "guided", note: "GLM-5.3 · pay per use" },
-  cohere: { how: "guided", note: "Google account · free trial key" },
+  cohere: { how: "guided", note: "Asks for a card (measured 2026-11-21) · Command models, pay per use" },
   siliconflow: { how: "guided", note: "Google account · some models free" },
 };
 

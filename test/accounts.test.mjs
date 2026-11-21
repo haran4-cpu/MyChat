@@ -101,3 +101,10 @@ test("keys move between devices as an encrypted text that needs the code", async
   assert.deepEqual(await importKeys("here you go: " + text + " thanks", code.toLowerCase()), keys);
   await assert.rejects(importKeys(text, transferCode()), /wrong code/);
 });
+
+test("keys measured on the PC: a SambaNova UUID is tried as SambaNova first, a Vercel vck_ key is recognised", async () => {
+  const { detectKeys, PLAIN_KEY_PROVIDERS } = await import("../core/accounts.mjs");
+  assert.deepEqual(detectKeys("0f3c2a1b-1234-4abc-9def-0123456789ab"), [{ provider: "sambanova", key: "0f3c2a1b-1234-4abc-9def-0123456789ab", alt: "exa" }]);
+  assert.equal(detectKeys("vck_" + "A1b2C3d4".repeat(5))[0].provider, "vercel");
+  assert.ok(PLAIN_KEY_PROVIDERS.includes("nebius"));
+});

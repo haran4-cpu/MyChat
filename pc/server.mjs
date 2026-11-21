@@ -612,7 +612,7 @@ const server = http.createServer(async (req, res) => {
       }
       const found = detectKeys(b.text);
       const plain = String(b.text || "").trim();
-      if (!found.length && /^[A-Za-z0-9._-]{24,120}$/.test(plain)) {   // a key without a recognisable prefix (Mistral, Z.ai…)
+      if (!found.length && /^[A-Za-z0-9._-]{24,1200}$/.test(plain)) {   // a key without a recognisable prefix (Mistral, Z.ai, Nebius…)
         const id = await identifyPlainKey(plain, gw.providers);
         if (id) found.push({ provider: id.provider, key: plain });
       }
@@ -625,7 +625,11 @@ const server = http.createServer(async (req, res) => {
           results.push({ provider: f.provider, name: SEARCH_PROVIDERS[f.provider].name, ...v, models: v.models });
           continue;
         }
-        const v = await validateKey(f.provider, f.key, gw.providers);
+        let v = await validateKey(f.provider, f.key, gw.providers);
+        if (!v.ok && f.alt && SEARCH_KEYS.has(f.alt)) {   // a UUID that is not SambaNova's may be Exa's (search)
+          try { const r = await new Search({ keys: { [f.alt]: f.key } }).provider(f.alt, "wikipedia", 1); saveKey(f.alt, f.key); results.push({ provider: f.alt, name: SEARCH_PROVIDERS[f.alt].name, ok: true, models: r.length }); continue; }
+          catch { /* report the first error */ }
+        }
         if (v.ok) saveKey(f.provider, f.key);
         results.push({ provider: f.provider, name: gw.providers[f.provider]?.name || f.provider, ...v });
       }
