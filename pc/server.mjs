@@ -35,7 +35,7 @@ const pageRunner = (rootPath) => async (rel, o = {}) => {
   if (!abs.startsWith(base + path.sep) || !fs.existsSync(abs)) throw new Error(`${rel}: not found in this folder`);
   return checkPage(abs, { clicks: o.clicks ?? 25, outDir: path.join(HOME, "runs") });
 };
-import { plan as agentPlan, preview as agentPreview, apply as agentApply, undo as agentUndo, tree as agentTree } from "../core/agent.mjs";
+import { plan as agentPlan, preview as agentPreview, apply as agentApply, undo as agentUndo, tree as agentTree, isTextChange, requireCurrentPreview } from "../core/agent.mjs";
 
 const HOME = process.env.MYCHAT_HOME || path.join(process.env.APPDATA || path.join(os.homedir(), ".config"), "MyChat");
 const PORT = Number(process.env.MYCHAT_PORT || 11500);
@@ -320,6 +320,7 @@ const rootAt = (i) => { const r = agentRoots()[Number(i) || 0]; if (!r) throw ne
 const agentFile = (kind, id) => path.join(AGENT_DIR, `${kind}-${String(id).replace(/[^\w-]/g, "")}.json`);
 const agentSave = (kind, id, v) => fs.writeFileSync(agentFile(kind, id), JSON.stringify(v));
 const agentLoad = (kind, id) => { try { return JSON.parse(fs.readFileSync(agentFile(kind, id), "utf8")); } catch { return null; } };
+let agentMutationActive = false;
 function agentHistory(n = 30) {
   return fs.readdirSync(AGENT_DIR).filter((f) => f.startsWith("journal-")).map((f) => { try { return JSON.parse(fs.readFileSync(path.join(AGENT_DIR, f), "utf8")); } catch { return null; } })
     .filter(Boolean).sort((a, b) => b.at - a.at).slice(0, n)
@@ -378,11 +379,27 @@ async function agentRoute(req, res, url) {
     if (agentLoad("journal", p.id)) return send(res, 409, { error: { message: "this plan was already applied (use undo first)" } });
     // Proof around the change: every HTML app that is about to change is run before and after, and the difference in
     // errors is reported (fixed / still there / new). "Fixed" becomes a measured fact, not the model's word.
-    const pick = Array.isArray(b.approve) ? b.approve.map(Number) : null;
+    const pick = Array.isArray(b.approve) ? b.approve : null;
+    if (b.approve !== undefined && (!pick || !pick.length || pick.some(i => !Number.isInteger(i) || i < 0 || i >= p.ops.length))) {
+      return send(res, 400, { error: { message: "Select at least one valid change from this plan." } });
+    }
+    const adapter = nodeFs(p.root);
+    try {
+      const paths = new Set();
+      for (const [index, op] of p.ops.entries()) {
+        if ((pick && !pick.includes(index)) || !isTextChange(op.op)) continue;
+        const key = op.path.toLowerCase();
+        if (paths.has(key)) throw new Error(`${op.path}: preview each successive text change separately`);
+        paths.add(key);
+        await requireCurrentPreview(adapter, p, index);
+      }
+    } catch (error) {
+      return send(res, 409, { error: { message: error.message } });
+    }
     const pages = [...new Set((p.ops || []).filter((o, i) => (!pick || pick.includes(i)) && /\.html?$/i.test(o.path) && ["write", "edit"].includes(o.op)).map((o) => o.path))].slice(0, 3);
     const run = pageRunner(p.root), before = {};
     if (b.verify !== false) for (const f of pages) before[f] = await run(f, { clicks: 30 }).catch((e) => ({ failed: e.message }));
-    const j = await agentApply(nodeFs(p.root), p, pick);
+    const j = await agentApply(adapter, { ...p, enforcePreview: true }, pick);
     j.root = p.root;
     if (pages.length && b.verify !== false) {
       j.verify = [];
@@ -552,7 +569,14 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { running: st.running, total: st.total });
     }
     if (req.method === "POST" && url.pathname === "/bench/stop") return send(res, 200, bench ? bench.stop() : { running: false });
-    if (url.pathname.startsWith("/agent/")) return await agentRoute(req, res, url);
+    if (url.pathname.startsWith("/agent/")) {
+      const changesFiles = req.method === "POST" && ["/agent/apply", "/agent/undo"].includes(url.pathname);
+      if (!changesFiles) return await agentRoute(req, res, url);
+      if (agentMutationActive) return send(res, 409, { error: { message: "Another file change is already running." } });
+      agentMutationActive = true;
+      try { return await agentRoute(req, res, url); }
+      finally { agentMutationActive = false; }
+    }
     if (req.method === "POST" && url.pathname === "/jobs") return send(res, 200, startJob(await body(req)));
     if (req.method === "GET" && url.pathname.startsWith("/jobs/")) {
       const j = getJob(url.pathname.slice(6));

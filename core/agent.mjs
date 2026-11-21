@@ -571,6 +571,29 @@ export async function plan(gw, opts) {
 
 export const newId = () => new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14) + "-" + Math.random().toString(36).slice(2, 6);
 
+export const isTextChange = (op) => ["write", "append", "edit"].includes(op);
+
+async function fingerprint(text) {
+  if (text === null) return null;
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+export async function requireCurrentPreview(fs, plan, index, currentText) {
+  const op = plan.ops[index];
+  const expected = plan.preview?.[index];
+  if (!expected || !Object.hasOwn(expected, "baseFingerprint") || expected.path !== op.path || expected.op !== op.op) {
+    throw new Error(`${op.path}: create a fresh preview before applying this change`);
+  }
+  let actual = currentText;
+  if (actual === undefined) {
+    const exists = await fs.exists(op.path);
+    actual = exists ? await fs.read(op.path) : null;
+    if (exists && actual === null) throw new Error(`${op.path}: current file is not readable text`);
+  }
+  if (expected.baseFingerprint !== await fingerprint(actual)) throw new Error(`${op.path}: changed since preview. Create a fresh preview.`);
+}
+
 /** What each op will do, with a line diff for files that change. */
 export async function preview(fs, ops) {
   const out = [];
@@ -579,6 +602,7 @@ export async function preview(fs, ops) {
     const item = { ...o, exists };
     if (o.op === "write" || o.op === "append") {
       const before = exists ? await fs.read(o.path).catch(() => null) : "";
+      if (!exists || before !== null) item.baseFingerprint = await fingerprint(exists ? before : null);
       const after = o.op === "append" ? (before || "") + o.content : o.content;
       item.diff = before == null ? null : lineDiff(before || "", after);
       item.stats = item.diff ? { added: item.diff.filter((l) => l[0] === "+").length, removed: item.diff.filter((l) => l[0] === "-").length } : null;
@@ -589,6 +613,7 @@ export async function preview(fs, ops) {
       try {
         if (before == null) throw new Error(`${o.path} does not exist or is not text`);
         const { after, line } = editText(before, o);
+        item.baseFingerprint = await fingerprint(before);
         item.diff = [`@@ line ${line}`, ...lineDiff(o.old, o.new, 2)];
         item.stats = { added: item.diff.filter((l) => l[0] === "+").length, removed: item.diff.filter((l) => l[0] === "-").length, line };
         item.unchanged = after === before;
@@ -647,14 +672,20 @@ export async function apply(fs, p, approved = null) {
       } else if (o.op === "write" || o.op === "append") {
         const prev = exists ? await fs.read(o.path) : null;
         if (exists && prev == null) throw new Error(`${o.path} is not a text file; not changed`);
+        if (p.enforcePreview) await requireCurrentPreview(fs, p, k, prev);
         await ensureParent(fs, o.path, journal);
-        await fs.write(o.path, o.op === "append" ? (prev || "") + o.content : o.content);
-        journal.steps.push({ op: "write", path: o.path, prev });
+        const after = o.op === "append" ? (prev || "") + o.content : o.content;
+        const writtenFingerprint = await fingerprint(after);
+        await fs.write(o.path, after);
+        journal.steps.push({ op: "write", path: o.path, prev, writtenFingerprint });
       } else if (o.op === "edit") {
         const prev = exists ? await fs.read(o.path) : null;
         if (prev == null) throw new Error(`${o.path} does not exist or is not text`);
-        await fs.write(o.path, editText(prev, o).after);
-        journal.steps.push({ op: "write", path: o.path, prev });
+        if (p.enforcePreview) await requireCurrentPreview(fs, p, k, prev);
+        const after = editText(prev, o).after;
+        const writtenFingerprint = await fingerprint(after);
+        await fs.write(o.path, after);
+        journal.steps.push({ op: "write", path: o.path, prev, writtenFingerprint });
       } else if (o.op === "move") {
         if (!exists) throw new Error(`${o.path} does not exist`);
         if (await fs.exists(o.to)) throw new Error(`${o.to} already exists; not overwritten`);
@@ -697,6 +728,9 @@ export async function undo(fs, journal) {
   for (const s of [...journal.steps].reverse()) {
     try {
       if (s.op === "write") {
+        if (s.writtenFingerprint && await fingerprint(await fs.read(s.path)) !== s.writtenFingerprint) {
+          throw new Error(`${s.path} changed after this plan was applied; kept current contents`);
+        }
         if (s.prev == null) {
           if (await fs.exists(s.path)) { const t = `${TRASH}/undo-${journal.id}/${s.path}`; await ensureParent(fs, t, null); await fs.move(s.path, t); }
         } else await fs.write(s.path, s.prev);

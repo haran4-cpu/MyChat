@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import {preview} from '../core/agent.mjs';
 
 test('approval and undo operate on the exact selected proposal', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(),'mychat-approval-'));
@@ -11,6 +12,7 @@ test('approval and undo operate on the exact selected proposal', async () => {
   await fs.writeFile(path.join(home,'settings.json'), JSON.stringify({allowLocal:false,allowKeyless:false}));
   process.env.MYCHAT_HOME = home;
   const {server,token} = await import('../pc/server.mjs');
+  const {nodeFs} = await import('../pc/agentfs.mjs');
   try {
     await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
     const origin = `http://127.0.0.1:${server.address().port}`;
@@ -20,10 +22,15 @@ test('approval and undo operate on the exact selected proposal', async () => {
     });
     for (const label of ['first','second']) {
       const plan = {id:label,root,goal:label,ops:[{op:'write',path:`${label}.txt`,content:label}]};
+      plan.preview = await preview(nodeFs(root),plan.ops);
       await fs.writeFile(path.join(home,'agent',`plan-${label}.json`),JSON.stringify(plan));
     }
     assert.equal((await send('apply','latest')).status,400);
     assert.equal((await send('apply','missing')).status,404);
+    await fs.writeFile(path.join(root,'second.txt'),'created after preview');
+    assert.equal((await send('apply','second')).status,409);
+    assert.equal(await fs.readFile(path.join(root,'second.txt'),'utf8'),'created after preview');
+    await fs.unlink(path.join(root,'second.txt'));
     const applied = await send('apply','first');
     assert.equal(applied.status,200,await applied.text());
     assert.equal(await fs.readFile(path.join(root,'first.txt'),'utf8'),'first');
@@ -31,6 +38,11 @@ test('approval and undo operate on the exact selected proposal', async () => {
     assert.equal((await send('undo','latest')).status,400);
     assert.equal((await send('undo','first')).status,200);
     await assert.rejects(fs.stat(path.join(root,'first.txt')),{code:'ENOENT'});
+    assert.equal((await send('apply','second')).status,200);
+    await fs.writeFile(path.join(root,'second.txt'),'manual edits after apply');
+    const conflict = await (await send('undo','second')).json();
+    assert.equal(conflict.ok,false);
+    assert.equal(await fs.readFile(path.join(root,'second.txt'),'utf8'),'manual edits after apply');
   } finally {
     server.closeAllConnections();
     await new Promise(resolve => server.close(resolve));
