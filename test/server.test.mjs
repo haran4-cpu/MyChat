@@ -75,6 +75,12 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
   assert.equal(roots.roots.length, 1);
   assert.match((await (await fetch(u + "/agent/tree?root=0", { headers: H })).json()).tree, /a\.txt/);
   assert.equal((await fetch(u + "/agent/undo", { method: "POST", headers: H, body: JSON.stringify({ id: "latest" }) })).status, 404);
+  // a file attached in the chat lands in the chat folder's Inbox, never overwriting
+  const up = await (await fetch(u + "/agent/inbox", { method: "POST", headers: H, body: JSON.stringify({ name: "notes.txt", data: Buffer.from("PELICAN-42").toString("base64") }) })).json();
+  assert.match(up.path, /^Inbox\/\d{4}-\d\d-\d\d\/notes\.txt$/);
+  const up2 = await (await fetch(u + "/agent/inbox", { method: "POST", headers: H, body: JSON.stringify({ name: "notes.txt", data: Buffer.from("x").toString("base64") }) })).json();
+  assert.match(up2.path, /notes \(2\)\.txt$/);
+  assert.equal(fs.readFileSync(path.join(work, up.path), "utf8"), "PELICAN-42");
   // any folder can become the chat's folder; MyChat's own data cannot
   const other = fs.mkdtempSync(path.join(os.tmpdir(), "mychat-other-"));
   const used = await (await fetch(u + "/agent/use", { method: "POST", headers: H, body: JSON.stringify({ path: other }) })).json();

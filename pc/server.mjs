@@ -84,10 +84,10 @@ function send(res, code, obj, headers = {}) {
   res.writeHead(code, { "Content-Type": "application/json", ...headers });
   res.end(JSON.stringify(obj));
 }
-function body(req) {
+function body(req, max = 20e6) {
   return new Promise((ok, bad) => {
     let s = "";
-    req.on("data", (c) => { s += c; if (s.length > 20e6) { bad(new Error("too large")); req.destroy(); } });
+    req.on("data", (c) => { s += c; if (s.length > max) { bad(new Error("too large")); req.destroy(); } });
     req.on("end", () => { try { ok(s ? JSON.parse(s) : {}); } catch (e) { bad(e); } });
   });
 }
@@ -326,7 +326,7 @@ function agentHistory(n = 30) {
     .map((j) => ({ id: j.id, goal: j.goal, summary: j.summary, at: j.at, root: j.root, steps: j.steps.length, error: j.error, undone: !!j.undone }));
 }
 async function agentRoute(req, res, url) {
-  const b = req.method === "POST" ? await body(req) : {};
+  const b = req.method === "POST" ? await body(req, url.pathname === "/agent/inbox" ? 85e6 : 20e6) : {};
   if (url.pathname === "/agent/roots") {
     if (req.method === "POST") {
       const roots = (b.roots || []).map((r) => ({ path: path.resolve(String(r.path || r)), private: !!r.private })).filter((r) => fs.existsSync(r.path) && !FORBIDDEN_ROOT(r.path));
@@ -335,6 +335,17 @@ async function agentRoute(req, res, url) {
       writeJson("settings.json", settings);
     }
     return send(res, 200, { roots: agentRoots(), chatRoot: Number(settings.chatRoot) || 0 });
+  }
+  // a file attached in the chat → <chat folder>/Inbox/<date>/<name> (never overwrites), so the agent can read/run/change it
+  if (url.pathname === "/agent/inbox" && req.method === "POST") {
+    const root = chatRoot("");
+    const name = String(b.name || "file").replace(/[\\/:*?"<>|\x00-\x1f]+/g, "_").replace(/^\.+/, "").slice(0, 120) || "file";
+    const day = new Date().toISOString().slice(0, 10), dir = path.join(root.path, "Inbox", day);
+    fs.mkdirSync(dir, { recursive: true });
+    let f = path.join(dir, name), k = 1;
+    while (fs.existsSync(f)) f = path.join(dir, name.replace(/(\.[^.]+)?$/, ` (${++k})$1`));
+    fs.writeFileSync(f, Buffer.from(String(b.data || ""), "base64"));
+    return send(res, 200, { path: path.relative(root.path, f).split(path.sep).join("/"), root: root.path, bytes: fs.statSync(f).size });
   }
   // "/folder C:\…" from a chat: work there from now on (added to the list if new)
   if (url.pathname === "/agent/use" && req.method === "POST") {

@@ -1,7 +1,7 @@
 """
 title: MyChat
 author: MyChat (multi-model gateway)
-version: 1.10.0
+version: 1.11.0
 required_open_webui_version: 0.6.0
 description: MyChat inside Open WebUI. Cloud and local models combined per task (Auto, Max, Consensus, Verified/Truth Engine, Fast, Private). Starts the MyChat gateway on this PC by itself; accounts and keys are managed from the "MyChat · Accounts" model without leaving Open WebUI.
 """
@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import re
+import base64
 import shutil
 import subprocess
 import time
@@ -333,8 +334,47 @@ class Pipe:
         return "\n".join(out)
 
     # ---------------------------------------------------------------- chat
+    def _attached(self, body: dict, files) -> list:
+        """Files attached in this chat: (name, path on disk). Open WebUI keeps uploads on disk; we read them from there."""
+        out, seen = [], set()
+        for f in list(files or []) + list(body.get("files") or []) + list((body.get("metadata") or {}).get("files") or []):
+            if not isinstance(f, dict):
+                continue
+            ff = f.get("file") if isinstance(f.get("file"), dict) else {}
+            fid = f.get("id") or ff.get("id")
+            name = ff.get("filename") or f.get("name") or (ff.get("meta") or {}).get("name") or "file"
+            fpath = ff.get("path") or f.get("path")
+            if fid and not fpath:
+                try:
+                    from open_webui.models.files import Files
+                    rec = Files.get_file_by_id(fid)
+                    if rec:
+                        fpath, name = rec.path, rec.filename or name
+                except Exception:
+                    pass
+            if fpath and fid not in seen and os.path.isfile(fpath):
+                seen.add(fid)
+                out.append((name, fpath))
+        return out[:10]
+
+    async def _send_files(self, client, token: str, items: list) -> list:
+        """Copy attached files into the chat folder's Inbox (via the gateway) so MyChat can read, run and change them."""
+        got = []
+        for name, fpath in items:
+            try:
+                with open(fpath, "rb") as fh:
+                    data = fh.read(60 * 1024 * 1024)
+                r = await client.post(self.valves.MYCHAT_URL.rstrip("/") + "/agent/inbox", headers={"Authorization": "Bearer " + token},
+                                      json={"name": name, "data": base64.b64encode(data).decode()}, timeout=120)
+                j = r.json()
+                if r.status_code == 200:
+                    got.append((name, j["path"], j.get("root", ""), fpath))
+            except Exception:
+                pass
+        return got
+
     async def pipe(self, body: dict, __user__: Optional[dict] = None, __event_emitter__=None,
-                   __event_call__=None, __metadata__: Optional[dict] = None) -> AsyncGenerator[str, None]:
+                   __event_call__=None, __metadata__: Optional[dict] = None, __files__: Optional[list] = None) -> AsyncGenerator[str, None]:
         model = str(body.get("model", "")).split(".", 1)[-1]
         msgs = body.get("messages") or []
         last = next((m.get("content") for m in reversed(msgs) if m.get("role") == "user"), "") or ""
@@ -350,6 +390,30 @@ class Pipe:
             if not token:
                 yield f"The gateway is running but its key file was not found in `{self._home()}`."
                 return
+            # Files attached in the chat: copied into the working folder's Inbox, and the message says where they are,
+            # so MyChat reads, runs or changes them like any other file. Images also go to a vision model directly.
+            items = self._attached(body, __files__ or (__metadata__ or {}).get("files"))
+            if items:
+                await self._status(__event_emitter__, f"Receiving {len(items)} file(s)…")
+                got = await self._send_files(client, token, items)
+                if got:
+                    note = "\n\n(Attached files, saved in the working folder: " + ", ".join(f"{g[1]}" for g in got) + ")"
+                    imgs = [g for g in got if re.search(r"\.(png|jpe?g|webp|gif)$", g[0], re.I)]
+                    for m in reversed(msgs):
+                        if m.get("role") == "user":
+                            c = m.get("content")
+                            text = (c if isinstance(c, str) else " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")) or "Look at the attached file(s)."
+                            if imgs:
+                                parts = [{"type": "text", "text": text + note}]
+                                for g in imgs[:4]:
+                                    with open(g[3], "rb") as fh:
+                                        mime = "image/png" if g[0].lower().endswith(".png") else "image/jpeg"
+                                        parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64," + base64.b64encode(fh.read(8_000_000)).decode()}})
+                                m["content"] = parts
+                            else:
+                                m["content"] = text + note
+                            break
+                    last = (last or "Look at the attached file(s).") + note
             # a message that is only API keys connects them; it is never forwarded to a model
             if KEY_RX.search(last) and ONLY_TOKENS.match(last) or (model == "accounts" and ONLY_TOKENS.match(last)):
                 yield await self._paste(client, token, last)
