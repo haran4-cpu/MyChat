@@ -198,7 +198,7 @@ def find_files(ctx: Ctx, name, path="."):
 def _write_checked_source(ctx: Ctx, path, content: str, preview: str):
     name, issue = verify.check_source(Path(path).suffix.lower(), content)
     if issue:
-        ctx.verification.append({"check": name, "target": str(path), "status": "rejected", "detail": issue})
+        ctx.verification.append({"check": name, "target": str(ctx.guard.resolve(str(path))), "status": "rejected", "detail": issue})
         raise ToolError(f"Rejected before writing: {name}: {issue}")
     p = ctx.guard.write_bytes(str(path), content.encode("utf-8"), preview=preview)
     ctx.files_touched.append(str(p))
@@ -373,12 +373,16 @@ def calc(ctx: Ctx, expression):
       "For a known target, supply the exact unique anchor from the file so the code model returns only its replacement.",
       {"path": S("file path"), "instruction": S("what to change, one sentence"), "anchor": S("optional exact unique source snippet")}, ["path", "instruction"])
 def quick_edit(ctx: Ctx, path, instruction, anchor=None):
-    from .coder import propose_edit
+    from .coder import EditError, propose_edit
     p = ctx.guard.check_read(path)
     if not p.is_file():
         raise ToolError(f"not a file: {p}")
     source = p.read_text(encoding="utf-8")
-    proposal, info = propose_edit(ctx.router, source, instruction, p.suffix.lower(), anchor)
+    try:
+        proposal, info = propose_edit(ctx.router, source, instruction, p.suffix.lower(), anchor)
+    except EditError as error:
+        ctx.verification.append({"check": "Proposed code edit", "target": str(p), "status": "rejected", "detail": str(error)})
+        raise ToolError(f"Rejected before writing: {error}") from error
     updated = source.replace(proposal["old"], proposal["replacement"], 1)
     preview = f"--- old\n{proposal['old']}\n+++ new\n{proposal['replacement']}"
     p, result = _write_checked_source(ctx, p, updated, preview)

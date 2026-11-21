@@ -509,7 +509,7 @@ class IntegrationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             calculate("__import__('os')")
 
-    def test_quick_edit_with_code_model_and_rollback(self):
+    def test_quick_edit_with_code_model_and_preflight(self):
         home, cfg, g, audit, dec = make_env("allow")
         s = Session(cfg, g, Router(cfg), None, None)
         ws = Path(cfg["workspace"])
@@ -522,11 +522,13 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(req["model"], "qwen2.5-coder:3b")
         self.assertEqual(req["format"]["required"], ["old", "replacement"])
         self.assertEqual(req["options"]["temperature"], 0)
-        # an edit that breaks the file is rolled back
-        FAKE.script += [{"content": json.dumps({"old": "return 3.14 * r * r", "replacement": "return (3.14 * r * r"})}]
+        before = (ws / "m.py").read_bytes()
+        bad = {"content": json.dumps({"old": "return 3.14 * r * r", "replacement": "return (3.14 * r * r"})}
+        FAKE.script += [bad, bad]
         out, ok = tools.call(s.ctx, "quick_edit", {"path": "m.py", "instruction": "break it"}, limit=5000)
         self.assertFalse(ok)
-        self.assertIn("rolled back", out)
+        self.assertIn("Rejected before writing: Python syntax", out)
+        self.assertEqual((ws / "m.py").read_bytes(), before)
         self.assertEqual(verify.check_file(ws / "m.py"), "")
 
     def test_one_model_at_a_time(self):
