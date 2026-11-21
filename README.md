@@ -57,3 +57,14 @@ backs up what it replaces. Settings, keys, state and logs are never touched.
 
 Repo layout: `core/` engine (shared by PC and phone) · `pc/` gateway, supervisor, benchmark · `openwebui/` function ·
 `app/` Android · `kestrel/` PC agent (Python) · `docs/` sign-in return page.
+## On-demand local repair lab
+
+On Windows, open `Repair-Lab.cmd` in the MyChat folder. It runs three small JavaScript repair fixtures against the installed Ollama models. By default it tries the coding model first and passes a useful failure message to the next model only when needed. The first accepted edit ends that trial. The report records proposals, latency, token counts where the backend supplies them, and validation results.
+
+```powershell
+.\Repair-Lab.cmd --task safe-integer
+.\Repair-Lab.cmd --online --mychat-mode fast
+.\Repair-Lab.cmd --online-only --task range
+```
+
+`--online` adds the PC MyChat gateway as a fallback. `--online-only` tests its selected mode directly. Those flags can use connected provider quota. The default uses only the local Ollama endpoint. Each run has an eight-minute deadline and at most four attempts per fixture; each provider request also has its own timeout. The fixtures contain synthetic data. Proposals are applied in memory and scored against reviewed equivalent rewrites. The lab writes a fresh report, leaves live projects and model weights alone, and has no scheduled execution.
