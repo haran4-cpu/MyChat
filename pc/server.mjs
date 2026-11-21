@@ -144,7 +144,7 @@ async function brainRun(oreq, opts) {
   if (r.ops?.length) {
     agentSave("plan", r.planId, { id: r.planId, goal: lastText(oreq.messages), ops: r.ops, preview: r.preview, root: root.path, rootIndex: Number(settings.chatRoot) || 0, at: Date.now(), answer: r.content });
     const list = (r.preview || r.ops).map((o, i) => `${i + 1}. ${o.label || o.op + " " + o.path}`).join("\n");
-    const extra = `\n\n**Proposed changes** (nothing changed yet):\n${list}\n\nReply **/approve** to apply all, **/approve 1,3** for some — **/undo** reverses it afterwards.`;
+    const extra = `\n\n**Proposed changes** (nothing changed yet):\n${list}\n\nReply **/approve ${r.planId}** to apply all, or **/approve ${r.planId} 1,3** for selected changes. Use **/undo ${r.planId}** to undo this plan.`;
     r.content += extra; opts.onDelta?.(extra);
   }
   return r;
@@ -372,7 +372,8 @@ async function agentRoute(req, res, url) {
     return send(res, 200, p);
   }
   if (url.pathname === "/agent/apply" && req.method === "POST") {
-    const p = b.id === "latest" ? latestPlan() : agentLoad("plan", b.id);
+    if (!validPlanId(b.id)) return send(res, 400, { error: { message: "Specify the plan ID from the preview." } });
+    const p = agentLoad("plan", b.id);
     if (!p) return send(res, 404, { error: { message: "plan not found" } });
     if (agentLoad("journal", p.id)) return send(res, 409, { error: { message: "this plan was already applied (use undo first)" } });
     // Proof around the change: every HTML app that is about to change is run before and after, and the difference in
@@ -397,8 +398,8 @@ async function agentRoute(req, res, url) {
     return send(res, 200, j);
   }
   if (url.pathname === "/agent/undo" && req.method === "POST") {
-    const id = b.id === "latest" ? agentHistory(50).find((h) => !h.undone)?.id : b.id;
-    const j = id && agentLoad("journal", id);
+    if (!validPlanId(b.id)) return send(res, 400, { error: { message: "Specify the ID of the plan to undo." } });
+    const j = agentLoad("journal", b.id);
     if (!j) return send(res, 404, { error: { message: "nothing to undo" } });
     if (j.undone) return send(res, 409, { error: { message: "already undone" } });
     const r = await agentUndo(nodeFs(j.root), j);
@@ -409,9 +410,8 @@ async function agentRoute(req, res, url) {
   if (url.pathname === "/agent/plan" && req.method === "GET") return send(res, 200, agentLoad("plan", url.searchParams.get("id")) || {});
   return send(res, 404, { error: { message: "not found" } });
 }
-function latestPlan() {
-  const f = fs.readdirSync(AGENT_DIR).filter((x) => x.startsWith("plan-")).map((x) => ({ x, t: fs.statSync(path.join(AGENT_DIR, x)).mtimeMs })).sort((a, b) => b.t - a.t)[0];
-  return f ? JSON.parse(fs.readFileSync(path.join(AGENT_DIR, f.x), "utf8")) : null;
+function validPlanId(id) {
+  return typeof id === "string" && /^[a-z0-9][a-z0-9-]{0,79}$/i.test(id) && id.toLowerCase() !== "latest";
 }
 
 // ---------------------------------------------------------------- System: services and updates (through the supervisor)

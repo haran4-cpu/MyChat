@@ -74,7 +74,7 @@ test("PC server: token, model list, streaming with team progress as reasoning", 
   const roots = await (await fetch(u + "/agent/roots", { method: "POST", headers: H, body: JSON.stringify({ roots: [{ path: work }, { path: work + "-missing" }] }) })).json();
   assert.equal(roots.roots.length, 1);
   assert.match((await (await fetch(u + "/agent/tree?root=0", { headers: H })).json()).tree, /a\.txt/);
-  assert.equal((await fetch(u + "/agent/undo", { method: "POST", headers: H, body: JSON.stringify({ id: "latest" }) })).status, 404);
+  assert.equal((await fetch(u + "/agent/undo", { method: "POST", headers: H, body: JSON.stringify({ id: "latest" }) })).status, 400);
   // a file attached in the chat lands in the chat folder's Inbox, never overwriting
   const up = await (await fetch(u + "/agent/inbox", { method: "POST", headers: H, body: JSON.stringify({ name: "notes.txt", data: Buffer.from("PELICAN-42").toString("base64") }) })).json();
   assert.match(up.path, /^Inbox\/\d{4}-\d\d-\d\d\/notes\.txt$/);

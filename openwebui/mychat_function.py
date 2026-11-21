@@ -31,9 +31,9 @@ MODELS = [
     ("agent", "MyChat Agent (files & folders · you approve · undo)"),
     ("accounts", "MyChat · Accounts & keys"),
 ]
-APPROVE_RX = re.compile(r"^\s*(/approve|/apply|yes|y|ok|approve|apply|כן|אשר|אישור|תבצע|בצע)\b[\s:,]*([\d ,]*)\s*[.!]?\s*$", re.I)
+APPROVE_RX = re.compile(r"^/approve\s+(\d{14}-[a-z0-9]{4})(?:\s+([1-9]\d*(?:\s*,\s*[1-9]\d*)*))?$", re.I)
 WORKSPACE_RX = re.compile(r"(קובץ|קבצים|תיקי|פרויקט|פרוייקט|הקוד|קוד שלי|אפליקציה שלי|האפליקציה|ריפו|zip|apk|\bfiles?\b|\bfolders?\b|\bproject|\brepo\b|\bmy (code|app)\b|\bthe (code|app)\b|Projects/)", re.I)
-UNDO_RX = re.compile(r"^\s*(/undo|undo|בטל|ביטול|תבטל)\s*[.!]?\s*$", re.I)
+UNDO_RX = re.compile(r"^/undo\s+(\d{14}-[a-z0-9]{4})$", re.I)
 
 # Shapes of real API keys. A message made only of such tokens is treated as "connect this key", never sent to a model.
 KEY_RX = re.compile(r"\b(AIza[\w-]{30,}|nvapi-[\w-]{20,}|gsk_\w{20,}|sk-or-[\w-]{20,}|sk-ant-[\w-]{20,}|hf_\w{20,}|"
@@ -264,8 +264,9 @@ class Pipe:
         base = self.valves.MYCHAT_URL.rstrip("/")
         H = {"Authorization": "Bearer " + token}
         t = text.strip()
-        if UNDO_RX.match(t):
-            r = await client.post(base + "/agent/undo", json={"id": "latest"}, headers=H, timeout=120)
+        undo = UNDO_RX.fullmatch(t)
+        if undo:
+            r = await client.post(base + "/agent/undo", json={"id": undo.group(1)}, headers=H, timeout=120)
             j = r.json()
             if r.status_code != 200:
                 return "✗ " + (j.get("error", {}) or {}).get("message", "nothing to undo")
@@ -273,7 +274,7 @@ class Pipe:
         m = APPROVE_RX.match(t)
         if m:
             nums = [int(x) - 1 for x in re.findall(r"\d+", m.group(2) or "")]
-            r = await client.post(base + "/agent/apply", json={"id": "latest", **({"approve": nums} if nums else {})}, headers=H, timeout=300)
+            r = await client.post(base + "/agent/apply", json={"id": m.group(1), **({"approve": nums} if nums else {})}, headers=H, timeout=300)
             j = r.json()
             if r.status_code != 200:
                 return "✗ " + (j.get("error", {}) or {}).get("message", "could not apply")
@@ -288,8 +289,10 @@ class Pipe:
                     continue
                 lines.append(f"\n**Run check `{v['path']}`** (real browser, before → after): errors {v['before']} → {v['after']}")
                 lines += [f"- ✓ fixed: {x}" for x in v.get("fixed", [])[:5]] + [f"- ✗ new: {x}" for x in v.get("new", [])[:5]] + [f"- still: {x}" for x in v.get("still", [])[:3]]
-            lines += ["", "Not what you wanted? Reply **/undo** and everything goes back."]
+            lines += ["", f"To undo this plan, reply **/undo {m.group(1)}**."]
             return "\n".join(lines)
+        if re.match(r"^/(approve|undo)(?:\s|$)", t, re.I):
+            return "Use the full command from the plan preview, including its ID."
         mf = re.match(r"^\s*/folder\s+(.+)$", t, re.I)
         if mf:   # switch the folder the chat and the agent work in (any folder on this PC; system folders are protected)
             r = await client.post(base + "/agent/use", json={"path": mf.group(1).strip().strip('"')}, headers=H, timeout=20)
@@ -328,8 +331,9 @@ class Pipe:
                 out += ["```diff", body.replace("```", "``\u200b`"), "```", ""]
         if p.get("rejected"):
             out.append(f"_Refused {len(p['rejected'])} unsafe step(s)._")
-        out += ["", "Nothing has changed yet. Reply **yes** to apply all, **/approve 1,3** for some, or review it at "
-                f"[MyChat → Agent]({base}/#agent). After applying, **/undo** puts everything back.",
+        plan_id = p.get("id", "")
+        out += ["", f"Reply **/approve {plan_id}** to apply all or **/approve {plan_id} 1,3** for selected changes. "
+                f"Review the plan at [MyChat → Agent]({base}/#agent). To undo it, use **/undo {plan_id}**.",
                 f"\n_Planned by {p.get('by', '')}_"]
         return "\n".join(out)
 
@@ -438,7 +442,7 @@ class Pipe:
             low = last.strip().lower()
             # one assistant: the gateway itself decides when to look at your files (core/assistant.mjs), so normal
             # models stream through it; the Agent model and /agent stay as the explicit "work on my files" entry
-            if model == "agent" or low.startswith("/agent") or low.startswith("/approve") or low == "/undo" or low == "/folders" or low.startswith("/folder "):
+            if model == "agent" or low.startswith("/agent") or re.match(r"^/(approve|undo)(?:\s|$)", low) or low == "/folders" or low.startswith("/folder "):
                 goal = re.sub(r"^\s*/agent\b\s*", "", last) if low.startswith("/agent") and len(low) > 7 else last
                 try:
                     hist = [{"role": m.get("role"), "content": m.get("content")[:6000]} for m in msgs[:-1]
