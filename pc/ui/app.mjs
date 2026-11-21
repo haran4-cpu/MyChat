@@ -154,7 +154,7 @@ const GOOGLE_PATH = [
   ["gemini", "Gemini Flash family + Gemma, long context, images", "Sign in with Google → Create API key → Copy"],
   ["groq", "Very fast open models (gpt-oss 120B, Qwen, Kimi)", "Continue with Google → Create API Key → Copy"],
   ["nvidia", "Strong open models free: DeepSeek, Kimi, Qwen3, GLM, MiniMax", "Sign in (Google works) → verify phone once → Generate API Key → Copy"],
-  ["mistral", "Mistral Large, Devstral for code — Free mode, no card", "Continue with Google → API keys → Create new key → Copy"],
+  ["mistral", "Mistral Large, Devstral — measured 2026-11-21: asked this account for payment, so it may not be free for you", "Continue with Google → API keys → Create new key → Copy"],
   ["cohere", "Command models — trial key", "Continue with Google → API keys → Copy the trial key"],
   ["sambanova", "Fast large open models, small free quota", "Sign in → API keys → Create → Copy"],
   ["huggingface", "Thousands of open models through partner providers, small monthly credit", "Sign in (Google works) → new token with 'Make calls to Inference Providers' → Copy"],
