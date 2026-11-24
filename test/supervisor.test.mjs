@@ -55,29 +55,69 @@ test("update map: code goes to the right folder; settings, keys and paths outsid
 });
 
 test("update installs only a commit whose CI passed, verifies every file, and backs up what it replaces", async () => {
-  const body = Buffer.from("export const v = 2;\n");
-  const blob = crypto.createHash("sha1").update(`blob ${body.length}\0`).update(body).digest("hex");
+  const blobOf = (b) => crypto.createHash("sha1").update(`blob ${b.length}\0`).update(b).digest("hex");
+  let body = Buffer.from("export const v = 1;\n"), head = "abc1234";
   const json = (o) => new Response(JSON.stringify(o), { status: 200 });
   let ci = [{ name: "engine", status: "completed", conclusion: "failure" }];
   const fetchImpl = async (u) => {
-    if (u.endsWith("/commits/main")) return json({ sha: "abc1234" });
+    if (u.endsWith("/commits/main")) return json({ sha: head });
     if (u.includes("/check-runs")) return json({ check_runs: ci });
-    if (u.includes("/git/trees/")) return json({ tree: [{ type: "blob", path: "core/zz_test.mjs", sha: blob }] });
+    if (u.includes("/git/trees/")) return json({ tree: [{ type: "blob", path: "core/zz_test.mjs", sha: blobOf(body) }] });
     if (u.includes("raw.githubusercontent.com")) return new Response(body);
     return new Response("?", { status: 404 });
   };
   await assert.rejects(sup.update({ fetchImpl }), /CI engine=failure/);
   ci = [{ name: "engine", status: "completed", conclusion: "success" }];
   const target = sup.localPathFor("core/zz_test.mjs");
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, "export const v = 1;\n");
+  fs.rmSync(target, { force: true });
   try {
+    const first = await sup.update({ fetchImpl });                       // new file: installed and recorded
+    assert.equal(first.installed, true);
+    assert.equal(fs.readFileSync(target, "utf8"), body.toString());
+    body = Buffer.from("export const v = 2;\n"); head = "def5678";
+    fs.writeFileSync(target, "export const v = 1;\r\n");               // CRLF only: still what was installed
     const r = await sup.update({ fetchImpl });
     assert.equal(r.installed, true);
     assert.equal(fs.readFileSync(target, "utf8"), body.toString());
-    assert.ok(fs.readdirSync(path.join(home, "backups")).length === 1);
+    assert.ok(fs.readdirSync(path.join(home, "backups")).length >= 1);
     const again = await sup.update({ fetchImpl });
     assert.deepEqual(again.changed, [], "already up to date");
+  } finally { fs.rmSync(target, { force: true }); }
+});
+
+test("update never silently overwrites a file edited on this PC: blocks, keeps it on request, or overwrites with a backup", async () => {
+  const blobOf = (b) => crypto.createHash("sha1").update(`blob ${b.length}\0`).update(b).digest("hex");
+  let body = Buffer.from("export const w = 1;\n"), head = "aaa1111";
+  const json = (o) => new Response(JSON.stringify(o), { status: 200 });
+  const fetchImpl = async (u) => {
+    if (u.endsWith("/commits/main")) return json({ sha: head });
+    if (u.includes("/check-runs")) return json({ check_runs: [{ name: "t", status: "completed", conclusion: "success" }] });
+    if (u.includes("/git/trees/")) return json({ tree: [{ type: "blob", path: "core/zz_edit.mjs", sha: blobOf(body) }] });
+    if (u.includes("raw.githubusercontent.com")) return new Response(body);
+    return new Response("?", { status: 404 });
+  };
+  const target = sup.localPathFor("core/zz_edit.mjs");
+  fs.rmSync(target, { force: true });
+  try {
+    await sup.update({ fetchImpl });
+    const mine = "export const w = 1; // my PC edit\n";
+    fs.writeFileSync(target, mine);
+    body = Buffer.from("export const w = 2;\n"); head = "bbb2222";
+    const check = await sup.update({ fetchImpl, dryRun: true });
+    assert.deepEqual(check.localEdits, ["core/zz_edit.mjs"]);
+    const blocked = await sup.update({ fetchImpl });
+    assert.equal(blocked.installed, false);
+    assert.match(blocked.blocked, /edited on this PC/);
+    assert.equal(fs.readFileSync(target, "utf8"), mine);
+    const kept = await sup.update({ fetchImpl, keepLocal: true });
+    assert.deepEqual(kept.kept, ["core/zz_edit.mjs"]);
+    assert.equal(fs.readFileSync(target, "utf8"), mine, "local edit kept");
+    assert.equal(fs.readFileSync(path.join(kept.pending, "core", "zz_edit.mjs"), "utf8"), body.toString(), "GitHub copy saved for review");
+    assert.deepEqual((await sup.update({ fetchImpl, dryRun: true })).localEdits, ["core/zz_edit.mjs"], "still flagged later");
+    const forced = await sup.update({ fetchImpl, force: true });
+    assert.equal(fs.readFileSync(target, "utf8"), body.toString());
+    assert.equal(fs.readFileSync(path.join(forced.backup, path.relative(path.parse(target).root, target)), "utf8"), mine, "backed up first");
+    assert.deepEqual((await sup.update({ fetchImpl, dryRun: true })).localEdits, []);
   } finally { fs.rmSync(target, { force: true }); }
 });
 
