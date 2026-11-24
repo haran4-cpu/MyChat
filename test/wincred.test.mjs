@@ -18,3 +18,13 @@ test("credential reader: target goes over stdin, secret comes back in memory; no
   const missing = (c, a, o, cb) => ({ stdin: { end: () => cb(Object.assign(new Error("x"), { code: 3 }), "") } });
   assert.equal(await readCredential("nothere", { exec: missing, platform: "win32" }), null);
 });
+
+test("credential writer: target and secret go over stdin only; refuses bad input and other platforms", async () => {
+  const { writeCredential } = await import("../pc/wincred.mjs");
+  let seen;
+  const exec = (cmd, args, opts, cb) => ({ stdin: { end: (t) => { seen = { t, inArgs: args.join(" ").includes("s3cret") }; cb(null, "ok"); } } });
+  assert.equal(await writeCredential("MyChat/x", "s3cret", { exec, platform: "win32" }), true);
+  assert.equal(seen.t, "MyChat/x\ns3cret\n"); assert.equal(seen.inArgs, false);
+  assert.equal(await writeCredential("MyChat/x", "a\nb", { exec, platform: "win32" }), false);
+  assert.equal(await writeCredential("MyChat/x", "s", { exec, platform: "linux" }), false);
+});
