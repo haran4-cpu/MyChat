@@ -153,11 +153,18 @@ class Session:
         return "\n\n".join(out) or "no such messages"
 
     # ------------------------------------------------------------------
-    def run(self, text: str, max_steps: int | None = None, think: bool | None = None) -> dict:
+    def run(self, text: str, max_steps: int | None = None, think: bool | None = None, *, require_finish: bool = False) -> dict:
         """One user turn. Returns {"text", "finished", "steps"}."""
         self.add_user(text)
         self.ctx.finished = None
         self.ctx.verification.clear()
+        from .terminal import command_for, run_terminal
+        command = command_for(text, self.messages[:-1]) if "run_command" in self.tool_names else None
+        if command:
+            result = run_terminal(self.ctx, command, self.emit)
+            self.stats["tool_calls"] += 1
+            self._push({"role": "assistant", "content": result["text"]})
+            return result
         max_steps = max_steps or int(self.cfg["max_steps_per_turn"])
         think = self.cfg["think_when_acting"] if think is None else think
         last_calls: list[str] = []
@@ -179,6 +186,13 @@ class Session:
                 msg["tool_calls"] = calls
             self._push(msg)
             if not calls:
+                if require_finish and not nudged:
+                    nudged = True
+                    self._push({"role": "user", "content": (
+                        "Complete the checks and call the finish tool with concrete evidence. "
+                        "If you could not verify the deliverable, start your summary with BLOCKED."
+                    )})
+                    continue
                 if not rep.content.strip() and not nudged:
                     nudged = True
                     self._push({"role": "user", "content": "Continue: either call a tool or give your answer."})

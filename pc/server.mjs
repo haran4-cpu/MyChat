@@ -14,16 +14,22 @@ import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Gateway } from "../core/router.mjs";
-import { run, MODES } from "../core/reason.mjs";
+import { run } from "../core/reason.mjs";
 import { PROVIDERS } from "../core/providers.mjs";
 import { pkcePair, openRouterAuthUrl, openRouterExchange, detectKeys, validateKey, identifyPlainKey, CONNECT, SEARCH_KEYS, exportKeys, importKeys, transferCode, BUNDLE_PREFIX } from "../core/accounts.mjs";
 import { evaluate } from "../core/exact.mjs";
-import { respond } from "../core/assistant.mjs";
+import { respond, workspaceFollowUp } from "../core/assistant.mjs";
 import { htmlToText } from "../core/search.mjs";
 import { Search, SEARCH_PROVIDERS } from "../core/search.mjs";
 import { Ledger } from "../core/ledger.mjs";
+import { terminalRequest, prepareTerminal, terminalTicket, executeTerminal } from "./terminal.mjs";
+import { makeDocument, mission, missions, changeMission } from "./specialized.mjs";
+import { smallLocalRepair } from "./compact-repair.mjs";
+import { cloudRepairAttempts, verifiedRepair } from "./verified-repair.mjs";
+import { receiveAttachment } from "./inbox.mjs";
 import { Bench } from "./bench.mjs";
 import { nodeFs } from "./agentfs.mjs";
+import { workspaceReader } from "../core/agent.mjs";
 import { checkPage } from "./pagecheck.mjs";
 import { skillSearch, skillLoad } from "./skills.mjs";
 import { captureScreen, askImage } from "./see.mjs";
@@ -80,7 +86,13 @@ build();
 const saveState = () => { try { writeJson("stats.json", gw.stats.toJSON()); writeJson("gateway-state.json", gw.exportState()); } catch { /* ignore */ } };
 setInterval(saveState, 30000).unref();
 
-const MODEL_IDS = [...Object.keys(MODES).map((m) => "mychat/" + m), "mychat/private"];
+const { createPlanConnector } = await import("./chatgpt-plan.mjs");
+const planConnection = createPlanConnector(HOME);
+const PLAN_PREFIX = "mychat/chatgpt-plan/";
+const { createCopilotConnector } = await import("./copilot-plan.mjs");
+const copilotConnection = createCopilotConnector(HOME);
+const COPILOT_PREFIX = "mychat/github-copilot/";
+const MODEL_IDS = ["mychat/auto", "mychat/max", "mychat/private"];
 const truthFor = (privateData) => (privateData ? undefined : { search, ledger });
 
 function send(res, code, obj, headers = {}) {
@@ -89,6 +101,7 @@ function send(res, code, obj, headers = {}) {
 }
 function body(req, max = 20e6) {
   return new Promise((ok, bad) => {
+    req.setEncoding("utf8");
     let s = "";
     req.on("data", (c) => { s += c; if (s.length > max) { bad(new Error("too large")); req.destroy(); } });
     req.on("end", () => { try { ok(s ? JSON.parse(s) : {}); } catch (e) { bad(e); } });
@@ -117,6 +130,10 @@ const seeHost = () => async (img, q) => {
   if (img !== "screen" && !f.startsWith(path.resolve(F("runs")) + path.sep)) throw new Error("look only at the screen or at run screenshots");
   try { return await askImage(gw, f, q); } finally { if (img === "screen") fs.rm(f, () => {}); }
 };
+const terminalHost = root => ({
+  terminalRequest,
+  proposeCommand: command => prepareTerminal(root, command, PORT)
+});
 const hostTools = () => ({ search, skills: SKILLS, see: seeHost(), evaluate: (e) => evaluate(e).toString(12),
   fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } });
 /** Any folder on the PC can be the working folder: named in the message (C:\\…, a file means its folder), or the one
@@ -138,11 +155,49 @@ function folderFromText(text) {
   return null;
 }
 const chatRoot = (text) => folderFromText(text) || agentRoots()[Number(settings.chatRoot) || 0] || agentRoots()[0];
+function isPrivateFolder(folder) {
+  if (!folder) return false;
+  const actual = fs.realpathSync(folder);
+  return agentRoots().some(r => {
+    if (!r.private || !fs.existsSync(r.path)) return false;
+    const rel = path.relative(fs.realpathSync(r.path), actual);
+    return rel === "" || (rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel));
+  });
+}
 async function brainRun(oreq, opts) {
-  if (oreq.tools?.length || oreq.response_format || settings.oneBrain === false) return run(gw, oreq, opts);
-  const root = chatRoot(lastText(oreq.messages));
-  const r = await respond(gw, { ...opts, messages: oreq.messages, fs: root ? nodeFs(root.path) : null,
-    memory: root ? agentMemory(root.path) : null, tools: { ...hostTools(), ...(root ? { runPage: pageRunner(root.path) } : {}) }, privateData: opts.privateData || root?.private,
+  if (/^\/(?:capabilities|mission|documents)$/i.test(lastText(oreq.messages).trim())) {
+    const content = [
+      "אפשר לעבוד על קבצים ופרויקטים מתוך השיחה. רשימת קבצים: `/ls`. הצעת פקודה לאישור: `/terminal echo ready`.",
+      "- [תיקון עם תצוגה מקדימה ובדיקות מקומיות](http://127.0.0.1:" + PORT + "/#agent)",
+      "- [פקודות ומעקב אחרי ביצוע](http://127.0.0.1:" + PORT + "/#terminal)",
+      "- [מסמכים ומשימות ארוכות מתוך MyChat](http://127.0.0.1:" + PORT + "/#work)",
+      opts.privateData ? "מצב מקומי משתמש ב־Ollama. חיפוש אינטרנט וניתוח תמונה בענן אינם זמינים במצב זה." : "חיפוש אינטרנט וניתוח חזותי זמינים כשהספקים המתאימים עונים.",
+    ].join("\n\n");
+    opts.onDelta?.(content);
+    return {content,mode:"capabilities",trace:[{step:"features",by:"MyChat gateway"}]};
+  }
+  const root = chatRoot(workspaceFollowUp(oreq.messages) || lastText(oreq.messages));
+  const request = lastText(oreq.messages).match(/^\/read-attachment[ \t]+([^\r\n]{1,250})\r?\n\r?\n\(Attached files, saved in the working folder: (Inbox\/\d{4}-\d\d-\d\d\/[^\r\n/]+?\.(?:apk|zip|jar))\)$/i);
+  if (request && root) {
+    const [, member, archive] = request;
+    const reader = workspaceReader(nodeFs(root.path));
+    let content;
+    try {
+      const value = await reader.text(archive + "!/" + member.trim());
+      content = value === null ? "The archive member is binary." : value.slice(0, 6000);
+      if (value?.length > 6000) content += "\n[Preview truncated]";
+    } catch (error) {
+      content = "Could not read the attached archive member: " + error.message;
+    }
+    opts.onDelta?.(content);
+    return {content, mode:"archive", trace:[{step:"archive", by:"MyChat local archive reader"}]};
+  }
+  const privateData = Boolean(opts.privateData || root?.private || isPrivateFolder(root?.path));
+  const engine = privateData ? await localGateway() : gw;
+  opts = { ...opts, privateData, truth: privateData ? undefined : opts.truth };
+  if (oreq.tools?.length || oreq.response_format || settings.oneBrain === false) return run(engine, oreq, opts);
+  const r = await respond(engine, { ...opts, messages: oreq.messages, fs: root ? nodeFs(root.path) : null,
+    memory: root ? agentMemory(root.path) : null, tools: { ...hostTools(), ...(root ? { runPage: pageRunner(root.path), ...terminalHost(root.path) } : {}) }, privateData: opts.privateData || root?.private,
     onStep: (st) => opts.onStatus?.(st.kind === "tool" ? `🔧 ${st.tool} ${JSON.stringify(st.args || {}).slice(0, 90)}` : String(st.text || "").slice(0, 160)) });
   if (r.ops?.length) {
     agentSave("plan", r.planId, { id: r.planId, goal: lastText(oreq.messages), ops: r.ops, preview: r.preview, root: root.path, rootIndex: Number(settings.chatRoot) || 0, at: Date.now(), answer: r.content });
@@ -157,9 +212,11 @@ const lastText = (msgs) => { for (let i = msgs.length - 1; i >= 0; i--) if (msgs
 // ---------------------------------------------------------------- jobs: work that outlives the connection
 // The phone starts a job and polls it; if the phone sleeps or loses Wi-Fi, the PC keeps working and keeps the result.
 const jobs = new Map();
+const saveJob = (job) => writeJson(path.join("agent", job.id + ".json"), job);
 function startJob(b) {
   const id = "job-" + newIdLocal();
   const job = { id, status: "running", at: Date.now(), content: "", steps: [], statusLine: "", mode: b.mode || "auto" };
+  saveJob(job);
   jobs.set(id, job);
   const oreq = { messages: Array.isArray(b.messages) ? b.messages : [] };
   brainRun(oreq, { mode: job.mode, privateData: b.mode === "private", truth: truthFor(false),
@@ -170,17 +227,25 @@ function startJob(b) {
       Object.assign(job, { status: "done", content: r.content, result: { mode: r.mode, route: r.route, trace: r.trace, claims: r.claims, sources: r.sources, ops: r.ops, planId: r.planId, preview: r.preview, checks, checked: r.checked } });
     })
     .catch((e) => Object.assign(job, { status: "error", error: e.message, detail: e.detail }))
-    .finally(() => { job.ended = Date.now(); try { fs.writeFileSync(path.join(AGENT_DIR, id + ".json"), JSON.stringify(job)); } catch { /* ignore */ } });
+    .finally(() => {
+      job.ended = Date.now();
+      try { saveJob(job); } catch (error) { console.warn("Could not persist MyChat job", id, error.code); }
+    });
   for (const [k, j] of jobs) if (j.ended && Date.now() - j.ended > 24 * 3600e3) jobs.delete(k);
   return job;
 }
 const newIdLocal = () => Date.now().toString(36) + crypto.randomBytes(3).toString("hex");
 function getJob(id) {
   if (jobs.has(id)) return jobs.get(id);
-  try { return JSON.parse(fs.readFileSync(path.join(AGENT_DIR, String(id).replace(/[^\w-]/g, "") + ".json"), "utf8")); } catch { return null; }
+  if (!/^job-[a-z0-9]+$/.test(id)) return null;
+  const saved = readJson(path.join("agent", id + ".json"), null);
+  if (saved?.status === "running") {
+    return { ...saved, status: "error", error: "The PC gateway restarted before the task completed. Run the request again." };
+  }
+  return saved;
 }
 
-async function completions(req, res) {
+async function completions(req, res, allowPlan = false) {
   const b = await body(req);
   const name = String(b.model || "mychat/auto").replace(/^mychat\//, "");
   const privateData = name === "private";
@@ -191,14 +256,18 @@ async function completions(req, res) {
   const opts = { mode, privateData, signal: ctl.signal, truth: truthFor(privateData) };
   const oreq = { messages: b.messages || [], tools: b.tools, tool_choice: b.tool_choice, temperature: b.temperature,
                  max_tokens: b.max_tokens, response_format: b.response_format };
-  if (privateData) {
-    // private: only the local model sees this conversation
-    const r = await gwLocalOnly(oreq, b.stream, res, id, created, b.model);
-    return r;
-  }
+  const requested = String(b.model || "");
+  const githubModel = requested.startsWith(COPILOT_PREFIX);
+  const accountModel = githubModel || requested.startsWith(PLAN_PREFIX);
+  if (accountModel && !allowPlan) return send(res, 403, {error:{message:"Account-backed models are only available on this PC"}});
+  const answer = (options) => accountModel
+    ? githubModel
+      ? copilotConnection.answer(requested.slice(COPILOT_PREFIX.length), oreq, options)
+      : planConnection.answer(requested.slice(PLAN_PREFIX.length), oreq, options)
+    : brainRun(oreq, options);
   if (!b.stream) {
     try {
-      const r = await brainRun(oreq, opts);
+      const r = await answer(opts);
       return send(res, 200, { id, object: "chat.completion", created, model: b.model,
         choices: [{ index: 0, finish_reason: r.tool_calls?.length ? "tool_calls" : "stop",
                     message: { role: "assistant", content: r.content, ...(r.tool_calls?.length ? { tool_calls: r.tool_calls } : {}) } }],
@@ -213,7 +282,7 @@ async function completions(req, res) {
   chunk({ role: "assistant" });
   const tick = setInterval(() => res.write(": keep-alive\n\n"), 15000);
   try {
-    const r = await brainRun(oreq, { ...opts, onDelta: (t) => chunk({ content: t }),
+    const r = await answer({ ...opts, onDelta: (t) => chunk({ content: t }),
                                    onStatus: (s) => chunk({ reasoning_content: s + "\n" }) });
     const who = (r.trace || []).map((t) => t.by ? `${t.step}: ${t.by}` : t.step).join(" · ");
     if (who) chunk({ reasoning_content: `\n[${r.mode}] ${who}\n` });
@@ -228,22 +297,17 @@ async function completions(req, res) {
   }
 }
 
-async function gwLocalOnly(oreq, stream, res, id, created, model) {
-  const local = new Gateway({ keys: {}, allowKeyless: false, allowLocal: true });
+async function localGateway() {
+  const local = new Gateway({ keys: {}, allowKeyless: false, allowLocal: true,
+    fetch(url, options) {
+      if (new URL(url).origin !== "http://127.0.0.1:11434") throw new Error("Private requests require local Ollama.");
+      return fetch(url, { ...options, redirect: "error" });
+    }
+  });
+  local.providers = { ollama: PROVIDERS.ollama };
   local.stats = gw.stats;
   await local.refreshModels();
-  if (!stream) {
-    try {
-      const r = await local.chat(oreq, { privateData: true });
-      return send(res, 200, { id, object: "chat.completion", created, model, choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: r.content } }] });
-    } catch (e) { return send(res, 502, { error: { message: e.message } }); }
-  }
-  res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
-  const chunk = (delta, finish = null) => res.write("data: " + JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: finish }] }) + "\n\n");
-  try { await local.chat(oreq, { privateData: true, onDelta: (t) => chunk({ content: t }) }); chunk({}, "stop"); }
-  catch (e) { chunk({ content: "\n\n**Local model:** " + e.message }, "stop"); }
-  res.write("data: [DONE]\n\n");
-  res.end();
+  return local;
 }
 
 const pendingOAuth = new Map(); // nonce -> { verifier, at }
@@ -283,7 +347,7 @@ ${flash ? `<div class=flash>${flash}</div>` : ""}
 <div class=s>The provider is recognised automatically, the key is checked live, and stored only on this PC. Several keys at once are fine.</div>
 <textarea id=t placeholder="AIza… · nvapi-… · gsk_… · sk-or-… · sk-ant-… · hf_…"></textarea><button class=btn onclick="paste(t.value)">Add</button><div id=out></div></div>
 <div class=card style="margin:12px 0"><div class=h><b>Use MyChat inside Open WebUI</b></div>
-<div class=s>Open WebUI → Admin Panel → Settings → Connections → OpenAI API → <b>+</b>. URL: <code>http://127.0.0.1:${PORT}/v1</code> · Key: the MyChat key (button below). The models mychat/auto, max, consensus, verified, fast and private then appear in the model list.</div>
+<div class=s>Open WebUI → Admin Panel → Settings → Connections → OpenAI API → <b>+</b>. URL: <code>http://127.0.0.1:${PORT}/v1</code> · Key: the MyChat key (button below). The three profiles appear in the chat picker: Assistant, Deep and Local.</div>
 <div class=a><button class=btn onclick="navigator.clipboard.writeText(T).then(()=>{cp.textContent='✓ copied'})" id=cp>Copy MyChat key</button>
 <button class="btn ghost" onclick="navigator.clipboard.writeText('http://127.0.0.1:${PORT}/v1').then(()=>{cu.textContent='✓ copied'})" id=cu>Copy URL</button></div></div>
 <div class=card style="margin:12px 0"><div class=h><b>Measure my models</b><span class=off id=bst></span></div>
@@ -353,6 +417,11 @@ function agentHistory(n = 30) {
     .map((j) => ({ id: j.id, goal: j.goal, summary: j.summary, at: j.at, root: j.root, steps: j.steps.length, error: j.error, undone: !!j.undone }));
 }
 async function agentRoute(req, res, url) {
+  if (req.method === "POST" && url.pathname === "/agent/inbox/upload") {
+    const root = url.searchParams.has("root") ? rootAt(url.searchParams.get("root")) : chatRoot("");
+    try { return send(res, 200, await receiveAttachment(req, root.path, url.searchParams.get("name"))); }
+    catch (e) { return send(res, 400, { error: { message: e.message } }); }
+  }
   const b = req.method === "POST" ? await body(req, url.pathname === "/agent/inbox" ? 85e6 : 20e6) : {};
   if (url.pathname === "/agent/roots") {
     if (req.method === "POST") {
@@ -387,12 +456,33 @@ async function agentRoute(req, res, url) {
   }
   if (url.pathname === "/agent/tree") return send(res, 200, { tree: await agentTree(nodeFs(rootAt(url.searchParams.get("root")).path)) });
   if (url.pathname === "/agent/plan" && req.method === "POST") {
-    const named = folderFromText(b.goal);
+    const named = b.verifiedRepair ? null : folderFromText(b.goal);
     const root = named || (typeof b.root === "string" && /[\\/]/.test(b.root) && fs.existsSync(b.root) && !FORBIDDEN_ROOT(b.root) ? { path: path.resolve(b.root), private: false } : rootAt(b.root ?? settings.chatRoot));
     const afs = nodeFs(root.path);
-    const p = await agentPlan(gw, { goal: String(b.goal || "").slice(0, 4000), fs: afs, privateData: root.private, history: Array.isArray(b.history) ? b.history.slice(-8) : [], memory: agentMemory(root.path),
+    const privateData = Boolean(root.private || b.private === true || isPrivateFolder(root.path));
+    const controller = new AbortController();
+    res.on("close", () => { if (!res.writableEnded) controller.abort(); });
+    const options = { signal: controller.signal, goal: String(b.goal || "").slice(0, 4000), fs: afs, ...terminalHost(root.path), privateData, history: Array.isArray(b.history) ? b.history.slice(-8) : [], memory: agentMemory(root.path),
       search, skills: SKILLS, see: seeHost(), evaluate: (e) => evaluate(e).toString(12), runPage: pageRunner(root.path),
-      fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } });
+      fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } };
+    if (b.verifiedRepair) {
+      if (privateData || req.socket.localPort !== server.address()?.port) {
+        return send(res, 403, {error:{message:"Verified cloud repair is available only on this PC and for non-private folders."}});
+      }
+      try {
+        const verified = await verifiedRepair({...b.verifiedRepair, goal:options.goal, fs:afs, signal:controller.signal,
+          validate:validateJavaScript, attempts:cloudRepairAttempts(gw), allowFile:rel=>!isPrivateFolder(path.resolve(root.path,rel))});
+        verified.root = root.path;
+        verified.rootIndex = Number(b.root) || 0;
+        if (verified.ops.length) agentSave("plan",verified.id,verified);
+        return send(res,200,await reviewPlan(verified));
+      } catch(error) {
+        return send(res,400,{error:{message:error.message}});
+      }
+    }
+    const engine = privateData ? await localGateway() : gw;
+    const compact = privateData ? await smallLocalRepair(engine, options) : null;
+    const p = compact || await agentPlan(engine, options);
     p.root = root.path; p.rootIndex = Number(b.root) || 0;
     p.preview = await agentPreview(afs, p.ops);
     agentSave("plan", p.id, p);
@@ -582,12 +672,45 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (!authed(req)) return send(res, 401, { error: { message: "MyChat token required (file 'token' in " + HOME + ")" } });
-    if (req.method === "GET" && url.pathname === "/v1/models") {
-      return send(res, 200, { object: "list", data: MODEL_IDS.map((id) => ({ id, object: "model", owned_by: "mychat",
-        name: { "mychat/auto": "MyChat Auto", "mychat/max": "MyChat Max (draft · review · revise)", "mychat/consensus": "MyChat Consensus (3 families)",
-                "mychat/fast": "MyChat Fast", "mychat/verified": "MyChat Verified (Truth Engine)", "mychat/private": "MyChat Private (local only)" }[id] })) });
+    if (url.pathname === "/github-copilot" && req.method === "GET") return send(res, 200, await copilotConnection.inspect());
+    if (url.pathname === "/github-copilot" && req.method === "POST") {
+      const action = (await body(req)).action;
+      try {
+        if (action === "connect") return send(res, 200, await copilotConnection.start());
+        if (action === "cancel") { await copilotConnection.cancel(); return send(res, 200, {ok:true}); }
+        return send(res, 400, {error:{message:"Unknown Copilot connection action"}});
+      } catch (error) {
+        return send(res, 409, {error:{message:error.message}});
+      }
     }
-    if (req.method === "POST" && url.pathname === "/v1/chat/completions") return await completions(req, res);
+    if (url.pathname === "/chatgpt-plan" && req.method === "GET") {
+      const session = await planConnection.status();
+      let models = [];
+      if (session.sharing) {
+        try { models = await planConnection.models(); } catch (error) { session.error = error.message; }
+      }
+      return send(res, 200, { ...session, models });
+    }
+    if (url.pathname === "/chatgpt-plan" && req.method === "POST") {
+      const action = (await body(req)).action;
+      try {
+        if (action === "connect") return send(res, 200, await planConnection.start());
+        if (action === "disconnect") return send(res, 200, await planConnection.disconnect());
+        if (action === "cancel") { await planConnection.cancel(); return send(res, 200, {ok:true}); }
+        return send(res, 400, {error:{message:"Unknown ChatGPT connection action"}});
+      } catch (error) {
+        return send(res, 409, {error:{message:error.message}});
+      }
+    }
+    if (req.method === "GET" && url.pathname === "/v1/models") {
+      const [extra, copilot] = url.searchParams.get("advanced") === "1" && req.socket.localPort === server.address()?.port
+        ? await Promise.all([planConnection.models().catch(() => []), copilotConnection.inspect()])
+        : [[], {models:[]}];
+      return send(res, 200, { object: "list", data: [...MODEL_IDS.map((id) => ({ id, object: "model", owned_by: "mychat",
+        name: { "mychat/auto": "MyChat · Assistant", "mychat/max": "MyChat · Deep", "mychat/private": "MyChat · Local" }[id] })), ...extra.map(m => ({id:PLAN_PREFIX+m.slug, object:"model", owned_by:"chatgpt-plan", name:m.displayName})),
+        ...copilot.models.map(m=>({id:COPILOT_PREFIX+m.slug, object:"model", owned_by:"github-copilot", name:"GitHub Copilot · "+m.displayName}))] });
+    }
+    if (req.method === "POST" && url.pathname === "/v1/chat/completions") return await completions(req, res, req.socket.localPort === server.address()?.port);
     if (req.method === "GET" && url.pathname === "/status") return send(res, 200, gw.status());
     if (req.method === "POST" && url.pathname === "/bench/start") {
       const b = await body(req);
@@ -598,6 +721,24 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { running: st.running, total: st.total });
     }
     if (req.method === "POST" && url.pathname === "/bench/stop") return send(res, 200, bench ? bench.stop() : { running: false });
+    if (url.pathname.startsWith("/specialized/")) {
+      if (req.socket.localPort !== server.address()?.port) return send(res,403,{error:{message:"This tool runs on the PC only."}});
+      try {
+        if (req.method==="POST" && url.pathname==="/specialized/document") return send(res,200,await makeDocument(await body(req,150000)));
+        if (url.pathname==="/specialized/missions") {
+          if(req.method==="GET") return send(res,200,url.searchParams.has("id")?await mission(url.searchParams.get("id")):await missions());
+          if(req.method==="POST") return send(res,200,await changeMission(await body(req,12000)));
+        }
+        return send(res,404,{error:{message:"Tool not found."}});
+      } catch(error) { return send(res,400,{error:{message:error.message}}); }
+    }
+    if (url.pathname === "/system/terminal") {
+      if (req.method === "GET") return send(res, 200, terminalTicket(url.searchParams.get("id")));
+      if (req.method !== "POST") return send(res, 405, {});
+      const b = await body(req);
+      if (b.approve === true) return send(res, 200, await executeTerminal(String(b.id)));
+      return send(res, 200, prepareTerminal(rootAt(b.root ?? settings.chatRoot).path, b.command, PORT));
+    }
     if (url.pathname.startsWith("/agent/")) {
       const changesFiles = req.method === "POST" && ["/agent/apply", "/agent/undo"].includes(url.pathname);
       if (!changesFiles) return await agentRoute(req, res, url);

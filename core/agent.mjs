@@ -103,6 +103,7 @@ export const TOOL_DOCS = {
   calc: ["{\"expression\":\"(17.5/100)*2480\"}", "exact arithmetic"],
   web_search: ["{\"query\":\"...\"}", "web results with excerpts"],
   fetch: ["{\"url\":\"https://...\"}", "a web page as text"],
+  propose_command: ['{"command":"command line"}', "prepare a Windows terminal command in the current folder for the person to review and run on the PC. For terminal tasks use this tool; show pending approval until execution returns output."],
   outline: ["{\"path\":\"file\"}", "a parser-built map of a code file: every function/class/method with its exact line range, event handlers, element ids — read this FIRST for big files, then read only the ranges you need"],
   run_page: ["{\"path\":\"app.html\",\"clicks\":1,\"expectedText\":{\"selector\":\"#result\",\"text\":\"1\"}}", "Runs an HTML app in a headless browser. Reports load/click errors. Optional expectedText checks the selected text after the requested number of clicks against a value derived from the user's requirement."],
   compare: ["{\"a\":\"older file/folder/zip\",\"b\":\"newer one\"}", "what REALLY changed between two versions: files added/removed/changed, functions added/removed/rewritten (computed, not guessed). Use it to check a handoff's claims (\"fixed X\") against the facts; with run_page on both versions you also see which errors appeared or disappeared"],
@@ -169,9 +170,16 @@ export function workspaceReader(fs) {
  * host = { search?: Search, fetchText?(url), runJs?(code), privateData?, onStep?(step) }
  * Returns { id, goal, answer, summary, ops, rejected, steps, by, calls, reads, at }.
  */
-export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, search, fetchText, runJs, runPage, skills, see, noChallenge = false, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
+export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, terminalRequest, proposeCommand, search, fetchText, runJs, runPage, skills, see, noChallenge = false, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
+  const direct = terminalRequest?.(goal);
+  if (direct && proposeCommand) {
+    const terminal = proposeCommand(direct);
+    const answer = "מוכן לאישור במחשב. [הצג פקודה והפעל](" + terminal.url + ")";
+    return { id: newId(), goal, answer, summary: answer, terminal, ops: [], rejected: [], steps: [], by: "MyChat Terminal", calls: 0, reads: [], at: Date.now() };
+  }
+  let terminal;
   const reader = workspaceReader(fs);
-  const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate) && (t !== "run_page" || runPage) && (!t.startsWith("skill_") || skills) && (t !== "look" || (see && !privateData)));
+  const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "propose_command" || proposeCommand) && (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate) && (t !== "run_page" || runPage) && (!t.startsWith("skill_") || skills) && (t !== "look" || (see && !privateData)));
   const sys = SYS.replace("__TOOLS__", avail.map((t) => `  ${t} ${TOOL_DOCS[t][0]} — ${TOOL_DOCS[t][1]}`).join("\n")) + (REVIEW_RX.test(goal) ? REVIEW_GUIDE : "");
   const { workspaceMap } = await import("./projects.mjs");
   const [map, listing] = await Promise.all([workspaceMap(fs).catch(() => ""), tree(fs, { maxEntries: 150, maxDepth: 2 })]);
@@ -191,7 +199,10 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   const msgs = [{ role: "system", content: sys }, ...history.slice(-8),
     { role: "user", content: `WORKSPACE MAP:\n${map}\n\nTOP LEVELS:\n${listing}\n${mem ? `\nMEMORY FROM EARLIER TASKS (may be outdated; verify before relying on it):\n${mem}\n` : ""}${planText ? `\nPLAN FROM A PLANNING MODEL (follow it unless the files show it is wrong):\n${planText}\n` : ""}\nREQUEST:\n${goal}` }];
   const done = new Map();
-  let repeats = 0;
+  let repeats = 0, requestedPatch = false;
+  const errors = new Map();
+  const readOnly = new Set(["fetch", "web_search", "read", "tree", "outline", "find", "search"]);
+  const wantsPatch = /(?:propose|implement|apply|make|supply) (?:the |a )?(?:smallest |source |code )*(?:fix|patch|edit)|^(?:please )?(?:fix|repair)\b|^(?:תקן|תתקן|יישם תיקון)/i.test(goal);
   const steps = [], reads = new Set(), seen = new Map();   // seen: path -> full text of every file it read (for checking its claims)
   let checked = null, repaired = false, unreadAsked = false, challenged = null, challengeRounds = 0, disproved = [], runAsked = false, lookAsked = false, langAsked = false, namedAsked = false;
   const observed = new Set();
@@ -218,99 +229,101 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
       return `That change is not valid (${name} ${args.path}): check the path and fields.`;
     }
     if (!avail.includes(name)) return `unknown tool "${name}". Available: ${avail.join(", ")}`;
-    try {
-      if (name === "tree") {
-        if (args.path && /\.(zip|apk|jar)(!\/|$)/i.test(args.path)) return (await reader.files(args.path, { limit: 400 })).map((f) => `${f.path}  (${fmtSize(f.size)})`).join("\n") || "(empty)";
-        const sub = args.path ? safeRel(args.path) : "";
-        if (args.path && !sub) return "unsafe path";
-        if (sub) { let ok = true; try { ok = (await fs.list(sub)).length > 0 || !!(await fs.exists?.(sub)); } catch { ok = false; }
-          if (!ok) { const h = await didYouMean(sub); if (h) return `${sub}: no such folder.` + h; } }
-        return await tree(sub ? subFs(fs, sub) : fs, { maxEntries: 400, maxDepth: 5 });
+    if (name === "tree") {
+      if (args.path && /\.(zip|apk|jar)(!\/|$)/i.test(args.path)) return (await reader.files(args.path, { limit: 400 })).map((f) => `${f.path}  (${fmtSize(f.size)})`).join("\n") || "(empty)";
+      const sub = args.path ? safeRel(args.path) : "";
+      if (args.path && !sub) return "unsafe path";
+      if (sub) { let ok = true; try { ok = (await fs.list(sub)).length > 0 || !!(await fs.exists?.(sub)); } catch { ok = false; }
+        if (!ok) { const h = await didYouMean(sub); if (h) return `${sub}: no such folder.` + h; } }
+      return await tree(sub ? subFs(fs, sub) : fs, { maxEntries: 400, maxDepth: 5 });
+    }
+    if (name === "propose_command") {
+      terminal = proposeCommand(args.command);
+      return "Awaiting user approval in MyChat Terminal: " + terminal.url;
+    }
+    if (name === "outline") {
+      const t = await reader.text(args.path);
+      if (t == null) return `${args.path}: not found or not a text file` + await didYouMean(args.path);
+      const { outline, outlineText } = await import("./codemap.mjs");
+      reads.add(args.path); seen.set(args.path, t);   // the map is built from the whole file: citations into it are checkable
+      return `MAP of ${args.path} (built by a parser from the whole file, not guessed):\n` + outlineText(outline(t, args.path), 400);
+    }
+    if (name === "compare") {
+      const { compareVersions } = await import("./versions.mjs");
+      const r = await compareVersions(reader, String(args.a || ""), String(args.b || ""));
+      for (const m of r.text.matchAll(/[\w.-]+\.\w{2,12}/g)) observed.add(m[0].toLowerCase());
+      return r.text;
+    }
+    if (name === "look") {
+      const what = String(args.image || "last_run");
+      // the screen only when the person asked about it — never on the model's own initiative
+      if (what === "screen" && !/screen|מסך|צילום|screenshot|display|desktop|שולחן העבודה/i.test(goal)) return "Not allowed: look at the screen only when the person asks about their screen.";
+      const img = what === "last_run" ? lastShot : what;
+      if (!img) return "No run screenshot yet — use run_page first.";
+      onStep({ kind: "status", text: what === "screen" ? "Looking at your screen…" : "Looking at the picture…" });
+      return String(await see(img, String(args.question || "")));
+    }
+    if (name === "skill_search") return String(skills.search(String(args.query || goal)));
+    if (name === "skill_load") return String(skills.load(String(args.id || "")));
+    if (name === "run_page") {
+      if (!/\.html?$/i.test(String(args.path || ""))) return "run_page needs an .html file";
+      onStep({ kind: "status", text: `Running ${args.path} in a headless browser…` });
+      const rr = await runPage(String(args.path), { clicks: args.clicks, expectedText: args.expectedText });
+      if (rr.shots?.length) lastShot = rr.shots.at(-1);
+      const out = String(rr.text);
+      for (const m of out.matchAll(/[\w.-]+\.\w{2,12}/g)) observed.add(m[0].toLowerCase());
+      return out;
+    }
+    if (name === "read") {
+      const t = await reader.text(args.path);
+      if (t == null) return `${args.path}: not found or not a text file` + await didYouMean(args.path);
+      reads.add(args.path); seen.set(args.path, t);
+      const lines = t.split("\n"), from = Math.max(1, Number(args.from) || 1), to = Math.min(lines.length, Number(args.to) || from + 1499);
+      return `${args.path} — lines ${from}-${to} of ${lines.length}\n` + lines.slice(from - 1, to).map((l, i) => `${from + i}| ${l}`).join("\n");
+    }
+    if (name === "find") {
+      const terms = String(args.query || "").toLowerCase().match(/[\p{L}\p{N}_]{3,}/gu) || [];
+      if (!terms.length) return "give some words to look for";
+      const scored = [];
+      for (const f of await reader.files(args.path || "", { limit: 3000 })) {
+        if (f.size > 2_000_000 || !isText(f.path.split("!/").pop())) continue;
+        const t = await reader.text(f.path).catch(() => null);
+        if (!t) continue;
+        const low = t.toLowerCase(), pathLow = f.path.toLowerCase();
+        let score = 0;
+        for (const w of terms) { const n = low.split(w).length - 1; if (n) score += 1 + Math.log(1 + n); if (pathLow.includes(w)) score += 2; }
+        if (!score) continue;
+        const lines = t.split("\n").map((l, i) => [i + 1, l, terms.filter((w) => l.toLowerCase().includes(w)).length]).filter((x) => x[2]).sort((a, b) => b[2] - a[2]).slice(0, 3);
+        scored.push([score / Math.log(3 + t.length / 2000), f.path, lines]);
       }
-      if (name === "outline") {
-        const t = await reader.text(args.path);
-        if (t == null) return `${args.path}: not found or not a text file` + await didYouMean(args.path);
-        const { outline, outlineText } = await import("./codemap.mjs");
-        reads.add(args.path); seen.set(args.path, t);   // the map is built from the whole file: citations into it are checkable
-        return `MAP of ${args.path} (built by a parser from the whole file, not guessed):\n` + outlineText(outline(t, args.path), 400);
+      scored.sort((a, b) => b[0] - a[0]);
+      return scored.slice(0, 10).map(([, p, ls]) => `${p}\n` + ls.map(([n, l]) => `  ${n}: ${l.trim().slice(0, 160)}`).join("\n")).join("\n") || "nothing matches";
+    }
+    if (name === "search") {
+      const rx = new RegExp(String(args.pattern || ""), "i"), hits = [];
+      for (const f of await reader.files(args.path || "", { limit: 2000 })) {
+        if (f.size > 2_000_000 || !isText(f.path.split("!/").pop())) continue;
+        const t = await reader.text(f.path).catch(() => null);
+        if (!t) continue;
+        t.split("\n").forEach((l, i) => { if (hits.length < 60 && rx.test(l)) hits.push(`${f.path}:${i + 1}: ${l.trim().slice(0, 200)}`); });
+        if (hits.length >= 60) break;
       }
-      if (name === "compare") {
-        const { compareVersions } = await import("./versions.mjs");
-        const r = await compareVersions(reader, String(args.a || ""), String(args.b || ""));
-        for (const m of r.text.matchAll(/[\w.-]+\.\w{2,12}/g)) observed.add(m[0].toLowerCase());
-        return r.text;
-      }
-      if (name === "look") {
-        const what = String(args.image || "last_run");
-        // the screen only when the person asked about it — never on the model's own initiative
-        if (what === "screen" && !/screen|מסך|צילום|screenshot|display|desktop|שולחן העבודה/i.test(goal)) return "Not allowed: look at the screen only when the person asks about their screen.";
-        const img = what === "last_run" ? lastShot : what;
-        if (!img) return "No run screenshot yet — use run_page first.";
-        onStep({ kind: "status", text: what === "screen" ? "Looking at your screen…" : "Looking at the picture…" });
-        return String(await see(img, String(args.question || "")));
-      }
-      if (name === "skill_search") return String(skills.search(String(args.query || goal)));
-      if (name === "skill_load") return String(skills.load(String(args.id || "")));
-      if (name === "run_page") {
-        if (!/\.html?$/i.test(String(args.path || ""))) return "run_page needs an .html file";
-        onStep({ kind: "status", text: `Running ${args.path} in a headless browser…` });
-        const rr = await runPage(String(args.path), { clicks: args.clicks, expectedText: args.expectedText });
-        if (rr.shots?.length) lastShot = rr.shots.at(-1);
-        const out = String(rr.text);
-        for (const m of out.matchAll(/[\w.-]+\.\w{2,12}/g)) observed.add(m[0].toLowerCase());
-        return out;
-      }
-      if (name === "read") {
-        const t = await reader.text(args.path);
-        if (t == null) return `${args.path}: not found or not a text file` + await didYouMean(args.path);
-        reads.add(args.path); seen.set(args.path, t);
-        const lines = t.split("\n"), from = Math.max(1, Number(args.from) || 1), to = Math.min(lines.length, Number(args.to) || from + 1499);
-        return `${args.path} — lines ${from}-${to} of ${lines.length}\n` + lines.slice(from - 1, to).map((l, i) => `${from + i}| ${l}`).join("\n");
-      }
-      if (name === "find") {
-        const terms = String(args.query || "").toLowerCase().match(/[\p{L}\p{N}_]{3,}/gu) || [];
-        if (!terms.length) return "give some words to look for";
-        const scored = [];
-        for (const f of await reader.files(args.path || "", { limit: 3000 })) {
-          if (f.size > 2_000_000 || !isText(f.path.split("!/").pop())) continue;
-          const t = await reader.text(f.path).catch(() => null);
-          if (!t) continue;
-          const low = t.toLowerCase(), pathLow = f.path.toLowerCase();
-          let score = 0;
-          for (const w of terms) { const n = low.split(w).length - 1; if (n) score += 1 + Math.log(1 + n); if (pathLow.includes(w)) score += 2; }
-          if (!score) continue;
-          const lines = t.split("\n").map((l, i) => [i + 1, l, terms.filter((w) => l.toLowerCase().includes(w)).length]).filter((x) => x[2]).sort((a, b) => b[2] - a[2]).slice(0, 3);
-          scored.push([score / Math.log(3 + t.length / 2000), f.path, lines]);
-        }
-        scored.sort((a, b) => b[0] - a[0]);
-        return scored.slice(0, 10).map(([, p, ls]) => `${p}\n` + ls.map(([n, l]) => `  ${n}: ${l.trim().slice(0, 160)}`).join("\n")).join("\n") || "nothing matches";
-      }
-      if (name === "search") {
-        const rx = new RegExp(String(args.pattern || ""), "i"), hits = [];
-        for (const f of await reader.files(args.path || "", { limit: 2000 })) {
-          if (f.size > 2_000_000 || !isText(f.path.split("!/").pop())) continue;
-          const t = await reader.text(f.path).catch(() => null);
-          if (!t) continue;
-          t.split("\n").forEach((l, i) => { if (hits.length < 60 && rx.test(l)) hits.push(`${f.path}:${i + 1}: ${l.trim().slice(0, 200)}`); });
-          if (hits.length >= 60) break;
-        }
-        return hits.join("\n") || "no matches";
-      }
-      if (name === "study") {
-        const { study } = await import("./digest.mjs");
-        const list = await reader.files(args.path || "", { limit: 3000 });
-        const files = [];
-        for (const f of list) { if (f.size > 1_500_000 || !isText(f.path.split("!/").pop())) continue; const t = await reader.text(f.path).catch(() => null); if (t != null) files.push({ path: f.path, text: t }); }
-        const r = await study(gw, { question: args.question || goal, files, signal, privateData, onStatus: (s) => onStep({ kind: "status", text: s }) });
-        calls += r.calls;
-        return `STUDY RESULT (${r.read} files in ${r.parts} parts; ${r.notes.length} verified notes, ${r.dropped} unproven dropped${r.skipped.length ? `; not read: ${r.skipped.length}` : ""}):\n${r.answer}\n\nVERIFIED NOTES:\n` +
-          r.notes.slice(0, 40).map((n) => `[${n.severity}] ${n.path}:${n.line} — ${n.note}`).join("\n");
-      }
-      if (name === "calc") return String(evaluate(String(args.expression || "")));
-      if (name === "web_search") { const r = await search.evidence(String(args.query || "")); return r.slice(0, 6).map((x, i) => `[${i + 1}] ${x.title}\n${x.url}\n${(x.text || "").slice(0, 700)}`).join("\n\n") || "no results"; }
-      if (name === "fetch") return await fetchText(String(args.url || ""));
-      if (name === "run_js") return await runJs(String(args.code || ""));
-    } catch (e) { return `error: ${e.message}`; }
+      return hits.join("\n") || "no matches";
+    }
+    if (name === "study") {
+      const { study } = await import("./digest.mjs");
+      const list = await reader.files(args.path || "", { limit: 3000 });
+      const files = [];
+      for (const f of list) { if (f.size > 1_500_000 || !isText(f.path.split("!/").pop())) continue; const t = await reader.text(f.path).catch(() => null); if (t != null) files.push({ path: f.path, text: t }); }
+      const r = await study(gw, { question: args.question || goal, files, signal, privateData, onStatus: (s) => onStep({ kind: "status", text: s }) });
+      calls += r.calls;
+      return `STUDY RESULT (${r.read} files in ${r.parts} parts; ${r.notes.length} verified notes, ${r.dropped} unproven dropped${r.skipped.length ? `; not read: ${r.skipped.length}` : ""}):\n${r.answer}\n\nVERIFIED NOTES:\n` +
+        r.notes.slice(0, 40).map((n) => `[${n.severity}] ${n.path}:${n.line} — ${n.note}`).join("\n");
+    }
+    if (name === "calc") return String(evaluate(String(args.expression || "")));
+    if (name === "web_search") { const r = await search.evidence(String(args.query || "")); return r.slice(0, 6).map((x, i) => `[${i + 1}] ${x.title}\n${x.url}\n${(x.text || "").slice(0, 700)}`).join("\n\n") || "no results"; }
+    if (name === "fetch") return await fetchText(String(args.url || ""));
+    if (name === "run_js") return await runJs(String(args.code || ""));
     return "no result";
   };
   for (let step = 0; step < maxSteps; step++) {
@@ -345,6 +358,11 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     }
 
     if (last.final != null || Array.isArray(last.ops) && !last.tool && !last.calls) {
+      if (wantsPatch && !requestedPatch && reads.size && !proposed.length && !checkOps(last.ops).ops.length && step < maxSteps - 1) {
+        requestedPatch = true;
+        msgs.push({ role: "assistant", content: r.content }, { role: "user", content: 'The user requested a source change. Supply a reviewable ops array with op "edit", path, exact old and new strings from the file you read, or explain the specific blocker.' });
+        continue;
+      }
       // Describing files it never opened is invention (measured 2026-11-20: a 7-second "deep study" described the
       // contents of six files — API paths, Django versions, schemas — without reading one).
       const named = [...new Set((String(last.final ?? "").match(/[\w.-]+\.(?:html?|js|mjs|ts|tsx|jsx|py|json|md|txt|css|java|kt|go|rs|yml|yaml|toml|sql|xml|csv)\b/gi) || []))];
@@ -441,9 +459,22 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
       const key = c.tool + JSON.stringify(c.args || {});
       if (done.has(key)) { repeats++; return `RESULT of ${c.tool}: (you already ran exactly this — its result is above. Do something else, or answer.)`; }
       onStep({ kind: "tool", tool: c.tool, args: c.args });
-      const out = trimObs(String(await runTool(c.tool, c.args || {})));
       done.set(key, true);
-      steps.push({ thought: last.thought || "", tool: c.tool, args: c.args, result: out.slice(0, 600) });
+      let out, status = "passed";
+      try {
+        out = trimObs(String(await runTool(c.tool, c.args || {})));
+        errors.delete(key);
+      } catch (e) {
+        const attempts = (errors.get(key)?.attempts || 0) + 1;
+        out = "error: " + String(e.message || e);
+        status = "failed";
+        errors.set(key, { tool: c.tool, detail: out, attempts });
+        if (readOnly.has(c.tool) && attempts < 2 && /timeout|timed out|temporar|ECONNRESET|EAI_AGAIN|HTTP (429|50[234])/i.test(out)) {
+          done.delete(key);
+          out += " (temporary failure; one retry is available)";
+        }
+      }
+      steps.push({ thought: last.thought || "", tool: c.tool, args: c.args, status, result: out.slice(0, 600) });
       return `RESULT of ${c.tool} ${JSON.stringify(c.args || {}).slice(0, 200)}:\n${out}`;
     }));
     msgs.push({ role: "assistant", content: JSON.stringify({ thought: last.thought, calls: list }) }, { role: "user", content: results.join("\n\n") });
@@ -473,12 +504,18 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   }
   if (checked && checked.total) answer += `\n\n---\n*Checked against the files: ${checked.total - checked.bad.length} of ${checked.total} citation(s) and code quote(s) found` +
     (checked.bad.length ? ` · not found: ${checked.bad.slice(0, 4).join("; ")}` : "") + "*";
-  if (memory && last?.final != null && !(checked && checked.bad.length)) {
+  if (errors.size) {
+    const detail = [...errors.values()].map(e => e.tool + " — " + e.detail).join("\n");
+    const failure = "אימות הפעולה לא הושלם.\n" + detail;
+    answer = steps.some(s => s.status === "passed") ? failure + "\n\nדיווח המודל (אימות חלקי):\n" + answer : failure;
+  }
+  if (memory && !errors.size && last?.final != null && !(checked && checked.bad.length)) {
     const line = `- ${new Date().toISOString().slice(0, 10)} · ${goal.replace(/\s+/g, " ").slice(0, 120)} → ${String(last.final).replace(/\s+/g, " ").slice(0, 220)}${reads.size ? ` (read: ${[...reads].slice(0, 6).join(", ")})` : ""}`;
     try { await memory.add(line); } catch { /* memory is best-effort */ }
   }
   if (planBy) steps.unshift({ thought: planText.slice(0, 600), tool: "plan", args: { by: planBy }, result: "" });
-  return { id: newId(), goal, answer, raw, checked, challenged, summary: answer.slice(0, 600), ops, rejected, steps, by, calls, reads: [...reads], at: Date.now() };
+  if (terminal) answer += "\n\n[הצג פקודה והפעל](" + terminal.url + ")";
+  return { id: newId(), goal, answer, terminal, raw, checked, challenged, summary: answer.slice(0, 600), ops, rejected, steps, by, calls, reads: [...reads], at: Date.now() };
 }
 
 /**

@@ -46,6 +46,8 @@ def code_paths(history: list[dict], text: str = "") -> list[str]:
 
 def classify(text: str, history: list[dict], has_code: bool = False) -> str:
     t = text.lower()
+    if re.search(r"(?:^|[.!?]\s*)(?:please\s+)?(?:run|start|launch|execute)\s+(?:the\s+)?(?:server|tests?|build|command|npm|node|git)\b|(?:^|[.!?]\s*)(?:תריץ|הרץ|תפעיל|הפעל)\s", t):
+        return "agent"
     if re.search(_FIX, t) and (has_code or last_code(history) or code_paths(history, text) or re.search(r"\.(py|html?|js)\b", t)):
         return "fix"
     if re.search(_BUILD_VERB, t) and re.search(_BUILD_NOUN, t):

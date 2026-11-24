@@ -222,6 +222,34 @@ test("Gemini's ordinary quota message (mentions billing) does not park the accou
   } finally { w.srv.closeAllConnections(); w.srv.close(); }
 });
 
+test("Vercel verification denial skips the account; a model-specific 403 does not", async () => {
+  const gw = new Gateway({keys:{vercel:"test"}, allowKeyless:false, allowLocal:false});
+  const req = {messages:[{role:"user",content:"hi"}]};
+  gw.fetch = async () => Response.json({error:{type:"model_forbidden"}}, {status:403});
+  await assert.rejects(gw._call({provider:"vercel",model:"m"}, req, {}, () => {}), /403/);
+  assert.equal(gw.status().providers.vercel.disabled, "");
+  gw.fetch = async () => Response.json({error:{type:"customer_verification_required"}}, {status:403});
+  await assert.rejects(gw._call({provider:"vercel",model:"n"}, req, {}, () => {}), /403/);
+  assert.match(gw.status().providers.vercel.disabled, /payment method/);
+});
+
+test("Gemini per-model quota failures do not hide other models on the same key", async () => {
+  const gw = new Gateway({keys: {gemini: "test"}, allowKeyless: false, allowLocal: false,
+    fetch: async (url) => {
+      if (url.includes("/flash-ok:")) return new Response('data: {"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}\n\n', {headers:{"Content-Type":"text/event-stream"}});
+      const message = url.includes("/pro-zero:") ? "Daily quota limit: 0" : "GenerateRequestsPerDayPerModel daily limit exceeded";
+      return Response.json({error:{message}}, {status:429});
+    }});
+  for (const model of ["pro-zero","pro-preview","flash-preview"]) {
+    await assert.rejects(gw._call({provider:"gemini",model},{messages:[{role:"user",content:"hi"}]}, {}, () => {}), /429/);
+  }
+  assert.match(gw.stats.peek("gemini","pro-zero").lastError, /not on this plan/);
+  assert.equal(gw.status().providers.gemini.disabled,"");
+  gw.models.gemini = ["flash-ok"];
+  const reply = await gw.chat({messages:[{role:"user",content:"hi"}]});
+  assert.equal(reply.content,"ok");
+});
+
 test("offline: when every cloud model fails, the local model still answers (it is always the last resort)", async () => {
   const cloud = {};
   for (let i = 0; i < 12; i++) cloud["m" + i] = { status: 503 };

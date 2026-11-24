@@ -181,6 +181,7 @@ class App:
             except Exception as e:
                 self.hub.emit("error", {"message": f"{type(e).__name__}: {e}"})
             finally:
+                self.run_stops.pop(rid, None)
                 self.hub.emit("run_done", {})
                 _tls.run = None
         t = threading.Thread(target=work, daemon=True)
@@ -203,6 +204,13 @@ class App:
                 ensure_ascii=False, indent=1), encoding="utf-8")
         except OSError:
             pass
+        from .terminal import command_for, run_terminal
+        command = command_for(text, history)
+        if command:
+            from .tools import Ctx
+            ctx = Ctx(self.guard, self.cfg, self.skills, self.memory, router=self.router)
+            run_terminal(ctx, command, self.hub.emit)
+            return
         remembered = self.last_builds.get(chat_id) if chat_id else None
         kind = classify(text, history, has_code=bool(remembered))
         self.hub.emit("route", {"kind": kind})
@@ -365,7 +373,7 @@ class App:
             "skills": len(self.skills), "missions": Mission.list(self.cfg.state_dir)[:20],
             "pending": [r.public() for r in self.pending.values()],
             # busy also while an Open WebUI "Max" run builds: the supervisor only reloads Kestrel when idle
-            "busy": bool(self.chat_thread and self.chat_thread.is_alive()) or self.missions.busy() or bool(self.run_stops),
+            "busy": bool(self.chat_thread and self.chat_thread.is_alive()) or self.missions.busy() or any(t.is_alive() for t in list(self.run_threads.values())),
             "approvals": self.cfg["approvals"],
         }
 

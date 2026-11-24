@@ -15,7 +15,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import doctrine, verify
+from . import doctrine, tools, verify
 from .agent import Session
 from .llm import LLMError
 
@@ -168,7 +168,7 @@ class MissionRunner:
         self.session = Session(self.cfg, self.guard, self.router, self.skills, self.memory, self.emit,
                                system=doctrine.CORE + "\n\n" + doctrine.STEP)
         self.session.stop = self.stop
-        res = self.session.run(m.brief(i), max_steps=int(self.cfg["mission"]["max_tool_calls_per_step"]))
+        res = self.session.run(m.brief(i), max_steps=int(self.cfg["mission"]["max_tool_calls_per_step"]), require_finish=True)
         fin = res.get("finished")
         if self.stop.is_set() and not fin:
             s["status"] = "pending"
@@ -205,6 +205,10 @@ class MissionRunner:
         self.current = m
         self.stop.clear()
         try:
+            target = re.fullmatch(r"/read[ \t]+([^\r\n]+)", m.d["goal"], flags=re.I)
+            if target:
+                self._read_preview(m, target[1].strip())
+                return
             if not m.d["steps"]:
                 self.plan(m)
             m.d["status"] = "running"
@@ -235,6 +239,23 @@ class MissionRunner:
         finally:
             m.save()
             self._state(m)
+
+    def _read_preview(self, m: Mission, relative_path: str):
+        workspace = self.guard.workspace.resolve()
+        path = Path(relative_path)
+        if not relative_path or path.anchor or not (workspace / path).resolve().is_relative_to(workspace):
+            raise ValueError("Use a file path relative to the Kestrel workspace.")
+        step = {"title": "Read the first lines from the local file", "status": "running", "attempts": 1,
+                "summary": "", "evidence": ""}
+        m.d.update(status="running", steps=[step])
+        m.log("Reading with the local file tool")
+        self._state(m)
+        ctx = tools.Ctx(self.guard, self.cfg, self.skills, self.memory, router=self.router)
+        result, ok = tools.call(ctx, "read_file", {"path": relative_path, "lines": 20}, 6000)
+        step.update(status="done" if ok else "blocked", summary=result, evidence="Local read_file" if ok else "")
+        m.d["status"] = "done" if ok else "done_with_blocks"
+        self._report(m)
+        m.log(f"File read mission finished ({m.d['status']})")
 
     def _report(self, m: Mission):
         lines = [f"# Mission report\n\n**Goal:** {m.d['goal']}\n\n**Status:** {m.d['status']}\n", "## Steps\n"]

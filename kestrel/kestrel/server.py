@@ -7,6 +7,7 @@ import threading
 import time
 import urllib.parse
 import webbrowser
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -263,7 +264,16 @@ def make_handler(app: App):
 def serve(port: int | None = None, open_browser: bool = True):
     app = App()
     port = port or int(app.cfg["ui_port"])
-    srv = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app))
+    class LocalServer(ThreadingHTTPServer):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            allow_reuse_address = False
+
+        def server_bind(self):
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            super().server_bind()
+
+    srv = LocalServer(("127.0.0.1", port), make_handler(app))
     srv.daemon_threads = True
     url = f"http://127.0.0.1:{port}/"
     print(f"Kestrel is running at {url}  (Ctrl+C to stop)")
