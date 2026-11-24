@@ -41,7 +41,11 @@ export function createCopilotConnector(home, { tokenSource } = {}) {
             return {status:"connected",sharing:true,account:auth.login,via:auth.authType,models:list
               .filter(m=>m.policy?.state!=="disabled" && m.policy?.state!=="unconfigured")
               .map(m=>({slug:m.id,displayName:m.name||m.id}))};
-          } catch { return {status:"connected",sharing:true,account:auth.login,models:[],error:"GitHub could not list models for this account. Check Copilot access and organization policy."}; }
+          } catch (e) {
+            const why = String(e?.message || "").replace(/\b(gh[opsu]_|github_pat_)[A-Za-z0-9_]+/g, "[token]").slice(0, 300);
+            return {status:"connected",sharing:true,account:auth.login,via:auth.authType,models:[],
+              error:"GitHub could not list Copilot models for this account" + (why ? ": " + why : "") + ". Check that the account has Copilot and, for a token, the 'Copilot Requests' permission."};
+          }
         });
         cache = {value,until:Date.now()+15000};
         return value;
