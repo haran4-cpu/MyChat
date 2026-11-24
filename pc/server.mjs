@@ -562,9 +562,10 @@ function validPlanId(id) {
 }
 
 // ---------------------------------------------------------------- System: services and updates (through the supervisor)
-async function supervisor(pathname, method = "GET") {
+async function supervisor(pathname, method = "GET", payload) {
   try {
-    const r = await fetch("http://127.0.0.1:11510" + pathname, { method, headers: { Authorization: "Bearer " + token }, signal: AbortSignal.timeout(method === "POST" ? 120000 : 3000) });
+    const r = await fetch("http://127.0.0.1:11510" + pathname, { method, headers: { Authorization: "Bearer " + token, ...(payload ? { "Content-Type": "application/json" } : {}) },
+      ...(payload ? { body: JSON.stringify(payload) } : {}), signal: AbortSignal.timeout(method === "POST" ? 120000 : 3000) });
     return await r.json();
   } catch (e) { return { error: "supervisor not reachable (" + e.message + ")" }; }
 }
@@ -770,6 +771,8 @@ const server = http.createServer(async (req, res) => {
         openrouterStart: "/oauth/openrouter/start?t=" + encodeURIComponent(token) + "&back=" + encodeURIComponent("http://127.0.0.1:" + PORT + "/#accounts") });
     }
     if (req.method === "GET" && url.pathname === "/system") return send(res, 200, { gateway: { startedAt: STARTED_AT, pid: process.pid }, supervisor: await supervisor("/status") });
+    if (url.pathname === "/system/github-key") return send(res, 200, req.method === "POST"
+      ? await supervisor("/github-key", "POST", { key: String((await body(req, 8192)).key || "") }) : await supervisor("/github-key"));
     if (req.method === "POST" && url.pathname === "/system/update") return send(res, 200, await supervisor("/update" + (url.searchParams.get("check") ? "?check=1" : url.searchParams.get("keep") ? "?keep=1" : url.searchParams.get("force") ? "?force=1" : ""), "POST"));
     if (req.method === "GET" && url.pathname === "/diag") return send(res, 200, await search.diagnose());
     if (req.method === "GET" && url.pathname === "/bench") return send(res, 200, bench ? bench.state : { running: false });

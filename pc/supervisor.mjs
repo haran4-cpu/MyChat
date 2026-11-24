@@ -33,6 +33,9 @@ const PYW = user.pythonw || first("C:\\Python314\\pythonw.exe", "C:\\Python313\\
 const OLLAMA = user.ollama || first(path.join(process.env.LOCALAPPDATA || "", "Programs", "Ollama", "ollama.exe"), "C:\\Users\\user\\AppData\\Local\\Programs\\Ollama\\ollama.exe");
 const OWUI_LAUNCHER = user.openWebUiLauncher || "C:\\Users\\user\\Documents\\Codex\\2026-11-14\\x20\\outputs\\Start-Local-AI.ps1";
 const REPO = user.repo || "haran4-cpu/MyChat";
+// The repo is private: updates read a GitHub key (read access to REPO) from the Windows Credential Manager.
+export const GITHUB_CREDENTIAL = user.githubCredential || "MyChat/github-update";
+const { readCredential, writeCredential } = await import("./wincred.mjs");
 
 export const SERVICES = [
   { id: "ollama", name: "Ollama (local models)", url: "http://127.0.0.1:11434/api/version", port: 11434, graceSec: 30,
@@ -187,8 +190,16 @@ function localShas(file) {
   return new Set([gitBlobSha(raw), gitBlobSha(Buffer.from(raw.toString("utf8").replace(/\r\n/g, "\n")))]);
 }
 
-export async function update({ fetchImpl = fetch, dryRun = false, keepLocal = false, force = false } = {}) {
-  const gh = async (u) => { const r = await fetchImpl(u, { headers: { "User-Agent": "MyChat-supervisor", Accept: "application/vnd.github+json" } }); if (!r.ok) throw new Error(`GitHub ${r.status} for ${u}`); return r.json(); };
+export async function update({ fetchImpl = fetch, dryRun = false, keepLocal = false, force = false, githubToken } = {}) {
+  const tok = githubToken !== undefined ? githubToken : await readCredential(GITHUB_CREDENTIAL);
+  const headers = (accept) => ({ "User-Agent": "MyChat-supervisor", Accept: accept, ...(tok ? { Authorization: "Bearer " + tok } : {}) });
+  const gh = async (u) => {
+    const r = await fetchImpl(u, { headers: headers("application/vnd.github+json") });
+    if (r.status === 404 || r.status === 401) throw new Error(tok ? `GitHub ${r.status}: the saved GitHub key cannot read ${REPO}; save a key with read access in System → Updates`
+      : `GitHub ${r.status}: ${REPO} is private; save a GitHub key with read access in System → Updates`);
+    if (!r.ok) throw new Error(`GitHub ${r.status} for ${u}`);
+    return r.json();
+  };
   const head = await gh(`https://api.github.com/repos/${REPO}/commits/main`);
   const sha = head.sha;
   const checks = await gh(`https://api.github.com/repos/${REPO}/commits/${sha}/check-runs`);
@@ -217,7 +228,8 @@ export async function update({ fetchImpl = fetch, dryRun = false, keepLocal = fa
   const kept = force ? [] : localEdits;
   if (!write.length && !kept.length) { saveManifest(manifest, sha, same, []); return report({ installed: false }); }
   for (const c of [...write, ...kept]) {
-    const r = await fetchImpl(`https://raw.githubusercontent.com/${REPO}/${sha}/${c.repo}`);
+    const r = tok ? await fetchImpl(`https://api.github.com/repos/${REPO}/git/blobs/${c.sha}`, { headers: headers("application/vnd.github.raw") })
+      : await fetchImpl(`https://raw.githubusercontent.com/${REPO}/${sha}/${c.repo}`);
     if (!r.ok) throw new Error(`download failed for ${c.repo}: ${r.status}`);
     const buf = Buffer.from(await r.arrayBuffer());
     if (gitBlobSha(buf) !== c.sha) throw new Error(`integrity check failed for ${c.repo}`);
@@ -244,6 +256,17 @@ function saveManifest(m, commit, installed, kept) {
   fs.writeFileSync(MANIFEST(), JSON.stringify({ commit, at: new Date().toISOString(), files }, null, 1));
 }
 
+/** Checks the key against GitHub (it must read REPO), then stores it in the Windows Credential Manager. Never echoed back. */
+export async function saveGithubKey(key, { fetchImpl = fetch, write = writeCredential } = {}) {
+  if (!/^(github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,})$/.test(key)) return { ok: false, error: "That does not look like a GitHub key." };
+  let r;
+  try { r = await fetchImpl(`https://api.github.com/repos/${REPO}`, { headers: { "User-Agent": "MyChat-supervisor", Accept: "application/vnd.github+json", Authorization: "Bearer " + key } }); }
+  catch { return { ok: false, error: "GitHub could not be reached." }; }
+  if (!r.ok) return { ok: false, error: `This key cannot read ${REPO} (GitHub ${r.status}). It needs read access to that repository.` };
+  if (!(await write(GITHUB_CREDENTIAL, key))) return { ok: false, error: "Windows did not save the key." };
+  return { ok: true, repo: REPO, saved: true };
+}
+
 // ---------------------------------------------------------------------------- status server (also the single-instance lock)
 export function startServer() {
   let lastUpdate = null;
@@ -257,6 +280,12 @@ export function startServer() {
     }
     const auth = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
     if (!token() || auth !== token()) return send(401, { error: "unauthorized" });
+    if (req.method === "POST" && url.pathname === "/github-key") {
+      let raw = ""; for await (const ch of req) { raw += ch; if (raw.length > 8192) return send(413, { error: "too large" }); }
+      let key; try { key = String(JSON.parse(raw).key || "").trim(); } catch { return send(400, { error: "bad request" }); }
+      return send(200, await saveGithubKey(key));
+    }
+    if (req.method === "GET" && url.pathname === "/github-key") return send(200, { saved: !!(await readCredential(GITHUB_CREDENTIAL)), repo: REPO });
     if (req.method === "POST" && url.pathname === "/update") {
       try { lastUpdate = { at: Date.now(), ...(await update({ dryRun: url.searchParams.get("check") === "1", keepLocal: url.searchParams.get("keep") === "1", force: url.searchParams.get("force") === "1" })) }; send(200, lastUpdate); setTimeout(loop, 1000); }
       catch (e) { lastUpdate = { at: Date.now(), error: e.message }; send(200, lastUpdate); }

@@ -134,3 +134,41 @@ test("a service already running on old code is reloaded once it is idle; one tha
   assert.deepEqual(reloads, { old: 1, fresh: 0 });
   old.close(); fresh.close();
 });
+
+test("private repo: updates send the saved key, download through the API, and explain a missing key", async () => {
+  const blobOf = (b) => crypto.createHash("sha1").update(`blob ${b.length}\0`).update(b).digest("hex");
+  const body = Buffer.from("export const p = 1;\n"), seen = [];
+  const json = (o) => new Response(JSON.stringify(o), { status: 200 });
+  const fetchImpl = async (u, o = {}) => {
+    seen.push({ u, auth: o.headers?.Authorization, accept: o.headers?.Accept });
+    if (!o.headers?.Authorization) return new Response("{}", { status: 404 });
+    if (u.endsWith("/commits/main")) return json({ sha: "ccc3333" });
+    if (u.includes("/check-runs")) return json({ check_runs: [{ name: "t", status: "completed", conclusion: "success" }] });
+    if (u.includes("/git/trees/")) return json({ tree: [{ type: "blob", path: "core/zz_priv.mjs", sha: blobOf(body) }] });
+    if (u.includes("/git/blobs/")) return new Response(body);
+    return new Response("?", { status: 404 });
+  };
+  await assert.rejects(sup.update({ fetchImpl, githubToken: null }), /private; save a GitHub key/);
+  const target = sup.localPathFor("core/zz_priv.mjs");
+  fs.rmSync(target, { force: true });
+  try {
+    const r = await sup.update({ fetchImpl, githubToken: "github_pat_test" });
+    assert.equal(r.installed, true);
+    assert.equal(fs.readFileSync(target, "utf8"), body.toString());
+    const dl = seen.find((s) => s.u.includes("/git/blobs/"));
+    assert.equal(dl.auth, "Bearer github_pat_test");
+    assert.equal(dl.accept, "application/vnd.github.raw");
+    assert.ok(!seen.some((s) => s.u.includes("raw.githubusercontent.com")));
+  } finally { fs.rmSync(target, { force: true }); }
+});
+
+test("saving the update key: format checked, verified against GitHub, stored only when it can read the repo", async () => {
+  const stored = [];
+  const write = async (t, k) => (stored.push([t, k]), true);
+  assert.equal((await sup.saveGithubKey("hello", { write })).ok, false);
+  const no = await sup.saveGithubKey("github_pat_" + "x".repeat(30), { write, fetchImpl: async () => new Response("{}", { status: 404 }) });
+  assert.equal(no.ok, false); assert.match(no.error, /cannot read/); assert.equal(stored.length, 0);
+  const yes = await sup.saveGithubKey("github_pat_" + "y".repeat(30), { write, fetchImpl: async () => new Response("{}", { status: 200 }) });
+  assert.equal(yes.ok, true); assert.equal(JSON.stringify(yes).includes("yyyy"), false, "key is never echoed");
+  assert.deepEqual(stored, [[sup.GITHUB_CREDENTIAL, "github_pat_" + "y".repeat(30)]]);
+});

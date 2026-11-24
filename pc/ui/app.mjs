@@ -457,7 +457,15 @@ async function system() {
   const check = el("button", { class: "btn", onclick: () => busy(check, async () => { out.textContent = fmtUpdate(await api("/system/update?check=1", {})); }) }, "Check for updates");
   const inst = el("button", { class: "btn primary", onclick: () => busy(inst, async () => { out.textContent = "Installing…"; out.textContent = fmtUpdate(await api("/system/update", {})); setTimeout(system, 8000); }) }, "Install update");
   const keep = el("button", { class: "btn", title: "Install the rest; files edited on this PC are kept, GitHub's copy is saved under pending\\", onclick: () => busy(keep, async () => { out.textContent = "Installing…"; out.textContent = fmtUpdate(await api("/system/update?keep=1", {})); setTimeout(system, 8000); }) }, "Install, keep my edits");
+  const keyField = el("input", { type: "password", autocomplete: "new-password", placeholder: "GitHub key with read access to MyChat", "aria-label": "GitHub key for updates" });
+  const keyState = el("span", { class: "sub" }, "");
+  api("/system/github-key").then((k) => { keyState.textContent = k.saved ? "✓ A GitHub key is saved for updates" : "No GitHub key saved — needed because the repository is private"; }).catch(() => {});
+  const keySave = el("button", { class: "btn", onclick: () => busy(keySave, async () => {
+    const r = await api("/system/github-key", { key: keyField.value }); keyField.value = "";
+    keyState.textContent = r.ok ? "✓ Saved in Windows Credential Manager" : "✗ " + (r.error || "not saved");
+  }) }, "Save key");
   v.append(el("h2", {}, "Updates"), el("div", { class: "card stack" },
+    el("div", { class: "row" }, keyField, keySave), keyState,
     el("div", { class: "sub" }, "Installs only versions that passed all tests on GitHub. Files edited on this PC are never overwritten without asking. A backup of every replaced file is kept, and services reload by themselves (Kestrel waits until it is idle)."),
     el("div", { class: "row" }, el("span", { class: "grow" }), check, keep, inst), out));
   const link = await api("/system/phone-link");
