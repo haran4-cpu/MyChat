@@ -45,7 +45,9 @@ export const SERVICES = [
   { id: "openwebui", name: "Open WebUI", url: "http://127.0.0.1:8080/health", port: 8080, graceSec: 300,
     start: () => exists(OWUI_LAUNCHER) && launch("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", OWUI_LAUNCHER, "-NoBrowser"]) },
   { id: "mychat", name: "MyChat gateway", url: "http://127.0.0.1:11500/health", port: 11500, graceSec: 20, image: "node.exe",
-    watch: () => [...listFiles(path.join(MYCHAT_DIR, "core"), ".mjs"), path.join(MYCHAT_DIR, "pc", "server.mjs"), path.join(MYCHAT_DIR, "pc", "bench.mjs")],
+    watch: () => [...listFiles(path.join(MYCHAT_DIR, "core"), ".mjs"), ...listFiles(path.join(MYCHAT_DIR, "pc"), ".mjs").filter((f) => !/supervisor\.mjs$/.test(f))],
+    // never cut off a sign-in, a request or an agent job: reload when idle (at most 15 minutes late)
+    idle: (body) => { try { return !JSON.parse(body).busy; } catch { return true; } }, maxWaitMs: 15 * 60e3,
     start: () => launch(NODE, [path.join(MYCHAT_DIR, "pc", "server.mjs")], { cwd: MYCHAT_DIR }),
     stop: async () => { await post("http://127.0.0.1:11500/admin/shutdown", { Authorization: "Bearer " + token() }).catch(() => {}); } },
   { id: "kestrel", name: "Kestrel (PC agent)", url: "http://127.0.0.1:8765/api/status", port: 8765, graceSec: 60, image: "python",
@@ -125,12 +127,14 @@ export async function checkOnce(services = SERVICES, now = Date.now) {
         st.startedAt = now();                             // its code is as new as its own start time (reported by the
         if (s.watch) st.codeAt = startedFrom(r.body);     // service); a service that can't say is reloaded once, when idle
       }
-      // reload on new code: MyChat at once; Kestrel only while idle (a build in progress is never interrupted)
+      // reload on new code only while idle: a build, request or sign-in in progress is never interrupted
       if (s.watch) {
         const code = newestMtime(s.watch());
         if (code > st.codeAt + 1000) {
-          st.pendingReload = true;
-          if (!s.idle || s.idle(r.body)) {
+          if (!st.pendingReload) { st.pendingReload = true; st.pendingSince = now(); }
+          const overdue = s.maxWaitMs && now() - (st.pendingSince || now()) > s.maxWaitMs;
+          if (!s.idle || s.idle(r.body) || overdue) {
+            if (overdue) log(`${s.id}: still busy after ${Math.round(s.maxWaitMs / 60e3)} min, reloading anyway`);
             log(`${s.id}: new code on disk, reloading`);
             if (s.stop) await s.stop();
             await sleep(800);

@@ -172,3 +172,18 @@ test("saving the update key: format checked, verified against GitHub, stored onl
   assert.equal(yes.ok, true); assert.equal(JSON.stringify(yes).includes("yyyy"), false, "key is never echoed");
   assert.deepEqual(stored, [[sup.GITHUB_CREDENTIAL, "github_pat_" + "y".repeat(30)]]);
 });
+
+test("MyChat reloads new code only when idle (no sign-in, request or job), and at most 15 minutes late", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "code3-"));
+  const f = path.join(dir, "s.mjs"); fs.writeFileSync(f, "1");
+  const busy = await svc(200, JSON.stringify({ busy: true, why: ["ChatGPT sign-in in progress"], startedAt: Date.now() - 3600e3 }));
+  let t = Date.now(), reloads = 0;
+  const s = { id: "gw", name: "gw", url: `http://127.0.0.1:${busy.address().port}/health`, port: 1, graceSec: 5, watch: () => [f],
+    idle: (b) => !JSON.parse(b).busy, maxWaitMs: 15 * 60e3, start: () => (reloads++, true) };
+  await sup.checkOnce([s], () => t);
+  t += 60e3; await sup.checkOnce([s], () => t);
+  assert.equal(reloads, 0, "busy: waits");
+  t += 16 * 60e3; await sup.checkOnce([s], () => t);
+  assert.equal(reloads, 1, "overdue: reloads anyway");
+  busy.close();
+});

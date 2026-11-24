@@ -593,12 +593,34 @@ route();
 // After an update the gateway restarts with new pages, but an open tab keeps running the old ones (measured: the
 // Accounts page still showed the previous version after "Install update"). When the gateway's start time changes,
 // reload — unless you are typing.
+// Nothing you typed is lost: drafts (never passwords) and the page you were on are kept for this tab and restored.
+const DRAFTS = "mychat.drafts";
+const fieldKey = (f) => f.getAttribute("aria-label") || f.getAttribute("placeholder") || f.name || "";
+function saveDrafts() {
+  try {
+    const d = {};
+    for (const f of document.querySelectorAll("input:not([type=password]):not([type=hidden]), textarea")) if (f.value && fieldKey(f)) d[fieldKey(f)] = f.value;
+    sessionStorage.setItem(DRAFTS, JSON.stringify({ hash: location.hash, d }));
+  } catch { /* storage unavailable */ }
+}
+function restoreDrafts() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(DRAFTS) || "null");
+    if (!saved) return;
+    const fill = () => { for (const f of document.querySelectorAll("input, textarea")) { const v = saved.d[fieldKey(f)]; if (v && !f.value && f.type !== "password") f.value = v; } };
+    setTimeout(fill, 300); setTimeout(fill, 1500);
+    sessionStorage.removeItem(DRAFTS);
+  } catch { /* nothing saved */ }
+}
+restoreDrafts();
+addEventListener("beforeunload", saveDrafts);
 let bootedAt = null;
 setInterval(async () => {
   try {
     const h = await (await fetch("/health", { cache: "no-store" })).json();
     if (bootedAt == null) { bootedAt = h.startedAt; return; }
-    if (h.startedAt !== bootedAt && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) location.reload();
+    const typing = ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName);
+    if (h.startedAt !== bootedAt && !typing) { saveDrafts(); location.reload(); }
   } catch { /* restarting */ }
 }, 15000);
 

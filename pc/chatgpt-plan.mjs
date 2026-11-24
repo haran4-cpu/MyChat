@@ -96,5 +96,5 @@ export function createPlanConnector(home) {
     });
     return {content:text, provider:"chatgpt-plan", model, mode:"chatgpt-plan", trace:[{step:"answer",by:"chatgpt-plan:"+model}]};
   }
-  return { status, models, start, disconnect, answer, cancel: async () => (await client()).cancelSignIn() };
+  return { status, models, start, disconnect, answer, cancel: async () => (await client()).cancelSignIn(), busy: () => !!signIn };
 }

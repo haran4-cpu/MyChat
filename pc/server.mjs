@@ -625,7 +625,21 @@ function startPhoneLink() {
 }
 function stopPhoneLink() { linkServer?.close(); linkServer = null; }
 
+// What would be lost if the gateway restarted now: requests in flight, sign-ins waiting for the owner, running agent jobs.
+// The supervisor reloads new code only when this is empty (see pc/supervisor.mjs), so a sign-in is never cut off.
+let inFlight = 0;
+function busyReasons() {
+  const r = [];
+  if (inFlight > 0) r.push(`${inFlight} request(s) in progress`);
+  if (planConnection.busy?.()) r.push("ChatGPT sign-in in progress");
+  if (copilotConnection.busy?.()) r.push("Copilot sign-in in progress");
+  const running = [...jobs.values()].filter((j) => j.status === "running").length;
+  if (running) r.push(`${running} agent job(s) running`);
+  return r;
+}
 const server = http.createServer(async (req, res) => {
+  const counted = !(req.method === "GET" && /^\/(health|ui\/|$)/.test(req.url || ""));
+  if (counted) { inFlight++; res.once("close", () => { inFlight--; }); }
   try {
     const url = new URL(req.url, "http://x");
     // DNS-rebinding guard: a web page that re-points its own domain at 127.0.0.1 must not reach the Accounts page or the API
@@ -639,7 +653,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "max-age=86400" });
       return res.end(ICON ||= iconPng(256));
     }
-    if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true, startedAt: STARTED_AT, pid: process.pid });
+    if (req.method === "GET" && url.pathname === "/health") { const why = busyReasons(); return send(res, 200, { ok: true, startedAt: STARTED_AT, pid: process.pid, busy: why.length > 0, why }); }
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/app")) return serveUi(res, "index.html");
     if (req.method === "GET" && /^\/ui\/(app\.css|app\.mjs)$/.test(url.pathname)) return serveUi(res, url.pathname.slice(4));
     if (req.method === "GET" && url.pathname === "/connections" && !url.searchParams.has("classic")) {

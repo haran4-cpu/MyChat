@@ -111,5 +111,5 @@ export function createCopilotConnector(home, { tokenSource } = {}) {
       }
     });
   }
-  return {inspect,start,cancel,answer};
+  return {inspect,start,cancel,answer,busy:()=>!!login};
 }
