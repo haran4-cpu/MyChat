@@ -222,19 +222,35 @@ function renderAttached() {
     el("button", { type: "button", "aria-label": "Remove " + a.name, onclick: () => { attached.splice(i, 1); renderAttached(); } }, "×"))));
 }
 async function attachPhoneFiles(list) {
-  const fs = await workspace();
   const status = $("#statusLine"); status.hidden = false;
-  const images = [...list].filter((f) => /^image\//.test(f.type));
-  const others = [...list].filter((f) => !/^image\//.test(f.type));
-  for (const f of images) attached.push({ name: f.name, kind: "image", url: await new Promise((ok) => { const r = new FileReader(); r.onload = () => ok(r.result); r.readAsDataURL(f); }) });
-  if (others.length) {
-    const r = await importFiles(fs, others, { onStatus: (t) => (status.textContent = t) });
-    const unpacked = new Set(r.projects.filter((p) => p.to && !p.from.includes("/Projects/")).map((p) => p.from));
-    for (const p of r.projects) if (p.to && !p.from.startsWith("Projects/")) attached.push({ name: p.to.split("/").pop(), path: p.to, kind: "folder" });
-    for (const rel of r.saved) if (!unpacked.has(rel)) attached.push({ name: rel.split("/").pop(), path: rel, kind: "file" });
+  status.textContent = "Adding attachments…";
+  try {
+    const files = [...list];
+    const images = files.filter((f) => /^image\//.test(f.type));
+    const others = files.filter((f) => !/^image\//.test(f.type));
+    for (const f of images) {
+      const url = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error || new Error("Image could not be read."));
+        reader.onabort = () => reject(new Error("Image reading was cancelled."));
+        reader.readAsDataURL(f);
+      });
+      attached.push({ name: f.name, kind: "image", url });
+    }
+    if (others.length) {
+      const fs = await workspace();
+      for (const file of others) {
+        const { saved: [rel] } = await importFiles(fs, [file], { unpack: false, onStatus: (t) => (status.textContent = t) });
+        attached.push({ name: file.name, path: rel, kind: "file" });
+      }
+    }
+  } catch (error) {
+    toast("Could not attach files: " + error.message, 5000);
+  } finally {
+    status.hidden = true;
+    renderAttached();
   }
-  status.hidden = true;
-  renderAttached();
 }
 async function attachSheet() {
   const fs = await workspace();
@@ -282,7 +298,10 @@ async function resumeJob() {
     if (r.ops?.length) chat.meta[chat.messages.length - 1].ops = { id: r.planId, goal: chat.messages.at(-2).content, ops: r.ops, preview: r.preview, checks: r.checks, remote: p.base };
     localStorage.removeItem("mychat.pendingJob"); saveChats();
     if (current === chat) renderChat();
-  } catch (e) { toast("✗ " + e.message, 5000); }
+  } catch (e) {
+    if (e.final) localStorage.removeItem("mychat.pendingJob");
+    toast("✗ " + e.message, 5000);
+  }
 }
 
 // Long tasks keep running with the screen off: a foreground service (Android) while they run, "Answer ready" when done.

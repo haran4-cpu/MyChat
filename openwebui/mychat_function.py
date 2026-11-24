@@ -18,6 +18,7 @@ import urllib.parse
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
+import hashlib
 import httpx
 from pydantic import BaseModel, Field
 
@@ -260,7 +261,7 @@ class Pipe:
         return "\n".join(out)
 
     # ---------------------------------------------------------------- Agent mode (plan → you approve → apply → undo)
-    async def _agent(self, client, token: str, text: str, emitter, history=None) -> str:
+    async def _agent(self, client, token: str, text: str, emitter, history=None, confirm=None, local_only=False) -> str:
         base = self.valves.MYCHAT_URL.rstrip("/")
         H = {"Authorization": "Bearer " + token}
         t = text.strip()
@@ -310,11 +311,24 @@ class Pipe:
         if mm:
             selection["root"], t = int(mm.group(1)) - 1, t[mm.end():]
         await self._status(emitter, "Working: reading, searching, thinking… (nothing changes until you approve)")
-        r = await client.post(base + "/agent/plan", json={"goal": t, **selection, "history": history or []}, headers=H, timeout=600)
+        r = await client.post(base + "/agent/plan", json={"goal": t, "private": local_only, **selection, "history": history or []}, headers=H, timeout=600)
         p = r.json()
         await self._status(emitter, "Plan ready", True)
         if r.status_code != 200:
             return "✗ " + (p.get("error", {}) or {}).get("message", "planning failed")
+        ticket = p.get("terminal")
+        if ticket:
+            review = f"[הצג ואשר במחשב]({base}/#terminal?id={ticket['id']})"
+            if not confirm:
+                return review
+            message = f"{ticket['root']}\n\n{ticket['command']}"
+            approved = await confirm({"type": "confirmation", "data": {"title": "הרצת פקודה במחשב", "message": message}})
+            if approved is not True:
+                return "הפקודה לא הופעלה."
+            response = await client.post(base + "/system/terminal", json={"id": ticket["id"], "approve": True}, headers=H, timeout=165)
+            response.raise_for_status()
+            result = response.json()
+            return f"{review}\n\n{result['state']}\n\n```text\n{result['output'].replace(chr(96)*3, chr(96)*2 + ' ' + chr(96))}\n```"
         steps = p.get("steps") or []
         out = [p.get("answer") or p.get("summary") or "", ""]
         if steps:
@@ -340,43 +354,45 @@ class Pipe:
         return "\n".join(out)
 
     # ---------------------------------------------------------------- chat
-    def _attached(self, body: dict, files) -> list:
-        """Files attached in this chat: (name, path on disk). Open WebUI keeps uploads on disk; we read them from there."""
-        out, seen = [], set()
+    async def _attached(self, body, files, user_id):
+        items, seen = [], set()
         for f in list(files or []) + list(body.get("files") or []) + list((body.get("metadata") or {}).get("files") or []):
-            if not isinstance(f, dict):
+            if not isinstance(f, dict) or f.get("type") in ("collection", "web_search", "webpage"):
                 continue
-            ff = f.get("file") if isinstance(f.get("file"), dict) else {}
-            fid = f.get("id") or ff.get("id")
-            name = ff.get("filename") or f.get("name") or (ff.get("meta") or {}).get("name") or "file"
-            fpath = ff.get("path") or f.get("path")
-            if fid and not fpath:
-                try:
-                    from open_webui.models.files import Files
-                    rec = Files.get_file_by_id(fid)
-                    if rec:
-                        fpath, name = rec.path, rec.filename or name
-                except Exception:
-                    pass
-            if fpath and fid not in seen and os.path.isfile(fpath):
-                seen.add(fid)
-                out.append((name, fpath))
-        return out[:10]
+            record = f.get("file") or {}
+            fid = f.get("id") or record.get("id")
+            if not fid or not user_id:
+                raise ValueError("חסר מזהה קובץ או משתמש. צרף את הקובץ מחדש.")
+            if fid in seen:
+                continue
+            seen.add(fid)
+            from open_webui.models.files import Files
+            rec = await Files.get_file_by_id_and_user_id(fid, user_id)
+            if rec is None or not rec.path or not os.path.isfile(rec.path):
+                raise ValueError("הקובץ המצורף אינו זמין לקריאה בחשבון הזה.")
+            items.append((rec.filename, rec.path))
+        return items
 
-    async def _send_files(self, client, token: str, items: list) -> list:
-        """Copy attached files into the chat folder's Inbox (via the gateway) so MyChat can read, run and change them."""
+    async def _send_files(self, client, token, items, emitter):
         got = []
         for name, fpath in items:
-            try:
-                with open(fpath, "rb") as fh:
-                    data = fh.read(60 * 1024 * 1024)
-                r = await client.post(self.valves.MYCHAT_URL.rstrip("/") + "/agent/inbox", headers={"Authorization": "Bearer " + token},
-                                      json={"name": name, "data": base64.b64encode(data).decode()}, timeout=120)
-                j = r.json()
-                if r.status_code == 200:
-                    got.append((name, j["path"], j.get("root", ""), fpath))
-            except Exception:
-                pass
+            await self._status(emitter, f"בודק ומעתיק את {name}")
+            with open(fpath, "rb") as fh:
+                size = os.fstat(fh.fileno()).st_size
+                digest = await asyncio.to_thread(lambda: hashlib.file_digest(fh, "sha256").hexdigest())
+                fh.seek(0)
+                async def chunks():
+                    while chunk := await asyncio.to_thread(fh.read, 1024 * 1024):
+                        yield chunk
+                response = await client.post(self.valves.MYCHAT_URL.rstrip("/") + "/agent/inbox/upload",
+                    params={"name": name}, headers={"Authorization": "Bearer " + token, "Content-Length": str(size),
+                    "X-Content-SHA256": digest}, content=chunks(), timeout=120)
+                response.raise_for_status()
+                receipt = response.json()
+            if receipt.get("bytes") != size or receipt.get("sha256") != digest:
+                raise ValueError("אימות גודל או תוכן הקובץ נכשל.")
+            got.append((name, receipt["path"], receipt["root"], fpath))
+            await self._status(emitter, f"{name} נקלט בשלמותו · {size:,} bytes · SHA-256 {digest[:12]}")
         return got
 
     async def pipe(self, body: dict, __user__: Optional[dict] = None, __event_emitter__=None,
@@ -398,13 +414,17 @@ class Pipe:
                 return
             # Files attached in the chat: copied into the working folder's Inbox, and the message says where they are,
             # so MyChat reads, runs or changes them like any other file. Images also go to a vision model directly.
-            items = self._attached(body, __files__ or (__metadata__ or {}).get("files"))
+            try:
+                items = await self._attached(body, __files__ or (__metadata__ or {}).get("files"), (__user__ or {}).get("id"))
+                got = await self._send_files(client, token, items, __event_emitter__) if items else []
+            except Exception as e:
+                await self._status(__event_emitter__, "קליטת הקובץ נכשלה", True)
+                yield f"קליטת הקובץ נכשלה: {e}"
+                return
             if items:
-                await self._status(__event_emitter__, f"Receiving {len(items)} file(s)…")
-                got = await self._send_files(client, token, items)
                 if got:
                     note = "\n\n(Attached files, saved in the working folder: " + ", ".join(f"{g[1]}" for g in got) + ")"
-                    imgs = [g for g in got if re.search(r"\.(png|jpe?g|webp|gif)$", g[0], re.I)]
+                    imgs = [g for g in got if os.path.getsize(g[3]) <= 8_000_000 and re.search(r"\.(png|jpe?g|webp|gif)$", g[0], re.I)]
                     for m in reversed(msgs):
                         if m.get("role") == "user":
                             c = m.get("content")
@@ -441,15 +461,49 @@ class Pipe:
                            "\n".join("- " + c for c in u["changed"][:30]) +
                            ("\n\nServices reload by themselves (Kestrel waits until it is idle). Backup: `" + u.get("backup", "") + "`" if u.get("installed") else ""))
                 return
+            if last.strip().lower() in ("תמשיך", "המשך", "/resume", "continue"):
+                previous = next((m.get("content", "") for m in reversed(msgs[:-1]) if m.get("role") == "assistant"), "")
+                receipt = re.search(r"/#terminal\?id=([a-f0-9-]{36})", str(previous))
+                plan = re.search(r"/#agent\?plan=(\d{14}-[a-z0-9]{4})", str(previous))
+                base = self.valves.MYCHAT_URL.rstrip("/")
+                headers = {"Authorization": "Bearer " + token}
+                if receipt:
+                    r = await client.get(base + "/system/terminal", params={"id": receipt[1]}, headers=headers)
+                    if r.is_success:
+                        item = r.json()
+                        yield f"{item['state']} · {item['root']}\n\n{item.get('output', '')}\n\n[הצג פעולה]({item['url']})"
+                    else:
+                        yield "קבלת הפעולה אינה זמינה."
+                    return
+                if plan:
+                    r = await client.get(base + "/agent/plan", params={"id": plan[1]}, headers=headers)
+                    if r.is_success:
+                        item = r.json()
+                        journal = item.get("journal")
+                        state = ("בוטל" if journal.get("undone") else "שגיאה" if journal.get("error") else "בוצע") if journal else "ממתין לאישור"
+                        yield f"{state} · {item['goal']}\n\n[הצג תכנית ובדיקות]({base}/#agent?plan={plan[1]})"
+                    else:
+                        yield "התכנית אינה זמינה."
+                    return
+            # Resolve an affirmative follow-up to the specific local Hunter launch.
+            # Propose the installed launcher; the existing confirmation shows the actual command.
+            if model == "auto" and re.fullmatch(r"(?:אני לא עושה כלום[ ,]*)?(?:תעשה בשבילי|תפעיל אותו|תפעיל אתה|do it for me)[.! ]*", last.strip(), re.I):
+                previous = msgs[-2] if len(msgs) >= 2 else {}
+                context = previous.get("content", "")
+                if (previous.get("role") == "assistant" and isinstance(context, str)
+                        and re.search(r"claude-hunter-pro|\bhunter\b|הצייד", context, re.I)
+                        and re.search(r"(?:bun|npm) run dev", context[-4000:], re.I)
+                        and re.search(r"(?:localhost|127\.0\.0\.1):3000", context[-4000:])):
+                    last = "/hunter start"
             low = last.strip().lower()
             # one assistant: the gateway itself decides when to look at your files (core/assistant.mjs), so normal
             # models stream through it; the Agent model and /agent stay as the explicit "work on my files" entry
-            if model == "agent" or low.startswith("/agent") or re.match(r"^/(approve|undo)(?:\s|$)", low) or low == "/folders" or low.startswith("/folder "):
+            if model == "agent" or low.startswith("/terminal ") or re.fullmatch(r"(?:/hunter start|(?:start|launch|run) (?:the )?hunter|(?:הפעל|תפעיל|הרץ|תריץ|פתח)(?: לי)? (?:את )?(?:הצייד|hunter))[.! ]*", low) or low.startswith("/agent") or re.match(r"^/(approve|undo)(?:\s|$)", low) or low == "/folders" or low.startswith("/folder "):
                 goal = re.sub(r"^\s*/agent\b\s*", "", last) if low.startswith("/agent") and len(low) > 7 else last
                 try:
                     hist = [{"role": m.get("role"), "content": m.get("content")[:6000]} for m in msgs[:-1]
                             if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)][-8:]
-                    yield await self._agent(client, token, goal, __event_emitter__, hist)
+                    yield await self._agent(client, token, goal, __event_emitter__, hist, __event_call__ if (__user__ or {}).get("role") == "admin" else None, local_only=model == "private")
                 except Exception as e:
                     yield f"✗ Agent: {e}"
                 return

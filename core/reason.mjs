@@ -49,6 +49,7 @@ export async function run(gw, req, o = {}) {
   const status = o.onStatus || (() => {});
   const base = { onDelta: o.onDelta, signal: o.signal, privateData: o.privateData };
   const task = classify(req.messages);
+  const deep = ["code", "reason", "long"].includes(task);
   const trace = [];
   if (!Object.keys(gw.models).length) await gw.refreshModels();  // strategies pick models before the first call
 
@@ -59,23 +60,22 @@ export async function run(gw, req, o = {}) {
   if (!req.tools?.length && mode === "verified") return { ...(await verifiedAnswer(gw, req, tOpt)), mode, route: "several drafts, every claim judged" };
   if (!req.tools?.length && (mode === "auto" || mode === "max" || mode === "checked") && o.truth && (mode === "checked" || triage(req.messages).verify)) {
     // the label stays the mode the person chose (it used to say "checked", which looked like the switch was ignored)
-    return { ...(await checkedAnswer(gw, req, { ...tOpt, quality: mode === "max" })), mode, route: "answered, then fact-checked" };
+    return { ...(await checkedAnswer(gw, req, { ...tOpt, quality: mode === "max" || deep })), mode, route: "answered, then fact-checked" };
   }
   // What each mode really does (measured 2026-11-20 on the phone: Auto and Max gave the same single answer to almost
   // everything, so the mode switch looked broken). Every result says which route it took (`route`).
   const text = lastUserText(req.messages);
-  const deep = ["code", "reason", "long"].includes(task);
   const one = async (route, t, extra = {}) => {
     const r = await gw.chat(req, { ...base, task: t, ...extra });
     return { ...r, mode, route, trace: [{ step: "answer", by: `${r.provider}:${r.model}` }] };
   };
   if (mode === "fast") return one("fastest model", "fast");
-  if (req.tools?.length) return one("direct (tools)", task);
+  if (req.tools?.length) return one("direct (tools)", task, { quality: true });
   if (mode === "auto") {
     if (task === "fast") return one("quick answer", "fast");
     // real work (code, analysis, a long question) gets a second opinion from another model family
     if (deep && (task === "code" ? text.length > 60 : text.length > 200)) return reviewed(gw, req, o, task === "fast" ? "chat" : task, mode, trace, "auto");
-    return one("best model for the task", task);
+    return one("best model for the task", task, { quality: deep });
   }
   if (mode === "max") {
     // strongest model, never the fastest; a greeting needs no review, everything else is drafted, reviewed and fixed
@@ -114,7 +114,7 @@ export async function run(gw, req, o = {}) {
 async function reviewed(gw, req, o, task, mode, trace, why) {
   const status = o.onStatus || (() => {});
   const base = { onDelta: o.onDelta, signal: o.signal, privateData: o.privateData };
-  const quality = mode === "max";
+  const quality = mode === "max" || ["code", "reason", "long"].includes(task);
   status(`Drafting with the strongest ${task} model…`);
   const draft = await gw.chat(req, { task, signal: o.signal, privateData: o.privateData, quality });
   trace.push({ step: "draft", by: `${draft.provider}:${draft.model}` });

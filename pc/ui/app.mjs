@@ -33,10 +33,16 @@ async function home() {
   const connected = provs.filter((p) => p.hasKey), paused = provs.filter((p) => p.disabled && (p.hasKey || p.keyless));
   const svc = sys?.supervisor?.services || [];
   v.append(el("div", { class: "grid" },
-    el("div", { class: "card hero stack" }, el("h3", {}, "Chat"), el("div", { class: "sub" }, "Open WebUI with the MyChat models: Auto (instant answer, facts checked in the background), Fast, Max, Verified, Private."),
-      el("a", { class: "btn primary", href: "http://127.0.0.1:8080/?model=mychat.auto", target: "_blank", rel: "noopener" }, "Open chat")),
+    el("div", { class: "card hero stack" }, el("h3", {}, "Chat"), el("div", { class: "sub" }, "Assistant automatically handles questions and project work. Deep adds review for complex answers. Local uses Ollama only."),
+      el("a", { class: "btn primary", href: "http://127.0.0.1:8080/?model=mychat.auto", target: "_blank", rel: "noopener" }, "Open chat"),
+      el("div",{class:"row"},
+        el("a",{class:"btn",href:"http://127.0.0.1:8080/?model=mychat.max",target:"_blank",rel:"noopener"},"Deep"),
+        el("a",{class:"btn",href:"http://127.0.0.1:8080/?model=mychat.private",target:"_blank",rel:"noopener"},"Local"))),
     el("div", { class: "card stack" }, el("h3", {}, "Agent"), el("div", { class: "sub" }, "Organise, create and edit files and folders. You see every change before it happens, and every change can be undone."),
-      el("a", { class: "btn", href: "#agent" }, "Start a task")),
+      el("div", { class: "row" },
+        el("a", { class: "btn", href: "#agent" }, "Start a task"),
+        el("a", { class: "btn", href: "#terminal" }, "Terminal"),
+        el("a", { class: "btn", href: "#work" }, "Documents and missions"))),
     el("div", { class: "card stack" }, el("h3", {}, "Accounts"),
       el("div", {}, el("b", {}, connected.length), " connected", paused.length ? el("span", { class: "sub" }, ` · ${paused.length} paused for now`) : null),
       el("div", { class: "sub" }, connected.map((p) => p.name).join(" · ") || "Nothing connected yet"),
@@ -61,13 +67,51 @@ async function agent() {
   const out = el("div", { class: "stack" });
   const treeBox = el("details", {}, el("summary", {}, "What is in this folder"), el("pre", { class: "tree" }, "…"));
   async function showTree() { treeBox.querySelector("pre").textContent = (await api("/agent/tree?root=" + agentState.root).catch((e) => ({ tree: e.message }))).tree; }
+  const offline = el("input", {type:"checkbox"});
+  const repairFile = el("input",{type:"text",placeholder:"src/file.ts","aria-label":"Source file"});
+  const anchor = el("input",{type:"text",maxlength:500,"aria-label":"Unique code anchor"});
+  const mustInclude = el("input",{type:"text",maxlength:500,"aria-label":"Required source text"});
+  const mustExclude = el("input",{type:"text",maxlength:500,"aria-label":"Forbidden source text"});
+  const advancedRepair = el("details",{class:"stack"},
+    el("summary",{},"Repair one file with connected providers"),
+    el("div",{class:"sub"},"Enter the source file to send for repair. MyChat tries Groq first and can retry with Google AI Studio if needed. For HTML and files over 24 KiB, enter a unique snippet. MyChat sends only the area around it."),
+    el("label",{},"Relative source file ",repairFile),
+    el("label",{},"Unique code snippet ",anchor),
+    el("label",{},"Required text after repair (optional) ",mustInclude),
+    el("label",{},"Forbidden text after repair (optional) ",mustExclude));
   const planBtn = el("button", { class: "btn primary", onclick: () => busy(planBtn, async () => {
     if (!goal.value.trim()) return toast("Write what should change");
     out.replaceChildren(el("div", { class: "sub" }, "Working: reading, searching and thinking… (nothing changes until you approve)"));
-    try { agentState.plan = await api("/agent/plan", { goal: goal.value, root: agentState.root }); renderPlan(out); }
+    try {
+      const verifiedRepair = !offline.checked && advancedRepair.open && repairFile.value.trim() ?
+        {file:repairFile.value.trim(),anchor:anchor.value,mustInclude:mustInclude.value,mustExclude:mustExclude.value} : undefined;
+      agentState.plan = await api("/agent/plan", { goal:goal.value,root:agentState.root,private:offline.checked,verifiedRepair });
+      renderPlan(out);
+    }
     catch (e) { out.replaceChildren(el("div", { class: "pill bad" }, e.message)); }
   }) }, "Plan the changes");
-  v.append(el("div", { class: "card stack" }, el("label", { class: "sub" }, "Folder"), sel, treeBox, goal,
+  const fileStatus = el("div", { role: "status", dir: "auto" });
+  const upload = el("input", { type: "file", "aria-label": "Attach a project file", onchange: async () => {
+    const file = upload.files[0];
+    if (!file) return;
+    const root = agentState.root;
+    upload.disabled = sel.disabled = true;
+    try {
+      fileStatus.textContent = "Checking " + file.name;
+      const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", await file.arrayBuffer()))].map(x => x.toString(16).padStart(2, "0")).join("");
+      fileStatus.textContent = "Uploading " + file.name;
+      const r = await fetch("/agent/inbox/upload?" + new URLSearchParams({name: file.name, root}), {
+        method: "POST", headers: { Authorization: H.Authorization, "X-Content-SHA256": digest }, body: file
+      });
+      const receipt = await r.json();
+      if (!r.ok || receipt.bytes !== file.size || receipt.sha256 !== digest) throw new Error(receipt.error?.message || "File verification failed.");
+      fileStatus.textContent = receipt.path + " · " + receipt.bytes + " bytes · SHA-256 " + digest;
+      goal.value += (goal.value ? "\n" : "") + receipt.path + " ";
+      await showTree();
+    } catch (error) { fileStatus.textContent = "Upload failed: " + error.message; }
+    finally { upload.value = ""; upload.disabled = sel.disabled = false; }
+  }});
+  v.append(el("div", { class: "card stack" }, el("label", { class: "sub" }, "Folder"), sel, treeBox, upload, fileStatus, el("label", {}, offline, " Use only Ollama on this PC"), goal, advancedRepair,
     el("div", { class: "row" }, el("span", { class: "sub grow" }, "Step 1 plans only. You approve each change in step 2. Deleted items go to a trash folder."), planBtn)), out);
   showTree();
   if (planId) {
@@ -90,7 +134,11 @@ function renderPlan(out) {
   const card = el("div", { class: "card stack" }, el("h3", {}, "Answer"), el("div", { dir: "auto", style: "white-space:pre-wrap" }, p.answer || p.summary || ""),
     p.steps?.length ? el("details", {}, el("summary", {}, `${p.steps.length} tool steps · ${p.calls || "?"} model calls`),
       el("pre", { class: "tree" }, p.steps.map((s) => `🔧 ${s.tool} ${JSON.stringify(s.args || {}).slice(0, 140)}${s.thought ? "\n   💭 " + s.thought.slice(0, 200) : ""}`).join("\n"))) : null,
-    el("div", { class: "sub" }, `By ${p.by}${p.reads?.length ? " · read " + p.reads.slice(0, 8).join(", ") : ""}`));
+    el("div", { class: "sub" }, `By ${p.by || "—"}${p.reads?.length ? " · read " + p.reads.slice(0, 8).join(", ") : ""}`));
+  if (p.repairContext) card.append(el("div",{class:"sub"},
+    `${p.repairContext.bytesSent.toLocaleString()} source bytes shared out of ${p.repairContext.fileBytes.toLocaleString()} · starts on line ${p.repairContext.startLine}`));
+  if (p.repairAttempts?.length) card.append(el("ul",{},p.repairAttempts.map(a=>el("li",{dir:"auto"},a.by+" · "+a.status+(a.reason?" · "+a.reason:"")))));
+  if (p.terminal) card.append(el("a", { class: "btn primary", href: "#terminal?id=" + encodeURIComponent(p.terminal.id) }, "Review command"));
   card.prepend(el("div", { class: "sub", dir: "auto" }, p.root));
   if (p.journal) { out.append(card, changeReceipt(p.journal, p.id)); return; }
   if (!p.ops.length) { out.append(card); return; }
@@ -199,12 +247,91 @@ const GOOGLE_PATH = [
 ];
 // measured on this account 2026-11-21: Mistral and Cohere asked for payment — listed with the paid ones, not hidden
 const PAID = ["mistral", "cohere", "anthropic", "openai", "deepseek", "xai", "moonshot", "zai", "together", "fireworks"];
+function accountPlanCard(github = false) {
+  const label = github ? "GitHub Copilot" : "ChatGPT";
+  const path = github ? "/github-copilot" : "/chatgpt-plan";
+  const prefix = github ? "mychat/github-copilot/" : "mychat/chatgpt-plan/";
+  const state = el("div", {class:"sub"}, "Checking connection…");
+  const controls = el("div", {class:"row"});
+  const result = el("pre", {hidden:true, style:"white-space:pre-wrap; overflow-wrap:anywhere", "aria-live":"polite"});
+  const card = el("div", {class:"card stack"}, el("h3", {}, label + " plan"), state, controls, result);
+  let poll;
+  async function refresh() {
+    if (!card.isConnected) return;
+    const session = await api(path);
+    state.textContent = session.error || (session.sharing ? "Connected" + (session.account ? " · " + session.account : "")
+      : session.status === "connecting" ? "Approve the connection in the browser." + (session.code ? " Code: " + session.code : "") : session.status === "unavailable"
+        ? label + " sign-in is unavailable on this installation." : "Connect an eligible " + label + " account to use its plan.");
+    controls.replaceChildren();
+    if (session.status === "connecting") {
+      controls.append(el("button",{class:"btn",onclick:async()=>{await api(path,{action:"cancel"}); update();}},"Cancel"));
+      if (session.code) controls.append(el("a",{class:"btn",href:"https://github.com/login/device",target:"_blank",rel:"noopener"},"Open GitHub verification"));
+      poll = setTimeout(update, 1500);
+      return;
+    }
+    if (session.status === "unavailable") return;
+    if (session.sharing && session.status === "connected") {
+      const picker = el("select", {"aria-label":label + " model"}, session.models.map(m=>el("option",{value:m.slug},m.displayName)));
+      const prompt = el("textarea", {rows:3,"aria-label":"Message for " + label,placeholder:"Ask " + label + "…"});
+      const run = el("button", {class:"btn primary", disabled:!session.models.length, onclick:async()=> {
+        if (!prompt.value.trim()) return;
+        result.hidden = false; result.textContent = "Waiting for " + picker.value + "…";
+        await busy(run, async()=> {
+          try {
+            const model = picker.value;
+            const r = await fetch("/v1/chat/completions", {method:"POST", headers:H,
+              body:JSON.stringify({model:prefix+model,stream:true,messages:[{role:"user",content:prompt.value.trim()}]})});
+            if (!r.ok || !r.body) throw new Error(label + " connection returned HTTP " + r.status);
+            let buffer = "", text = "", finished = false;
+            for await (const data of r.body.pipeThrough(new TextDecoderStream())) {
+              buffer += data;
+              let newline;
+              while ((newline = buffer.indexOf("\n")) >= 0) {
+                const line = buffer.slice(0,newline).trimEnd();
+                buffer = buffer.slice(newline+1);
+                if (line === "data: [DONE]") { finished = true; continue; }
+                if (!line.startsWith("data: ")) continue;
+                const delta = JSON.parse(line.slice(6)).choices?.[0]?.delta?.content;
+                if (delta) { text += delta; result.textContent = text; }
+              }
+            }
+            if (!finished) throw new Error(label + " response was interrupted.");
+            result.textContent = text + "\n\n" + model;
+          } catch (error) { result.textContent = error.message; }
+        });
+      }}, "Send");
+      if (!github) controls.append(el("button",{class:"btn",onclick:async()=>{try{await api(path,{action:"disconnect"});update();}catch(e){state.textContent=e.message;}}},"Disconnect"));
+      if (session.models.length) controls.append(picker,prompt,run);
+      return;
+    }
+    const connect = el("button",{class:"btn primary",onclick:async()=> {
+      const tab = window.open("about:blank","_blank");
+      if (tab) tab.opener = null;
+      await busy(connect,async()=> {
+        try {
+          const {url} = await api(path,{action:"connect"});
+          if (tab) tab.location.replace(url);
+          else if (!github) window.location.assign(url);
+          update();
+        } catch (e) { tab?.close(); state.textContent=e.message; }
+      });
+    }}, github ? "Sign in with GitHub" : "Sign in with ChatGPT");
+    controls.append(connect);
+  }
+  function update() {
+    clearTimeout(poll);
+    refresh().catch(error => { state.textContent=error.message; });
+  }
+  queueMicrotask(update);
+  return card;
+}
+
 async function accounts() {
   const v = view(); v.replaceChildren(el("h1", {}, "Accounts"));
   if (new URLSearchParams(location.search).get("connected")) toast("✓ OpenRouter connected");
   const [st, cat] = await Promise.all([api("/status"), api("/catalog")]);
   const P = st.providers;
-  v.append(el("div", { class: "grid" }, googleCard(P, cat), pasteCard()));
+  v.append(el("div", { class: "grid" }, accountPlanCard(), accountPlanCard(true), googleCard(P, cat), pasteCard()));
   const card = (id) => {
     const p = P[id]; if (!p) return null;
     const pill = p.disabled && p.hasKey ? el("span", { class: "pill warn" }, p.disabled) : p.hasKey ? el("span", { class: "pill ok" }, `✓ ${p.models} models`) : el("span", { class: "pill" }, "not connected");
@@ -366,7 +493,81 @@ function fmtUpdate(u) {
 }
 
 // ------------------------------------------------------------------------------------------------ router
-const SECTIONS = { home, agent, accounts, models, system };
+async function terminal() {
+  const v = view();
+  v.replaceChildren(el("h1", {}, "Terminal"));
+  const id = new URLSearchParams(location.hash.split("?")[1]).get("id");
+  if (!id) {
+    const folders = await api("/agent/roots");
+    const sel = el("select", { "aria-label": "Working folder" }, folders.roots.map((r,i) => el("option", { value: i, selected: i === folders.chatRoot }, r.path)));
+    const command = el("input", { placeholder: "Windows command", "aria-label": "Windows command" });
+    const button = el("button", { class: "btn primary", onclick: () => busy(button, async () => {
+      try { const t = await api("/system/terminal", { command: command.value, root: Number(sel.value) }); location.hash = "terminal?id=" + t.id; }
+      catch (e) { toast(e.message); }
+    }) }, "Review command");
+    v.append(el("div", { class: "card stack" }, sel, command, button)); return;
+  }
+  const t = await api("/system/terminal?id=" + encodeURIComponent(id));
+  const result = el("pre", { class: "tree" }, t.output || t.state);
+  const button = el("button", { class: "btn primary", disabled: t.state !== "pending", onclick: async () => {
+    button.disabled = true; result.textContent = "Running on this PC…";
+    try { const r = await api("/system/terminal", { id, approve: true }); result.textContent = r.state + "\n" + r.output; }
+    catch (e) { result.textContent = e.message; }
+  } }, "Approve and run");
+  v.append(el("div", { class: "card stack" }, el("p", {}, t.root), el("pre", { class: "tree" }, t.command), button, result));
+}
+async function work() {
+  const v=view();
+  const title=el("input",{"aria-label":"Document title",placeholder:"Document title"});
+  const format=el("select",{"aria-label":"Document format"},Object.entries({docx:"Word",xlsx:"Excel",pptx:"PowerPoint",pdf:"PDF"}).map(([value,label])=>el("option",{value},label)));
+  const content=el("textarea",{rows:7,dir:"auto","aria-label":"Document content",placeholder:"Markdown, plain text or a Markdown table"});
+  const result=el("div",{role:"status"});
+  const create=el("button",{class:"btn primary",onclick:()=>busy(create,async()=>{
+    result.replaceChildren("Generating on this PC…");
+    try {
+      const file=await api("/specialized/document",{title:title.value,format:format.value,content:content.value});
+      const bytes=Uint8Array.from(atob(file.data),c=>c.charCodeAt(0));
+      const url=URL.createObjectURL(new Blob([bytes],{type:file.mediaType}));
+      setTimeout(()=>URL.revokeObjectURL(url),600000);
+      result.replaceChildren(el("a",{class:"btn",download:file.name,href:url},"Download "+file.name)," · Checked locally");
+    } catch(error) { result.textContent=error.message; }
+  })},"Generate");
+  const goal=el("textarea",{rows:3,dir:"auto","aria-label":"Mission goal",placeholder:"Describe the result and how to check it"});
+  const list=el("div",{class:"stack"});
+  const message=el("div",{role:"status"});
+  const details=el("div",{class:"stack",dir:"auto"});
+  let selected;
+  const refresh=async()=>{
+    if(!list.isConnected)return;
+    try {
+      const state=await api("/specialized/missions");
+      list.replaceChildren(...state.missions.map(m=>el("button",{class:"btn",onclick:()=>{selected=m.id;refresh();}},
+        m.goal+" · "+m.status+" · "+m.progress)));
+      if(state.online) message.textContent="Kestrel online mode is on. Switch it off before starting a local mission.";
+      else if(state.pending) message.textContent="Kestrel has actions awaiting approval. Open Kestrel approvals to review them.";
+      else message.textContent="";
+      if(selected){
+        const m=await api("/specialized/missions?id="+encodeURIComponent(selected));
+        details.replaceChildren(el("b",{},m.status+" · "+m.goal),
+          el("ol",{},m.steps.map(s=>el("li",{},s.title+" · "+s.status,s.summary? " · "+s.summary:""))),
+          ["paused","error","interrupted","done_with_blocks"].includes(m.status) && !state.online ?
+            el("button",{class:"btn",onclick:async()=>{try{await api("/specialized/missions",{action:"resume",id:selected});refresh();}
+              catch(error){message.textContent=error.message;}}},"Resume") : null);
+      }
+    } catch(error){message.textContent=error.message;}
+  };
+  const start=el("button",{class:"btn primary",onclick:()=>busy(start,async()=>{
+    try { const response=await api("/specialized/missions",{action:"start",goal:goal.value});selected=response.id;await refresh(); }
+    catch(error){message.textContent=error.message;}
+  })},"Start local mission");
+  v.replaceChildren(el("h1",{},"Documents and missions"),
+    el("div",{class:"card stack"},el("h3",{},"Create document"),title,format,content,create,result),
+    el("div",{class:"card stack"},el("h3",{},"Local missions"),goal,el("div",{class:"row"},start,
+      el("a",{class:"btn",href:"http://127.0.0.1:8765/",target:"_blank",rel:"noopener"},"Kestrel approvals")),message,list,details));
+  await refresh();
+  const timer=setInterval(()=>{if(!list.isConnected) clearInterval(timer);else refresh();},5000);
+}
+const SECTIONS = { home, agent, accounts, models, system, terminal, work };
 async function route() {
   const name = (location.hash || "#home").slice(1).split("?")[0];
   const fn = SECTIONS[name] || home;
@@ -393,6 +594,8 @@ setInterval(async () => {
 document.addEventListener("click", async (e) => {
   const a = e.target.closest?.('a[href^="http://127.0.0.1:8080"]');
   if (!a || e.ctrlKey || e.shiftKey || e.metaKey) return;
+  const model = new URL(a.href).searchParams.get("model");
+  if (model && model !== "mychat.auto") return;
   e.preventDefault();
   try { const r = await api("/system/open-chat", {}); if (r.opened) { toast("Opening the Open WebUI app"); return; } } catch { /* fall back */ }
   window.open(a.href, "_blank", "noopener");

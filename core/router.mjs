@@ -334,7 +334,7 @@ export class Gateway {
         if (pin >= 0) score += (1 - pin * 0.05) * (quality ? 0.15 : 1);
         if (lang === "he" && this.pins.he) {               // measured: some fast models answer Hebrew with gibberish or in Arabic
           const hp = this.pins.he.indexOf(id + ":" + model);
-          if (hp >= 0) score += 1.2 - hp * 0.05;
+          if (hp >= 0) score += (1.2 - hp * 0.05) * (quality ? 0.1 : 1);
           else if ((this.pins.heBad || []).includes(id + ":" + model)) score *= 0.1;
         }
         if (lang === "he" && st.heWrong && !(this.pins.he || []).includes(id + ":" + model)) score *= 0.05;   // caught answering in Arabic
@@ -351,6 +351,15 @@ export class Gateway {
     // Measured 2026-11-20: with one account out of quota, all 8 slots were its models (37 Gemini models listed) and
     // every request failed before reaching the accounts that still worked. At most 3 per account in the list;
     // the rest go to other accounts (unless only one account is asked for).
+    if (quality) {
+      // Retain one strong, previously reachable account ahead of catalog-only candidates.
+      const index = out.findIndex(c => {
+        const p = this.providers[c.provider], prior = priorFor(c.model);
+        return !p.local && !p.keyless && this.stats.peek(c.provider, c.model).ok > 0
+          && (prior[task] ?? prior.chat) >= 0.8 && !/(?:^|[-_/])(lite|mini|nano|tiny|small)(?:$|[-_/])/i.test(c.model);
+      });
+      if (index > 0) out.unshift(out.splice(index, 1)[0]);
+    }
     const perProvider = {}, first = [], rest = [];
     for (const c of out) ((perProvider[c.provider] = (perProvider[c.provider] || 0) + 1) <= 3 ? first : rest).push(c);
     return [...first, ...rest].slice(0, limit);
@@ -540,24 +549,33 @@ export class Gateway {
       const full = await res.text().catch(() => ""), txt = full.slice(0, 300);
       const ra = Number(res.headers.get?.("retry-after")) || 0;
       this.noteLimits(c.provider, res.headers);
-      if ((res.status === 402 || BILLING_RX.test(txt)) && this.providers[c.provider]?.freeModels && !this.providers[c.provider].freeModels.test(c.model)) {
+      const accountRequirement = c.provider === "vercel" && res.status === 403 && full.includes("customer_verification_required")
+        ? "AI Gateway account verification requires a valid payment method"
+        : c.provider === "sambanova" && res.status === 402 && full.includes("PAYMENT_METHOD_REQUIRED")
+          ? "a payment method is required on this account" : "";
+      if (accountRequirement) {
+        this.parked[c.provider] = { until: Date.now() + 3600e3, reason: accountRequirement };
+        this.stats.failure(c.provider, c.model, accountRequirement, 3600e3);
+      } else if ((res.status === 402 || BILLING_RX.test(txt)) && this.providers[c.provider]?.freeModels && !this.providers[c.provider].freeModels.test(c.model)) {
         // no credit, but this account also has free models (Z.ai's GLM Flash): only the paid model is set aside
         this.stats.failure(c.provider, c.model, "paid model, no credit: " + txt, 24 * 3600e3);
       } else if (res.status === 402 || BILLING_RX.test(txt)) {
         // the account itself has no credit: park the whole provider instead of trying its models one by one
         this.parked[c.provider] = { until: Date.now() + 6 * 3600e3, reason: "no credit or balance on this account" };
         this.stats.failure(c.provider, c.model, txt, 6 * 3600e3);
+      } else if (res.status === 429 && /limit:\s*0\b|quotaValue"\s*:\s*"?0(?:"|[,}])|free.?tier.{0,40}not|not available on the free/i.test(full)) {
+        this.stats.failure(c.provider, c.model, "not on this plan: " + txt, 24 * 3600e3);
+      } else if (res.status === 429 && (p.native === "gemini" || /PerDay[A-Za-z]*PerModel|PerModel[A-Za-z]*PerDay/.test(full))) {
+        const daily = /PerDay|per.?day|daily/i.test(full);
+        this.stats.failure(c.provider, c.model, "model quota: " + txt, Math.max(ra * 1000, daily ? 3600e3 : 60000));
       } else if (res.status === 429 && DAILY_RX.test(txt)) {
-        this.parked[c.provider] = { until: nextUtcMidnight(), reason: "free daily limit reached (resets 00:00 UTC)" };
+        const reset = Number(res.headers.get("x-ratelimit-reset"));
+        const until = reset > Date.now() && reset <= Date.now() + 25 * 3600e3 ? reset : nextUtcMidnight();
+        this.parked[c.provider] = { until, reason: "free daily limit reached (resets " + new Date(until).toISOString() + ")" };
         this.stats.failure(c.provider, c.model, txt, 3600e3);
-      } else if (res.status === 429 && /PerDay[A-Za-z]*PerModel|PerModel[A-Za-z]*PerDay/.test(full)) {
-        // Gemini free tier: this model's daily allowance is used up (other models of the account still have theirs)
-        this.stats.failure(c.provider, c.model, "daily quota of this model used up: " + txt, 6 * 3600e3);
-        this.noteQuota(c.provider, c.model);
-      } else if (res.status === 429 && /limit:\s*0\b|free.?tier.{0,40}not|not available on the free/i.test(full)) {
-        this.stats.failure(c.provider, c.model, "not on this plan: " + txt, 24 * 3600e3);   // e.g. Pro models on a free Gemini key
       } else if (res.status === 429) { this.stats.failure(c.provider, c.model, "429 " + txt, Math.max(ra * 1000, 60000)); this.noteQuota(c.provider, c.model); }
-      else if (res.status === 401 || res.status === 403) { this.disabled[c.provider] = `key rejected (${res.status})`; this.stats.failure(c.provider, c.model, txt); }
+      else if (res.status === 403) this.stats.failure(c.provider, c.model, "model access denied", 3600e3);
+      else if (res.status === 401) { this.disabled[c.provider] = `key rejected (${res.status})`; this.stats.failure(c.provider, c.model, txt); }
       else if ((res.status === 400 || res.status === 413) && /context|too long|too many tokens|maximum.{0,20}(length|tokens)|request too large|payload too large/i.test(txt))
         this.stats.failure(c.provider, c.model, "too long: " + txt, 0);   // this request was too big for it; the model is fine
       else if (res.status === 404 || res.status === 400) this.stats.failure(c.provider, c.model, txt, 6 * 3600e3); // model gone / unsupported params

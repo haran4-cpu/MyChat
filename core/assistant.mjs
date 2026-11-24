@@ -9,7 +9,16 @@ import { WORKSPACE_RX } from "./projects.mjs";
 
 export const TOOL_TOKEN = "[[USE_TOOLS]]";
 export const IDENTITY = `You are MyChat, the person's own assistant (phone app and PC). You can work with their MyChat folder (projects, inbox, files, archives) through tools, read and search inside it, study whole projects, check facts and numbers, and propose file changes that they approve.
-Answer in the person's language, directly and specifically, like a senior expert. Say plainly when you are unsure. Never claim you cannot access their files. You are not one company's model: MyChat routes each step to one of several models (Google Gemini, open models such as gpt-oss, Qwen, Llama, DeepSeek, Kimi, GLM, and a local model on the PC) and has answers reviewed by a different family. Never say you were made by Google, OpenAI or anyone else; if asked which model, say this and that the model that answered is shown under the answer.`;
+Answer in the person's language, directly and specifically, like a senior expert. Say plainly when you are unsure. When tools and a workspace are available, inspect relevant files before diagnosing. Cite what you read, say what was verified, and report failures. Never claim to have changed or tested anything without tool evidence. Use the current workspace and prior conversation to resolve short follow-ups. You are not one company's model: MyChat routes each step to one of several models (Google Gemini, open models such as gpt-oss, Qwen, Llama, DeepSeek, Kimi, GLM, and a local model on the PC) and has answers reviewed by a different family. Never say you were made by Google, OpenAI or anyone else; if asked which model, say this and that the model that answered is shown under the answer.`;
+const WORK_FOLLOW_UP = /^(?:כן(?: תעשה)?|בצע|תעשה(?: את זה| אותו)?|תמשיך(?: מאיפה שעצרנו)?|המשך|נסה(?: שוב)?|בחן שוב(?: את השיחה)?|בדוק שוב|מה (?:אתה חושב|עוד)|איך נוכל לשפר(?: אותו| את זה)?|go ahead|do it|continue|try again|what next)[?!. ]*$/iu;
+
+export function workspaceFollowUp(messages) {
+  if (!WORK_FOLLOW_UP.test(lastUserText(messages).trim())) return "";
+  const previous = messages.filter(m=>m.role==="user" && typeof m.content==="string").slice(-5,-1).reverse();
+  const subject = previous.find(m=>!WORK_FOLLOW_UP.test(m.content.trim()));
+  return subject && WORKSPACE_RX.test(subject.content) ? subject.content : "";
+}
+
 const DECIDE = `\nIf answering needs the person's files, folders, projects or an action on them, reply with exactly ${TOOL_TOKEN} and nothing else. Otherwise answer normally.`;
 
 /**
@@ -31,10 +40,11 @@ export async function respond(gw, o) {
   };
   // the screen is a tool too (measured on the PC: "look at my screen" was answered with "please send a screenshot")
   const SCREEN_RX = /\b(my|the) (screen|desktop|display)\b|screenshot|המסך|מסך שלי|צילום מסך|שולחן העבודה/i;
-  if (fs && (o.mode === "agent" || (text.length < 2000 && (WORKSPACE_RX.test(text) || (o.tools?.see && SCREEN_RX.test(text)))))) return agent();
+  if (fs && (o.tools?.terminalRequest?.(text) || o.mode === "agent" || workspaceFollowUp(messages) || (text.length < 2000 && (WORKSPACE_RX.test(text) || (o.tools?.see && SCREEN_RX.test(text)))))) return agent();
   // let the model decide: hold back the first characters until we know whether it asked for tools
   let head = "", decided = !fs;
-  const sys = { role: "system", content: IDENTITY + (fs ? DECIDE : "") };
+  const privacy = o.privateData ? "\nThis conversation uses the local Ollama engine only. You have no web or cloud access here. State that only when relevant." : "";
+  const sys = { role: "system", content: IDENTITY + privacy + (fs ? DECIDE : "") };
   const r = await run(gw, { messages: [sys, ...messages.filter((m) => m.role !== "system")] }, {
     mode: o.mode, signal, truth: o.truth, onStatus, privateData: o.privateData,
     onDelta: (d) => {

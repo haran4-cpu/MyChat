@@ -190,10 +190,16 @@ export function filesView(root, { el, toast, onAgent, onAttach }) {
     const status = el("small", { class: "muted" });
     const pick = el("input", { type: "file", multiple: true, hidden: true, onchange: async (e) => {
       const files = [...e.target.files]; if (!files.length) return;
-      const r = await importFiles(fs, files, { folder: cwd && !cwd.startsWith("Inbox") ? cwd : undefined, onStatus: (s) => (status.textContent = s) });
-      status.textContent = "";
-      toast(`${r.saved.length} file(s) saved` + (r.projects.length ? ` · unpacked into ${r.projects.filter((p) => p.to).map((p) => p.to).join(", ")}` : ""), 5000);
-      draw();
+      try {
+        const { saved, projects } = await importFiles(fs, files, { folder: cwd && !cwd.startsWith("Inbox") ? cwd : undefined, onStatus: (s) => (status.textContent = s) });
+        const failures = projects.filter((p) => p.error);
+        toast(failures.length ? `${saved.length} file(s) saved. Unpacking failed: ${failures[0].error}` : `${saved.length} file(s) saved.`, 5000);
+      } catch (error) {
+        toast("Could not import files: " + error.message, 5000);
+      } finally {
+        status.textContent = "";
+        draw();
+      }
     } });
     const crumbs = el("div", { class: "crumbs" }, el("button", { class: "mini", type: "button", onclick: () => { cwd = ""; draw(); } }, "MyChat"),
       ...cwd.split("/").filter(Boolean).map((part, i, arr) => el("button", { class: "mini", type: "button", onclick: () => { cwd = arr.slice(0, i + 1).join("/"); draw(); } }, part)));
