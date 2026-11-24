@@ -1,6 +1,19 @@
 name: test
 on: [push, pull_request]
 jobs:
+  privacy:
+    # Blocks keys, private data files, personal emails and private project names (names come from the PRIVATE_TERMS
+    # secret, never from this public repo).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Privacy guard
+        env:
+          PRIVATE_TERMS: ${{ secrets.PRIVATE_TERMS }}
+        run: node tools/privacy-guard.mjs
+
   engine:
     runs-on: ubuntu-latest
     steps:

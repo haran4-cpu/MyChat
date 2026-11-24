@@ -14,3 +14,18 @@ app/www/selftest.html
 __pycache__/
 *.pyc
 .pytest_cache/
+# local data that must never enter git (MyChat keeps it in %APPDATA%\MyChat; these catch copies)
+*.sqlite
+*.sqlite3
+*.db
+ledger.json
+installed.json
+supervisor.json
+inbox/
+runs/
+agent/
+backups/
+pending/
+terminal-receipts/
+*keys*bundle*
+*.chat.json
