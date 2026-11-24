@@ -456,9 +456,10 @@ async function system() {
   const out = el("pre", { class: "sub", style: "white-space:pre-wrap" }, sup.lastUpdate ? fmtUpdate(sup.lastUpdate) : "");
   const check = el("button", { class: "btn", onclick: () => busy(check, async () => { out.textContent = fmtUpdate(await api("/system/update?check=1", {})); }) }, "Check for updates");
   const inst = el("button", { class: "btn primary", onclick: () => busy(inst, async () => { out.textContent = "Installing…"; out.textContent = fmtUpdate(await api("/system/update", {})); setTimeout(system, 8000); }) }, "Install update");
+  const keep = el("button", { class: "btn", title: "Install the rest; files edited on this PC are kept, GitHub's copy is saved under pending\\", onclick: () => busy(keep, async () => { out.textContent = "Installing…"; out.textContent = fmtUpdate(await api("/system/update?keep=1", {})); setTimeout(system, 8000); }) }, "Install, keep my edits");
   v.append(el("h2", {}, "Updates"), el("div", { class: "card stack" },
-    el("div", { class: "sub" }, "Installs only versions that passed all tests on GitHub. A backup of every replaced file is kept, and services reload by themselves (Kestrel waits until it is idle)."),
-    el("div", { class: "row" }, el("span", { class: "grow" }), check, inst), out));
+    el("div", { class: "sub" }, "Installs only versions that passed all tests on GitHub. Files edited on this PC are never overwritten without asking. A backup of every replaced file is kept, and services reload by themselves (Kestrel waits until it is idle)."),
+    el("div", { class: "row" }, el("span", { class: "grow" }), check, keep, inst), out));
   const link = await api("/system/phone-link");
   const pairOut = el("div", { class: "stack" });
   const pair = el("button", { class: "btn primary", disabled: !link.enabled, onclick: () => busy(pair, async () => {
@@ -488,8 +489,11 @@ function fmtUpdate(u) {
   if (!u) return "";
   if (u.error) return "✗ " + u.error;
   const c = (u.commit || "").slice(0, 7), n = (u.changed || []).length;
-  if (!n) return `✓ Up to date (${c})`;
-  return (u.installed ? `✓ Installed commit ${c}: ` : `Update available — commit ${c}: `) + `${n} file(s)\n` + u.changed.slice(0, 20).join("\n") + (u.backup ? "\nBackup: " + u.backup : "");
+  const edits = u.localEdits || [], local = edits.length ? `\n\nEdited on this PC (${edits.length}) — ${u.installed ? "kept" : "not overwritten"}:\n` + edits.slice(0, 20).join("\n") : "";
+  if (!n && !edits.length) return `✓ Up to date (${c})`;
+  const head = u.blocked ? `⚠ Not installed — ${u.blocked}. Use "Install, keep my edits" to install the rest.\n` : "";
+  return head + (u.installed ? `✓ Installed commit ${c}: ` : `Update available — commit ${c}: `) + `${n} file(s)\n` + u.changed.slice(0, 20).join("\n") + local
+    + (u.pending ? "\nGitHub's version of your edited files: " + u.pending : "") + (u.backup ? "\nBackup: " + u.backup : "");
 }
 
 // ------------------------------------------------------------------------------------------------ router

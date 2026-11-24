@@ -176,7 +176,18 @@ export function localPathFor(repoPath) {
 }
 const gitBlobSha = (buf) => crypto.createHash("sha1").update(`blob ${buf.length}\0`).update(buf).digest("hex");
 
-export async function update({ fetchImpl = fetch, dryRun = false } = {}) {
+// What was installed is recorded in installed.json. A file that differs from GitHub AND from what was last installed
+// was edited on this PC: it is never overwritten silently. Default: the update stops and lists those files.
+// keepLocal: install everything else, keep the local edits, save GitHub's version under pending/<commit>/ for review.
+// force: overwrite them too (they are still backed up first).
+const MANIFEST = () => path.join(HOME, "installed.json");
+function readManifest() { try { const m = JSON.parse(fs.readFileSync(MANIFEST(), "utf8")); return m && typeof m.files === "object" ? m : { files: {} }; } catch { return { files: {} }; } }
+function localShas(file) {
+  const raw = fs.readFileSync(file);
+  return new Set([gitBlobSha(raw), gitBlobSha(Buffer.from(raw.toString("utf8").replace(/\r\n/g, "\n")))]);
+}
+
+export async function update({ fetchImpl = fetch, dryRun = false, keepLocal = false, force = false } = {}) {
   const gh = async (u) => { const r = await fetchImpl(u, { headers: { "User-Agent": "MyChat-supervisor", Accept: "application/vnd.github+json" } }); if (!r.ok) throw new Error(`GitHub ${r.status} for ${u}`); return r.json(); };
   const head = await gh(`https://api.github.com/repos/${REPO}/commits/main`);
   const sha = head.sha;
@@ -186,31 +197,51 @@ export async function update({ fetchImpl = fetch, dryRun = false } = {}) {
   const bad = runs.filter((c) => c.status !== "completed" || !["success", "skipped", "neutral"].includes(c.conclusion));
   if (bad.length) throw new Error(`not installing ${sha.slice(0, 7)}: CI ${bad.map((c) => c.name + "=" + (c.conclusion || c.status)).join(", ")}`);
   const tree = await gh(`https://api.github.com/repos/${REPO}/git/trees/${sha}?recursive=1`);
-  const changed = [];
+  const manifest = readManifest();
+  const changed = [], localEdits = [], same = [];
   for (const it of tree.tree || []) {
     if (it.type !== "blob") continue;
     const local = localPathFor(it.path);
     if (!local) continue;
-    let same = false;
-    try { same = gitBlobSha(fs.readFileSync(local)) === it.sha || gitBlobSha(Buffer.from(fs.readFileSync(local, "utf8").replace(/\r\n/g, "\n"))) === it.sha; } catch { /* new file */ }
-    if (!same) changed.push({ repo: it.path, local, sha: it.sha });
+    let have = null;
+    try { have = localShas(local); } catch { /* new file */ }
+    if (have?.has(it.sha)) { same.push(it); continue; }
+    const base = manifest.files[it.path];
+    const edited = have && !(base && have.has(base));      // differs from what MyChat last installed (or nothing recorded)
+    (edited ? localEdits : changed).push({ repo: it.path, local, sha: it.sha });
   }
-  if (dryRun || !changed.length) return { commit: sha, changed: changed.map((c) => c.repo), installed: false };
-  const backup = path.join(HOME, "backups", new Date().toISOString().replace(/[:.]/g, "-"));
-  for (const c of changed) {
+  const report = (extra) => ({ commit: sha, changed: changed.map((c) => c.repo), localEdits: localEdits.map((c) => c.repo), ...extra });
+  if (dryRun) return report({ installed: false });
+  if (localEdits.length && !keepLocal && !force) return report({ installed: false, blocked: "files edited on this PC would be overwritten" });
+  const write = force ? [...changed, ...localEdits] : changed;
+  const kept = force ? [] : localEdits;
+  if (!write.length && !kept.length) { saveManifest(manifest, sha, same, []); return report({ installed: false }); }
+  for (const c of [...write, ...kept]) {
     const r = await fetchImpl(`https://raw.githubusercontent.com/${REPO}/${sha}/${c.repo}`);
     if (!r.ok) throw new Error(`download failed for ${c.repo}: ${r.status}`);
     const buf = Buffer.from(await r.arrayBuffer());
     if (gitBlobSha(buf) !== c.sha) throw new Error(`integrity check failed for ${c.repo}`);
     c.buf = buf;
   }
-  for (const c of changed) {          // everything downloaded and verified before the first file is replaced
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backup = path.join(HOME, "backups", stamp);
+  for (const c of write) {          // everything downloaded and verified before the first file is replaced
     if (exists(c.local)) { const b = path.join(backup, path.relative(path.parse(c.local).root, c.local)); fs.mkdirSync(path.dirname(b), { recursive: true }); fs.copyFileSync(c.local, b); }
     fs.mkdirSync(path.dirname(c.local), { recursive: true });
     fs.writeFileSync(c.local, c.buf);
   }
-  log(`update: installed ${sha.slice(0, 7)} (${changed.length} files), backup in ${backup}`);
-  return { commit: sha, changed: changed.map((c) => c.repo), installed: true, backup };
+  const pending = kept.length ? path.join(HOME, "pending", sha.slice(0, 7)) : undefined;
+  for (const c of kept) { const p = path.join(pending, ...c.repo.split("/")); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, c.buf); }
+  saveManifest(manifest, sha, [...same, ...write], kept);
+  log(`update: installed ${sha.slice(0, 7)} (${write.length} files, kept ${kept.length} local edits), backup in ${backup}`);
+  return report({ installed: true, written: write.map((c) => c.repo), kept: kept.map((c) => c.repo), backup: write.length ? backup : undefined, pending });
+}
+function saveManifest(m, commit, installed, kept) {
+  const files = { ...m.files };
+  for (const it of installed) files[it.repo || it.path] = it.sha;
+  for (const k of kept) delete files[k.repo];            // stays "edited here" until the user resolves it
+  fs.mkdirSync(HOME, { recursive: true });
+  fs.writeFileSync(MANIFEST(), JSON.stringify({ commit, at: new Date().toISOString(), files }, null, 1));
 }
 
 // ---------------------------------------------------------------------------- status server (also the single-instance lock)
@@ -227,7 +258,7 @@ export function startServer() {
     const auth = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
     if (!token() || auth !== token()) return send(401, { error: "unauthorized" });
     if (req.method === "POST" && url.pathname === "/update") {
-      try { lastUpdate = { at: Date.now(), ...(await update({ dryRun: url.searchParams.get("check") === "1" })) }; send(200, lastUpdate); setTimeout(loop, 1000); }
+      try { lastUpdate = { at: Date.now(), ...(await update({ dryRun: url.searchParams.get("check") === "1", keepLocal: url.searchParams.get("keep") === "1", force: url.searchParams.get("force") === "1" })) }; send(200, lastUpdate); setTimeout(loop, 1000); }
       catch (e) { lastUpdate = { at: Date.now(), error: e.message }; send(200, lastUpdate); }
       return;
     }
