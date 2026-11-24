@@ -4,7 +4,10 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
-export function createCopilotConnector(home) {
+// tokenSource (optional): async () => a GitHub token with Copilot access (e.g. from the Windows Credential Manager).
+// When it returns a token, the runtime signs in with it (official github.token option); otherwise the device sign-in is used.
+const OK_AUTH = new Set(["user", "token"]);
+export function createCopilotConnector(home, { tokenSource } = {}) {
   const install = path.join(home,"github-copilot-connector");
   const directory = path.join(home,"copilot-plan");
   const workspace = path.join(directory,"empty-workspace");
@@ -17,7 +20,8 @@ export function createCopilotConnector(home) {
   async function withClient(fn) {
     mkdirSync(workspace,{recursive:true});
     const {CopilotClient, RuntimeConnection} = await (sdk ??= import(pathToFileURL(createRequire(path.join(install,"package.json")).resolve("@microsoft/copilot-sdk")).href));
-    const client = new CopilotClient({mode:"empty",runtime:RuntimeConnection.forSpawnedStdio({
+    const token = tokenSource ? await tokenSource().catch(() => null) : null;
+    const client = new CopilotClient({mode:"empty",...(token ? {github:{token}} : {}),runtime:RuntimeConnection.forSpawnedStdio({
       baseDirectory:directory, workingDirectory:workspace, env,
     })});
     try { await client.start(); return await fn(client); }
@@ -31,10 +35,10 @@ export function createCopilotConnector(home) {
       try {
         const value = await withClient(async client => {
           const auth = await client.getAuthStatus();
-          if (!auth.isAuthenticated || auth.authType !== "user") return {status:"disconnected",sharing:false,models:[],error};
+          if (!auth.isAuthenticated || !OK_AUTH.has(auth.authType)) return {status:"disconnected",sharing:false,models:[],error};
           try {
             const list = await client.listModels();
-            return {status:"connected",sharing:true,account:auth.login,models:list
+            return {status:"connected",sharing:true,account:auth.login,via:auth.authType,models:list
               .filter(m=>m.policy?.state!=="disabled" && m.policy?.state!=="unconfigured")
               .map(m=>({slug:m.id,displayName:m.name||m.id}))};
           } catch { return {status:"connected",sharing:true,account:auth.login,models:[],error:"GitHub could not list models for this account. Check Copilot access and organization policy."}; }
@@ -81,7 +85,7 @@ export function createCopilotConnector(home) {
     if (!(await inspect()).models.some(m=>m.slug===model)) throw new Error("Sign in to GitHub Copilot and choose an available model.");
     return withClient(async client=>{
       const auth=await client.getAuthStatus();
-      if(!auth.isAuthenticated || auth.authType!=="user") throw new Error("Sign in to GitHub Copilot again.");
+      if(!auth.isAuthenticated || !OK_AUTH.has(auth.authType)) throw new Error("Sign in to GitHub Copilot again.");
       opt.signal?.throwIfAborted();
       const session=await client.createSession({model,workingDirectory:workspace,
         tools:{availableTools:[]}, permissions:{onRequest:async()=>({kind:"denied-by-rules"})}, events:{streaming:true}});

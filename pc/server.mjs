@@ -90,7 +90,18 @@ const { createPlanConnector } = await import("./chatgpt-plan.mjs");
 const planConnection = createPlanConnector(HOME);
 const PLAN_PREFIX = "mychat/chatgpt-plan/";
 const { createCopilotConnector } = await import("./copilot-plan.mjs");
-const copilotConnection = createCopilotConnector(HOME);
+const { readCredential } = await import("./wincred.mjs");
+// settings.copilotCredential: name of a Windows Credential Manager entry holding a GitHub token with Copilot access.
+// Read in memory only, cached 10 minutes; never logged or returned by any route.
+let copilotTok = null;
+const copilotConnection = createCopilotConnector(HOME, { tokenSource: async () => {
+  const target = settings.copilotCredential;
+  if (!target) return null;
+  if (copilotTok && copilotTok.target === target && Date.now() < copilotTok.until) return copilotTok.value;
+  const value = await readCredential(target);
+  copilotTok = value ? { target, value, until: Date.now() + 600000 } : null;
+  return value;
+} });
 const COPILOT_PREFIX = "mychat/github-copilot/";
 const MODEL_IDS = ["mychat/auto", "mychat/max", "mychat/private"];
 const truthFor = (privateData) => (privateData ? undefined : { search, ledger });
