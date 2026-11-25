@@ -474,3 +474,19 @@ test("AGENTS.md at the workspace root is given to the agent first; the git and g
   const plain = gw2.seen[0].messages.map((m) => m.content).join("\n");
   assert.doesNotMatch(plain, /OWNER'S GUIDE|\bgithub \{"path"/);
 });
+
+test("agent prefers the measured models (plan and work), never for private folders, and asks again when a Hebrew request gets an English answer", async () => {
+  const seen = [];
+  const gw = { async chat(req, opt) { seen.push(opt); const n = seen.length;
+    const c = n === 1 ? "1. look" : n === 2 ? { final: "The repository has three branches and the default is main, which is protected by our gate." } : { final: "במאגר יש שלושה ענפים, וברירת המחדל היא main." };
+    return { content: typeof c === "string" ? c : JSON.stringify(c), provider: "groq", model: "big" }; } };
+  const r = await runAgent(gw, { goal: "תסדר ותבדוק כמה ענפים יש במאגר ומה ברירת המחדל שלו, ותסביר בפירוט את המצב", fs: memoryFs({ "a.txt": "x" }), noChallenge: true,
+    models: { plan: "nvidia:strong-plan", work: ["groq:big", "zai:other"] } });
+  assert.equal(seen[0].prefer, "nvidia:strong-plan");
+  assert.equal(seen[1].prefer, "groq:big");
+  assert.match(r.answer, /שלושה ענפים/);
+  const seen2 = [];
+  const gw2 = { async chat(req, opt) { seen2.push(opt); return { content: JSON.stringify({ final: "ok" }), provider: "local", model: "x" }; } };
+  await runAgent(gw2, { plan: false, goal: "list", fs: memoryFs({ "a.txt": "x" }), noChallenge: true, privateData: true, models: { plan: "groq:big", work: ["groq:big"] } });
+  assert.equal(seen2[0].prefer, undefined);
+});

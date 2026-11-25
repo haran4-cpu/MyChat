@@ -66,7 +66,8 @@ How you work (gather context → act → verify → repeat):
 2. Gather evidence with tools before concluding. Never guess what a file contains: read it. Archives (.zip/.apk) can be listed and read in place with paths like "Inbox/app.zip!/src/main.js".
 3. For anything big (a whole project, many files, a code review) use "study": several models read it in parallel and every finding is checked against the real file.
 4. Verify before answering: re-check numbers with "calc", re-read the exact lines you cite. Cite places as path:line.
-5. Changes are only PROPOSED (as "ops" in your final reply); the person approves them before anything happens.
+5. Write "final" in the language of the REQUEST (Hebrew request → Hebrew answer; code, paths and names stay as they are).
+6. Changes are only PROPOSED (as "ops" in your final reply); the person approves them before anything happens.
 Reply with JSON only, one object per turn:
   {"thought":"short reasoning","tool":"<name>","args":{...}}            — use one tool
   {"thought":"...","calls":[{"tool":"...","args":{...}}, ...]}         — up to 4 independent tools at once
@@ -172,7 +173,10 @@ export function workspaceReader(fs) {
  * host = { search?: Search, fetchText?(url), runJs?(code), privateData?, onStep?(step) }
  * Returns { id, goal, answer, summary, ops, rejected, steps, by, calls, reads, at }.
  */
-export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, terminalRequest, proposeCommand, search, fetchText, runJs, runPage, skills, see, gitRead, githubRead, noChallenge = false, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
+export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, terminalRequest, proposeCommand, search, fetchText, runJs, runPage, skills, see, gitRead, githubRead, noChallenge = false, onStep = () => {}, evaluate, memory, plan: planFirst = true, models = null }) {
+  // models: { plan: "provider:model", work: ["provider:model", ...] } — measured best for this owner's work (agent eval).
+  // Preferred in order; one that fails or sends nothing is skipped and the router's ranking takes over.
+  const preferIn = (list, ex = []) => (privateData || !Array.isArray(list) ? [] : list).find((m) => typeof m === "string" && m.includes(":") && !ex.includes(m));
   const direct = terminalRequest?.(goal);
   if (direct && proposeCommand) {
     const terminal = proposeCommand(direct);
@@ -195,7 +199,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     try {
       onStep({ kind: "status", text: "Planning…" });
       const p = await gw.chat({ temperature: 0.2, messages: [{ role: "system", content: "You plan work for an agent that has file tools (tree, read, search, find, study) over the person's folder. Write 2-5 numbered steps: which projects/files to look at first and how to verify the result. No preamble, no answer to the task itself." },
-        { role: "user", content: `${guide ? "OWNER'S GUIDE FOR AGENTS (AGENTS.md — follow it):\n" + guide + "\n\n" : ""}WORKSPACE MAP:\n${map}\n${mem ? "\nMEMORY FROM EARLIER TASKS:\n" + mem + "\n" : ""}\nTASK:\n${goal}` }] }, { task: "reason", signal, privateData });
+        { role: "user", content: `${guide ? "OWNER'S GUIDE FOR AGENTS (AGENTS.md — follow it):\n" + guide + "\n\n" : ""}WORKSPACE MAP:\n${map}\n${mem ? "\nMEMORY FROM EARLIER TASKS:\n" + mem + "\n" : ""}\nTASK:\n${goal}` }] }, { task: "reason", signal, privateData, quality: true, prefer: privateData ? undefined : models?.plan || preferIn(models?.work) });
       planText = String(p.content || "").trim().slice(0, 1500); planBy = `${p.provider}:${p.model}`;
       if (planText) onStep({ kind: "thought", text: "Plan: " + planText.replace(/\s+/g, " ").slice(0, 300) });
     } catch { /* plan is a help, not a must */ }
@@ -335,7 +339,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   for (let step = 0; step < maxSteps; step++) {
     if (signal?.aborted) throw new Error("stopped");
     compact(msgs);
-    const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData, exclude: skip, quality: true });
+    const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData, exclude: skip, quality: true, prefer: preferIn(models?.work, skip) });
     calls++; by = `${r.provider}:${r.model}`; raw = String(r.content || "").slice(0, 300) || (r.tool_calls?.length ? "(native tool calls) " + JSON.stringify(r.tool_calls).slice(0, 250) : "");
     // Some providers turn the tool list in our prompt into native function calls with an empty text (measured
     // 2026-11-20: a free channel answered every agent task that way, in 1 s). Same meaning: take them as tool calls.
@@ -393,7 +397,11 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
       const fin = String(last.final ?? ""), count = (re) => (fin.match(re) || []).length;
       const foreign = count(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0400-\u04ff\u0600-\u06ff]/g), letters = count(/\p{L}/gu) || 1;
       const goalForeign = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0400-\u04ff\u0600-\u06ff]/.test(goal);
-      if (!langAsked && !goalForeign && foreign / letters > 0.15 && step < maxSteps - 1) {
+      // a Hebrew request answered in English (measured on the PC 2026-11-24: every project answer came back in English)
+      const prose = fin.replace(/```[\s\S]*?```/g, " ").replace(/`[^`]*`/g, " ").replace(/\S*[\\/.]\S*/g, " ");
+      const proseLetters = (prose.match(/\p{L}/gu) || []).length, hebrew = (prose.match(/[\u0590-\u05FF]/g) || []).length;
+      const wrongLang = /[\u0590-\u05FF]/.test(goal) && proseLetters > 40 && hebrew / proseLetters < 0.3;
+      if (!langAsked && ((!goalForeign && foreign / letters > 0.15) || wrongLang) && step < maxSteps - 1) {
         langAsked = true;
         msgs.push({ role: "assistant", content: r.content }, { role: "user", content: `Your answer is in the wrong language. Write the COMPLETE final answer again in the language of the request (${/[\u0590-\u05FF]/.test(goal) ? "Hebrew" : "English"}).` });
         continue;
@@ -494,7 +502,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     // out of steps mid-work: one last call, no tools, to write the answer from everything gathered (never raw protocol)
     msgs.push({ role: "user", content: "No more tool calls. Write your final answer now from what you have read, as plain markdown (not JSON). Cite path:line only for lines you actually read." });
     try {
-      const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData, exclude: skip, quality: true });
+      const r = await gw.chat({ messages: msgs, temperature: 0.2 }, { task: "code", signal, privateData, exclude: skip, quality: true, prefer: preferIn(models?.work, skip) });
       calls++; by = `${r.provider}:${r.model}`; raw = String(r.content).slice(0, 300);
       const j = parseJson(r.content);
       last = { ...(last || {}), final: j?.final ?? (/["'](thought|tool|calls)["']\s*:/.test(r.content) ? "(The model did not produce a readable answer; please try again.)" : r.content) };

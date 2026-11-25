@@ -15,7 +15,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Gateway } from "../core/router.mjs";
 import { run } from "../core/reason.mjs";
-import { PROVIDERS } from "../core/providers.mjs";
+import { PROVIDERS, priorFor } from "../core/providers.mjs";
 import { pkcePair, openRouterAuthUrl, openRouterExchange, detectKeys, validateKey, identifyPlainKey, CONNECT, SEARCH_KEYS, exportKeys, importKeys, transferCode, BUNDLE_PREFIX } from "../core/accounts.mjs";
 import { evaluate } from "../core/exact.mjs";
 import { respond, workspaceFollowUp } from "../core/assistant.mjs";
@@ -208,7 +208,7 @@ async function brainRun(oreq, opts) {
   opts = { ...opts, privateData, truth: privateData ? undefined : opts.truth };
   if (oreq.tools?.length || oreq.response_format || settings.oneBrain === false) return run(engine, oreq, opts);
   const r = await respond(engine, { ...opts, messages: oreq.messages, fs: root ? nodeFs(root.path) : null,
-    memory: root ? agentMemory(root.path) : null, tools: { ...hostTools(), ...(root ? { runPage: pageRunner(root.path), ...terminalHost(root.path), ...await gitHost(root.path) } : {}) }, privateData: opts.privateData || root?.private,
+    memory: root ? agentMemory(root.path) : null, tools: { ...hostTools(), ...(root ? { runPage: pageRunner(root.path), ...terminalHost(root.path), ...await gitHost(root.path) } : {}), models: agentModels() }, privateData: opts.privateData || root?.private,
     onStep: (st) => opts.onStatus?.(st.kind === "tool" ? `🔧 ${st.tool} ${JSON.stringify(st.args || {}).slice(0, 90)}` : String(st.text || "").slice(0, 160)) });
   if (r.ops?.length) {
     agentSave("plan", r.planId, { id: r.planId, goal: lastText(oreq.messages), ops: r.ops, preview: r.preview, root: root.path, rootIndex: Number(settings.chatRoot) || 0, at: Date.now(), answer: r.content });
@@ -434,6 +434,7 @@ async function agentRoute(req, res, url) {
     catch (e) { return send(res, 400, { error: { message: e.message } }); }
   }
   const b = req.method === "POST" ? await body(req, url.pathname === "/agent/inbox" ? 85e6 : 20e6) : {};
+  if (url.pathname === "/agent/eval") return agentEvalRoute(req, res, b);
   if (url.pathname === "/agent/roots") {
     if (req.method === "POST") {
       const roots = (b.roots || []).map((r) => ({ path: path.resolve(String(r.path || r)), private: !!r.private })).filter((r) => fs.existsSync(r.path) && !FORBIDDEN_ROOT(r.path));
@@ -474,7 +475,7 @@ async function agentRoute(req, res, url) {
     const controller = new AbortController();
     res.on("close", () => { if (!res.writableEnded) controller.abort(); });
     const options = { signal: controller.signal, goal: String(b.goal || "").slice(0, 4000), fs: afs, ...terminalHost(root.path), privateData, history: Array.isArray(b.history) ? b.history.slice(-8) : [], memory: agentMemory(root.path),
-      search, skills: SKILLS, see: seeHost(), evaluate: (e) => evaluate(e).toString(12), runPage: pageRunner(root.path), ...await gitHost(root.path),
+      search, skills: SKILLS, see: seeHost(), evaluate: (e) => evaluate(e).toString(12), runPage: pageRunner(root.path), ...await gitHost(root.path), models: agentModels(),
       fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } };
     if (b.verifiedRepair) {
       if (privateData || req.socket.localPort !== server.address()?.port) {
@@ -639,6 +640,45 @@ async function gitHost(rootPath) {
   return out;
 }
 
+// Which models the agent prefers (settings.agentModels = { plan, work: [] }), set from a measured agent eval.
+function agentModels() {
+  const m = settings.agentModels;
+  const ok = (x) => typeof x === "string" && /^[\w.-]+:\S+$/.test(x);
+  if (!m || typeof m !== "object") return null;
+  const work = (Array.isArray(m.work) ? m.work : []).filter(ok).slice(0, 4);
+  return ok(m.plan) || work.length ? { plan: ok(m.plan) ? m.plan : work[0], work } : null;
+}
+
+// Agent eval: the same real tasks over the same folder, one model at a time (see core/agent-eval.mjs).
+// POST {root, casesFile: "path inside root" | cases: [...], models: ["provider:model"], apply?: true}; GET for progress.
+let agentEval = null;
+async function agentEvalRoute(req, res, b) {
+  if (req.method === "GET") return send(res, 200, agentEval ? { ...agentEval, controller: undefined } : (readJson(path.join("agent", "eval-latest.json"), null) || { running: false }));
+  if (req.method !== "POST") return send(res, 405, {});
+  if (b.stop) { agentEval?.controller?.abort(); return send(res, 200, { stopping: !!agentEval }); }
+  if (agentEval?.running) return send(res, 409, { error: { message: "An agent eval is already running." } });
+  const root = rootAt(b.root ?? settings.chatRoot);
+  if (root.private || isPrivateFolder(root.path)) return send(res, 403, { error: { message: "Agent eval sends the folder to cloud models; it does not run on private folders." } });
+  const afs = nodeFs(root.path);
+  let cases = Array.isArray(b.cases) ? b.cases : null;
+  if (!cases && typeof b.casesFile === "string") { try { cases = JSON.parse(await afs.read(b.casesFile)).cases; } catch (e) { return send(res, 400, { error: { message: "cases file: " + e.message } }); } }
+  const models = (Array.isArray(b.models) ? b.models : []).filter((m) => typeof m === "string" && /^[\w.-]+:\S+$/.test(m)).slice(0, 12);
+  if (!Array.isArray(cases) || !cases.length || cases.length > 20 || !models.length) return send(res, 400, { error: { message: "Give 1-20 cases and 1-12 models (provider:model)." } });
+  const { evalAgentModels } = await import("../core/agent-eval.mjs");
+  const host = await gitHost(root.path), controller = new AbortController();
+  agentEval = { running: true, startedAt: Date.now(), root: root.path, models, cases: cases.length, at: null, controller };
+  const run = (goal, m) => agentPlan(gw, { goal: String(goal).slice(0, 4000), fs: afs, ...host, search, skills: SKILLS, evaluate: (e) => evaluate(e).toString(12),
+    memory: null, signal: controller.signal, models: m, privateData: false });
+  evalAgentModels({ cases, models, run, gitRead: host.gitRead, signal: controller.signal, onProgress: (p) => { agentEval.at = p; } })
+    .then((r) => {
+      const out = { running: false, root: root.path, ...r };
+      if (b.apply === true && r.recommend) { settings.agentModels = r.recommend; writeJson("settings.json", settings); out.applied = r.recommend; }
+      writeJson(path.join("agent", "eval-latest.json"), out); agentEval = null;
+    })
+    .catch((e) => { writeJson(path.join("agent", "eval-latest.json"), { running: false, error: e.message, at: new Date().toISOString() }); agentEval = null; });
+  return send(res, 202, { running: true, models: models.length, cases: cases.length });
+}
+
 // What would be lost if the gateway restarted now: requests in flight, sign-ins waiting for the owner, running agent jobs.
 // The supervisor reloads new code only when this is empty (see pc/supervisor.mjs), so a sign-in is never cut off.
 let inFlight = 0;
@@ -648,6 +688,7 @@ function busyReasons() {
   if (planConnection.busy?.()) r.push("ChatGPT sign-in in progress");
   if (copilotConnection.busy?.()) r.push("Copilot sign-in in progress");
   const running = [...jobs.values()].filter((j) => j.status === "running").length;
+  if (agentEval?.running) r.push("agent eval running");
   if (running) r.push(`${running} agent job(s) running`);
   return r;
 }
@@ -759,6 +800,15 @@ const server = http.createServer(async (req, res) => {
         models: b.models !== false, ...(Array.isArray(b.modes) ? { modes: b.modes } : {}),
         onPins: (pins) => { if (b.apply !== false) { settings.pins = pins; writeJson("settings.json", settings); gw.pins = pins; } } });
       return send(res, 200, { running: st.running, total: st.total });
+    }
+    if (req.method === "GET" && url.pathname === "/models") {
+      await gw.refreshModels();
+      const strong = {};
+      for (const [id, list] of Object.entries(gw.models)) {
+        const top = list.map((m) => ({ m, q: Math.max(priorFor(m).code ?? 0, priorFor(m).reason ?? 0) })).filter((x) => x.q >= 0.8).sort((a, b) => b.q - a.q);
+        if (top.length) strong[id] = top.map((x) => { const st = gw.stats.peek(id, x.m); return { model: x.m, prior: x.q, ok: st.ok, fail: st.fail }; });
+      }
+      return send(res, 200, { counts: Object.fromEntries(Object.entries(gw.models).map(([k, v]) => [k, v.length])), strong, agentModels: agentModels() });
     }
     if (req.method === "POST" && url.pathname === "/bench/stop") return send(res, 200, bench ? bench.stop() : { running: false });
     if (url.pathname.startsWith("/specialized/")) {
