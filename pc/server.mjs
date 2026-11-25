@@ -657,7 +657,9 @@ async function agentEvalRoute(req, res, b) {
   if (req.method !== "POST") return send(res, 405, {});
   if (b.stop) { agentEval?.controller?.abort(); return send(res, 200, { stopping: !!agentEval }); }
   if (agentEval?.running) return send(res, 409, { error: { message: "An agent eval is already running." } });
-  const root = rootAt(b.root ?? settings.chatRoot);
+  // same folder rule as /agent/plan: a configured folder by number, or an existing folder by path (not a system folder)
+  const root = typeof b.root === "string" && /[\\/]/.test(b.root) && fs.existsSync(b.root) && !FORBIDDEN_ROOT(b.root)
+    ? { path: path.resolve(b.root), private: false } : rootAt(b.root ?? settings.chatRoot);
   if (root.private || isPrivateFolder(root.path)) return send(res, 403, { error: { message: "Agent eval sends the folder to cloud models; it does not run on private folders." } });
   const afs = nodeFs(root.path);
   let cases = Array.isArray(b.cases) ? b.cases : null;
