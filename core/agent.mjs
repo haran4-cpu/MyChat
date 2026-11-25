@@ -110,6 +110,8 @@ export const TOOL_DOCS = {
   look: ["{\"image\":\"screen\" | \"last_run\" | \"path/to.png\",\"question\":\"...\"}", "a vision model LOOKS at a picture and answers: the person's screen (only when they asked about their screen), the last run_page screenshot, or an image file"],
   skill_search: ["{\"query\":\"what kind of task\"}", "find expert procedures for this kind of task (review, debugging, security, testing, audio…) in a library of ~1,000 open-source skills"],
   skill_load: ["{\"id\":\"from skill_search\"}", "load one skill's full procedure and follow it where it fits"],
+  git: ['{"repo":"repository folder in the workspace","args":["log","--oneline","-20"]}', "READ-ONLY git in a repository of this workspace: log, show, diff, status, branch, tag, blame, ls-files, rev-parse, shortlog, rev-list, cat-file, for-each-ref… Use it for history, who changed what, what differs between commits or branches. It can never change anything."],
+  github: ['{"path":"/repos/OWNER/REPO/commits?per_page=10"}', "READ-ONLY GitHub API (GET) for the configured account: live default branch and commits, branches, pull requests, Actions runs and their conclusions. Use it for 'what changed on GitHub', CI state, open PRs — the PC copy can be behind."],
   run_js: ["{\"code\":\"...\"}", "pure computation in a JavaScript sandbox: NO file access, NO network (use read/search for files); returns console output"],
 };
 
@@ -170,7 +172,7 @@ export function workspaceReader(fs) {
  * host = { search?: Search, fetchText?(url), runJs?(code), privateData?, onStep?(step) }
  * Returns { id, goal, answer, summary, ops, rejected, steps, by, calls, reads, at }.
  */
-export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, terminalRequest, proposeCommand, search, fetchText, runJs, runPage, skills, see, noChallenge = false, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
+export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 16, privateData = false, terminalRequest, proposeCommand, search, fetchText, runJs, runPage, skills, see, gitRead, githubRead, noChallenge = false, onStep = () => {}, evaluate, memory, plan: planFirst = true }) {
   const direct = terminalRequest?.(goal);
   if (direct && proposeCommand) {
     const terminal = proposeCommand(direct);
@@ -179,7 +181,7 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   }
   let terminal;
   const reader = workspaceReader(fs);
-  const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "propose_command" || proposeCommand) && (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate) && (t !== "run_page" || runPage) && (!t.startsWith("skill_") || skills) && (t !== "look" || (see && !privateData)));
+  const avail = Object.keys(TOOL_DOCS).filter((t) => (t !== "propose_command" || proposeCommand) && (t !== "web_search" || (search && !privateData)) && (t !== "fetch" || (fetchText && !privateData)) && (t !== "run_js" || runJs) && (t !== "calc" || evaluate) && (t !== "run_page" || runPage) && (!t.startsWith("skill_") || skills) && (t !== "look" || (see && !privateData)) && (t !== "git" || gitRead) && (t !== "github" || githubRead));
   const sys = SYS.replace("__TOOLS__", avail.map((t) => `  ${t} ${TOOL_DOCS[t][0]} — ${TOOL_DOCS[t][1]}`).join("\n")) + (REVIEW_RX.test(goal) ? REVIEW_GUIDE : "");
   const { workspaceMap } = await import("./projects.mjs");
   const [map, listing] = await Promise.all([workspaceMap(fs).catch(() => ""), tree(fs, { maxEntries: 150, maxDepth: 2 })]);
@@ -320,6 +322,8 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
       return `STUDY RESULT (${r.read} files in ${r.parts} parts; ${r.notes.length} verified notes, ${r.dropped} unproven dropped${r.skipped.length ? `; not read: ${r.skipped.length}` : ""}):\n${r.answer}\n\nVERIFIED NOTES:\n` +
         r.notes.slice(0, 40).map((n) => `[${n.severity}] ${n.path}:${n.line} — ${n.note}`).join("\n");
     }
+    if (name === "git") { onStep({ kind: "status", text: `git ${(args.args || []).join(" ").slice(0, 80)} · ${args.repo || "."}` }); return await gitRead(String(args.repo || "."), args.args); }
+    if (name === "github") { onStep({ kind: "status", text: `GitHub ${String(args.path || "").slice(0, 90)}` }); return await githubRead(String(args.path || "")); }
     if (name === "calc") return String(evaluate(String(args.expression || "")));
     if (name === "web_search") { const r = await search.evidence(String(args.query || "")); return r.slice(0, 6).map((x, i) => `[${i + 1}] ${x.title}\n${x.url}\n${(x.text || "").slice(0, 700)}`).join("\n\n") || "no results"; }
     if (name === "fetch") return await fetchText(String(args.url || ""));

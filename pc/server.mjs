@@ -208,7 +208,7 @@ async function brainRun(oreq, opts) {
   opts = { ...opts, privateData, truth: privateData ? undefined : opts.truth };
   if (oreq.tools?.length || oreq.response_format || settings.oneBrain === false) return run(engine, oreq, opts);
   const r = await respond(engine, { ...opts, messages: oreq.messages, fs: root ? nodeFs(root.path) : null,
-    memory: root ? agentMemory(root.path) : null, tools: { ...hostTools(), ...(root ? { runPage: pageRunner(root.path), ...terminalHost(root.path) } : {}) }, privateData: opts.privateData || root?.private,
+    memory: root ? agentMemory(root.path) : null, tools: { ...hostTools(), ...(root ? { runPage: pageRunner(root.path), ...terminalHost(root.path), ...await gitHost(root.path) } : {}) }, privateData: opts.privateData || root?.private,
     onStep: (st) => opts.onStatus?.(st.kind === "tool" ? `🔧 ${st.tool} ${JSON.stringify(st.args || {}).slice(0, 90)}` : String(st.text || "").slice(0, 160)) });
   if (r.ops?.length) {
     agentSave("plan", r.planId, { id: r.planId, goal: lastText(oreq.messages), ops: r.ops, preview: r.preview, root: root.path, rootIndex: Number(settings.chatRoot) || 0, at: Date.now(), answer: r.content });
@@ -474,7 +474,7 @@ async function agentRoute(req, res, url) {
     const controller = new AbortController();
     res.on("close", () => { if (!res.writableEnded) controller.abort(); });
     const options = { signal: controller.signal, goal: String(b.goal || "").slice(0, 4000), fs: afs, ...terminalHost(root.path), privateData, history: Array.isArray(b.history) ? b.history.slice(-8) : [], memory: agentMemory(root.path),
-      search, skills: SKILLS, see: seeHost(), evaluate: (e) => evaluate(e).toString(12), runPage: pageRunner(root.path),
+      search, skills: SKILLS, see: seeHost(), evaluate: (e) => evaluate(e).toString(12), runPage: pageRunner(root.path), ...await gitHost(root.path),
       fetchText: async (u) => { if (!/^https?:\/\//.test(u)) throw new Error("only http(s) pages"); const r = await fetch(u, { signal: AbortSignal.timeout(20000) }); return htmlToText(await r.text()).slice(0, 20000); } };
     if (b.verifiedRepair) {
       if (privateData || req.socket.localPort !== server.address()?.port) {
@@ -624,6 +624,20 @@ function startPhoneLink() {
   linkServer.listen(LINK_PORT, "0.0.0.0", () => console.log(`phone link on port ${LINK_PORT}`));
 }
 function stopPhoneLink() { linkServer?.close(); linkServer = null; }
+
+// Read-only git for the chosen folder, and read-only GitHub for the account named in settings.githubRead
+// ({ "owner": "...", "credential": "<Windows Credential Manager target>" }); the key is read in memory, never shown.
+const { gitReader, githubReader } = await import("./gitread.mjs");
+let ghTok = null;
+async function gitHost(rootPath) {
+  const out = { gitRead: gitReader(rootPath) };
+  const cfg = settings.githubRead;
+  if (cfg?.owner && cfg?.credential && /^[\w.-]+$/.test(cfg.owner)) {
+    if (!ghTok || Date.now() > ghTok.until) { const v = await readCredential(cfg.credential); ghTok = v ? { v, until: Date.now() + 600000 } : null; }
+    if (ghTok) out.githubRead = githubReader({ owner: cfg.owner, token: ghTok.v });
+  }
+  return out;
+}
 
 // What would be lost if the gateway restarted now: requests in flight, sign-ins waiting for the owner, running agent jobs.
 // The supervisor reloads new code only when this is empty (see pc/supervisor.mjs), so a sign-in is never cut off.
