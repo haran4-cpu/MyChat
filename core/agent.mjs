@@ -186,6 +186,8 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
   const { workspaceMap } = await import("./projects.mjs");
   const [map, listing] = await Promise.all([workspaceMap(fs).catch(() => ""), tree(fs, { maxEntries: 150, maxDepth: 2 })]);
   const mem = memory ? String((await Promise.resolve().then(() => memory.get()).catch(() => "")) || "").slice(-4000) : "";
+  // The owner's guide for agents (AGENTS.md at the workspace root, the common convention) is read first, every time.
+  const guide = String(await Promise.resolve().then(() => fs?.read?.("AGENTS.md")).catch(() => "") || "").slice(0, 8000);
   // team of models: for real work the strongest available reasoning model writes the plan, the worker follows it
   let planText = "", planBy = "";
   // planning costs one call: worth it for real work (reviews, changes, many files), not for a quick look-up
@@ -193,13 +195,13 @@ export async function runAgent(gw, { goal, fs, history = [], signal, maxSteps = 
     try {
       onStep({ kind: "status", text: "Planning…" });
       const p = await gw.chat({ temperature: 0.2, messages: [{ role: "system", content: "You plan work for an agent that has file tools (tree, read, search, find, study) over the person's folder. Write 2-5 numbered steps: which projects/files to look at first and how to verify the result. No preamble, no answer to the task itself." },
-        { role: "user", content: `WORKSPACE MAP:\n${map}\n${mem ? "\nMEMORY FROM EARLIER TASKS:\n" + mem + "\n" : ""}\nTASK:\n${goal}` }] }, { task: "reason", signal, privateData });
+        { role: "user", content: `${guide ? "OWNER'S GUIDE FOR AGENTS (AGENTS.md — follow it):\n" + guide + "\n\n" : ""}WORKSPACE MAP:\n${map}\n${mem ? "\nMEMORY FROM EARLIER TASKS:\n" + mem + "\n" : ""}\nTASK:\n${goal}` }] }, { task: "reason", signal, privateData });
       planText = String(p.content || "").trim().slice(0, 1500); planBy = `${p.provider}:${p.model}`;
       if (planText) onStep({ kind: "thought", text: "Plan: " + planText.replace(/\s+/g, " ").slice(0, 300) });
     } catch { /* plan is a help, not a must */ }
   }
   const msgs = [{ role: "system", content: sys }, ...history.slice(-8),
-    { role: "user", content: `WORKSPACE MAP:\n${map}\n\nTOP LEVELS:\n${listing}\n${mem ? `\nMEMORY FROM EARLIER TASKS (may be outdated; verify before relying on it):\n${mem}\n` : ""}${planText ? `\nPLAN FROM A PLANNING MODEL (follow it unless the files show it is wrong):\n${planText}\n` : ""}\nREQUEST:\n${goal}` }];
+    { role: "user", content: `${guide ? "OWNER'S GUIDE FOR AGENTS (AGENTS.md — follow it; it overrides guesses from listings):\n" + guide + "\n\n" : ""}WORKSPACE MAP:\n${map}\n\nTOP LEVELS:\n${listing}\n${mem ? `\nMEMORY FROM EARLIER TASKS (may be outdated; verify before relying on it):\n${mem}\n` : ""}${planText ? `\nPLAN FROM A PLANNING MODEL (follow it unless the files show it is wrong):\n${planText}\n` : ""}\nREQUEST:\n${goal}` }];
   const done = new Map();
   let repeats = 0, requestedPatch = false;
   const errors = new Map();

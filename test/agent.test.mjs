@@ -461,3 +461,16 @@ test("citation check: web addresses with ports are not file citations", async ()
   assert.deepEqual(r.bad, []);
   assert.equal(r.total, 1);
 });
+
+test("AGENTS.md at the workspace root is given to the agent first; the git and github tools appear only when provided", async () => {
+  const fs = memoryFs({ "AGENTS.md": "Repos live in repos/<name>. Use the github tool for live state.", "repos/app/a.txt": "x" });
+  const gw = fakeGw([{ final: "ok" }]);
+  await runAgent(gw, { plan: false, goal: "what changed on GitHub?", fs, noChallenge: true, gitRead: async () => "", githubRead: async () => "" });
+  const first = gw.seen[0].messages.map((m) => m.content).join("\n");
+  assert.match(first, /OWNER'S GUIDE FOR AGENTS[\s\S]*Repos live in repos\/<name>/);
+  assert.match(first, /\bgit \{"repo"/); assert.match(first, /\bgithub \{"path"/);
+  const gw2 = fakeGw([{ final: "ok" }]);
+  await runAgent(gw2, { plan: false, goal: "hi there, look", fs: memoryFs({ "a.txt": "x" }), noChallenge: true });
+  const plain = gw2.seen[0].messages.map((m) => m.content).join("\n");
+  assert.doesNotMatch(plain, /OWNER'S GUIDE|\bgithub \{"path"/);
+});
