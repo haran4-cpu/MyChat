@@ -114,7 +114,7 @@ export function wrongScript(t) {
 
 /** OpenAI-style request -> Gemini native generateContent body. */
 // Account has no money: park the provider. NOT plain "billing" (Gemini's ordinary quota message says "check your plan and billing").
-const BILLING_RX = /insufficient.{0,12}(balance|credit|funds)|purchase pre-?paid credits|payment required|out of credits|exceeded your monthly included credits/i;
+const BILLING_RX = /insufficient.{0,12}(balance|credit|funds)|purchase pre-?paid credits|payment required|out of credits|exceeded your monthly included credits|(allowance|usage limit).{0,24}(exhausted|exceeded|used up|reached)/i;
 // A free daily allowance is used up: park until it resets (OpenRouter free models reset at 00:00 UTC).
 const DAILY_RX = /free-models-per-day|per.?day.{0,30}(limit|exceeded)|daily (limit|quota)/i;
 /** "2m59.56s", "7.66s", "120ms", "30" (seconds) or an epoch -> milliseconds from now. */
@@ -313,6 +313,8 @@ export class Gateway {
         // Max: a strong model this account has not proven yet still gets a chance (measured on the PC: Max drafted with
         // gemini-flash-lite because it was the only Gemini model that had answered before)
         const strongUntried = quality && q >= 0.8 && !st.fail;
+        // a provider with a small allowance (Puter) is kept for Max and the agent, never spent on everyday chat
+        if (p.reserve && !quality && !pinned) continue;
         if (pool && !pool.has(model) && !pinned && !strongUntried && !(this.explore && this.explore.provider === id && this.explore.model === model)) continue;
         if (quality && /(\b|[-_])(lite|mini|nano|tiny|small|8b|7b|3b|1b)(\b|[-_])/i.test(model)) q *= 0.6;
         if (needVision && !(prior.vision > 0)) continue;

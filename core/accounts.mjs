@@ -60,6 +60,8 @@ export const KEY_SHAPES = [
 ];
 export const SEARCH_KEYS = new Set(["tavily", "jina", "brave", "serper", "google", "exa"]);
 
+const b64pad = (t) => t + "===".slice((t.length + 3) % 4);
+
 /** Find every recognisable key in a pasted text (a key page copy, a note, several keys at once). */
 export function detectKeys(text) {
   const out = [];
@@ -67,6 +69,17 @@ export function detectKeys(text) {
   if (/^[a-f0-9]{40}$/.test(whole)) return [{ provider: "serper", key: whole }];                 // Serper: 40 hex
   // a UUID is a SambaNova key or an Exa key (measured: a SambaNova key was taken for Exa and "not recognised")
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(whole)) return [{ provider: "sambanova", key: whole, alt: "exa" }];
+  // Puter auth token: a JWT. Only "puter: <token>" or a JWT that carries Puter's own claims is taken as one, so
+  // a token of another service pasted by mistake is never sent to Puter.
+  const tagged = /^puter\s*[:=]?\s*(eyJ[\w-]+\.[\w-]+\.[\w-]+)$/i.exec(whole);
+  if (tagged) return [{ provider: "puter", key: tagged[1] }];
+  for (const m of whole.matchAll(/\beyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}\b/g)) {
+    try {
+      const claims = JSON.parse(decodeURIComponent(escape(atob(b64pad(m[0].split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))))));
+      if (claims && typeof claims === "object" && ("user_uid" in claims || "app_uid" in claims || /puter/i.test(String(claims.iss || claims.aud || ""))))
+        out.push({ provider: "puter", key: m[0] });
+    } catch { /* not a JWT */ }
+  }
   for (const [provider, rx] of KEY_SHAPES) {
     const g = new RegExp(rx.source, "g");
     for (const m of String(text || "").matchAll(g)) if (!out.some((o) => o.key === m[0])) out.push({ provider, key: m[0] });
@@ -88,6 +101,13 @@ export async function validateKey(provider, key, providers, fetchImpl = fetch) {
   try {
     const r = await fetchImpl(base + "/models" + (p.native === "gemini" ? "?pageSize=1000" : ""), { headers: hdr(key) });
     if (r.status === 401 || r.status === 403) return { ok: false, error: "key rejected" };
+    if (!r.ok && p.probeModel) {   // no model list here (Puter): one tiny request with a cheap model proves the key
+      const c = await fetchImpl(base + "/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", ...hdr(key) },
+        body: JSON.stringify({ model: p.probeModel, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }) });
+      const txt = c.ok ? "" : await c.text().catch(() => "");
+      if (c.status === 401 || c.status === 403 || (!c.ok && AUTH_ERR.test(txt))) return { ok: false, error: "key rejected" };
+      return c.ok || c.status === 429 || c.status === 402 ? { ok: true, models: (p.models || []).length } : { ok: false, error: "HTTP " + c.status };
+    }
     if (!r.ok) return { ok: false, error: "HTTP " + r.status };
     const j = await r.json();
     const models = (j.data || j.models || []).map((m) => (m.id || m.name || "").replace(/^models\//, "")).filter(Boolean);
@@ -119,7 +139,7 @@ export async function identifyPlainKey(key, providers, candidates = PLAIN_KEY_PR
 /** How each provider is connected, for the Accounts screen. */
 export const CONNECT = {
   openrouter: { how: "one-tap", label: "Connect with OpenRouter", note: "Sign in with Google · Claude, GPT, Gemini, GLM, Kimi, DeepSeek in one account" },
-  puter: { how: "one-tap-web", label: "Connect Puter", note: "App only (browser SDK) · usage billed to your Puter account" },
+  puter: { how: "guided", note: "Free AI allowance on your Puter account · GLM-5.3, Kimi K3, Gemini 3.1 Pro, DeepSeek V4, Claude · dashboard → Create token → paste it here" },
   gemini: { how: "guided", note: "Google account · free tier" },
   nvidia: { how: "guided", note: "Free for prototyping (phone check once): DeepSeek, Kimi, Qwen3, GLM, MiniMax, Nemotron · ~40 requests/min" },
   groq: { how: "guided", note: "Google account · very fast" },

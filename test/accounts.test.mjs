@@ -108,3 +108,23 @@ test("keys measured on the PC: a SambaNova UUID is tried as SambaNova first, a V
   assert.equal(detectKeys("vck_" + "A1b2C3d4".repeat(5))[0].provider, "vercel");
   assert.ok(PLAIN_KEY_PROVIDERS.includes("nebius"));
 });
+
+test("Puter: its token is recognised only when tagged or carrying Puter claims, and checked with one tiny request", async () => {
+  const enc = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+  const puterJwt = "eyJhbGciOiJIUzI1NiJ9." + enc({ type: "session", user_uid: "u-1", version: "0.0.0" }) + ".c2lnbmF0dXJlc2ln";
+  const otherJwt = "eyJhbGciOiJIUzI1NiJ9." + enc({ id: "openwebui-user", exp: 1 }) + ".c2lnbmF0dXJlc2ln";
+  assert.deepEqual(detectKeys(puterJwt).map((k) => k.provider), ["puter"]);
+  assert.deepEqual(detectKeys(otherJwt), []);                       // another service's token is never sent to Puter
+  assert.deepEqual(detectKeys("puter: " + otherJwt).map((k) => k.provider), ["puter"]);
+  const provs = { puter: { baseUrl: "https://p/v1", probeModel: "nano", models: ["a", "b"] } };
+  const calls = [];
+  const fake = async (url, opt = {}) => {
+    calls.push(url);
+    if (url.endsWith("/models")) return { ok: false, status: 404, json: async () => ({}), text: async () => "" };
+    const good = (opt.headers || {}).Authorization === "Bearer good";
+    return { ok: good, status: good ? 200 : 401, json: async () => ({}), text: async () => (good ? "" : "invalid token") };
+  };
+  assert.deepEqual(await validateKey("puter", "good", provs, fake), { ok: true, models: 2 });
+  assert.equal((await validateKey("puter", "bad", provs, fake)).ok, false);
+  assert.ok(calls.some((u) => u.endsWith("/chat/completions")));
+});

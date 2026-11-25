@@ -167,6 +167,20 @@ export const PROVIDERS = {
     free: "Pay per use (small starter credit)",
     strengths: ["chat", "code", "fast"],
   },
+  // Puter's "user pays" model: each Puter account has a free AI allowance (size not published) that covers frontier
+  // models (GLM-5.3, Kimi K3, Gemini 3.1 Pro, DeepSeek V4, Claude). Token: puter.com/dashboard -> Create token.
+  puter: {
+    name: "Puter (your account's free AI allowance)",
+    baseUrl: "https://api.puter.com/puterai/openai/v1",
+    keyUrl: "https://puter.com/dashboard",
+    signIn: "Puter account (dashboard → Create token)",
+    free: "Free AI allowance included with every Puter account (size not published by Puter)",
+    reserve: true,          // a small allowance: used for Max and for the project agent, not for everyday chat
+    probeModel: "gpt-5.4-nano",
+    models: ["z-ai/glm-5.3", "moonshotai/kimi-k3", "google/gemini-3.1-pro-preview", "deepseek/deepseek-v4-pro",
+      "deepseek/deepseek-v4.1-flash", "claude-sonnet-5-5", "gpt-5.4-nano"],
+    strengths: ["code", "reason", "long"],
+  },
   ollamacloud: {
     name: "Ollama Cloud",
     baseUrl: "https://ollama.com/v1",

@@ -491,3 +491,12 @@ test("Max: a benchmark pin on a lite model does not outrank a stronger proven mo
   assert.equal(g.candidates("code", { quality: true })[0].model, "moonshotai/kimi-k2-instruct");
   w.srv.close();
 });
+
+test("a reserve provider (small free allowance) is used for Max and when preferred, never for everyday chat", () => {
+  const g = new Gateway({ keys: { res: "k", open: "k" }, allowKeyless: false, extraProviders: {
+    res: { name: "res", baseUrl: "http://r", reserve: true }, open: { name: "open", baseUrl: "http://o" } } });
+  for (const id of Object.keys(g.providers)) if (!["res", "open"].includes(id)) delete g.providers[id];
+  g.models = { res: ["z-ai/glm-5.3"], open: ["openai/gpt-oss-120b"] };
+  assert.ok(!g.candidates("code").some((c) => c.provider === "res"));
+  assert.ok(g.candidates("code", { quality: true }).some((c) => c.provider === "res"));
+});
